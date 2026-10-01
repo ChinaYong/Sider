@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>ChatGPT · Sider</title>
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="panel.js"></script>
+</head>
+<body>
+  <header class="utility-bar">
+    <span id="connection-status" role="status"><i></i><span>正在打开 ChatGPT</span></span>
+    <div><button id="reload-chatgpt" title="重新加载 ChatGPT" aria-label="重新加载 ChatGPT">↻</button><button id="open-chatgpt" title="在标签页登录或打开 ChatGPT" aria-label="在标签页打开 ChatGPT">↗</button><button id="diagnostics-toggle" title="连接信息" aria-label="连接信息">⋯</button></div>
+  </header>
+  <main>
+    <iframe id="chatgpt-frame" title="原版 ChatGPT" allow="microphone; clipboard-write" referrerpolicy="origin" hidden></iframe>
+    <section id="loading-screen" class="loading-screen" aria-live="polite">
+      <span id="loading-symbol" class="spinner" aria-hidden="true"></span>
+      <h1 id="loading-title">正在打开 ChatGPT</h1>
+      <p id="loading-detail">正在准备侧栏连接…</p>
+      <div id="recovery-actions" hidden><button id="retry-embed" class="primary">重新连接</button><button id="login-chatgpt">在标签页登录</button></div>
+    </section>
+  </main>
+  <dialog id="diagnostics-dialog">
+    <div class="dialog-title"><strong>连接信息</strong><button id="close-diagnostics" aria-label="关闭连接信息">×</button></div>
+    <p>网页主体由 chatgpt.com 提供。当前标签页的划词和引用会显示在原版输入框旁，发送时按设置中的格式加入问题。</p>
+    <pre id="diagnostics-text"></pre>
+    <p>无法登录时，先在同一浏览器的 ChatGPT 标签页完成登录，再刷新侧栏。</p>
+    <button id="copy-diagnostics">复制连接信息</button>
+  </dialog>
+  <dialog id="site-dialog">
+    <div class="dialog-title"><strong id="site-dialog-title">网页划词引用</strong><button id="close-site" aria-label="关闭网站授权">×</button></div>
+    <p id="site-description"></p>
+    <button id="grant-site">启用此网站</button>
+  </dialog>
+  <div id="toast" role="status" hidden></div>
+</body>
+</html>

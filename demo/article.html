@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>浏览器本地正文提取：设计笔记 · Sider 示例文章</title>
+    <style>
+      :root { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif; color: #1d3540; background: #f7f6f2; }
+      * { box-sizing: border-box; }
+      body { margin: 0; line-height: 1.85; }
+      header, main, footer { width: min(100% - 48px, 780px); margin: auto; }
+      header { padding: 34px 0 26px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #dce3df; }
+      .brand { font-size: 19px; font-weight: 750; letter-spacing: -.4px; }
+      a { color: #127d69; text-underline-offset: 4px; }
+      main { padding: 48px 0 72px; }
+      .eyebrow { font-size: 12px; color: #748a89; letter-spacing: 2px; }
+      h1 { font-size: clamp(28px, 5vw, 42px); line-height: 1.3; letter-spacing: -1px; margin: 14px 0 20px; }
+      h2 { margin: 38px 0 12px; font-size: 21px; }
+      p { margin: 0 0 18px; }
+      .intro { color: #5a7075; font-size: 18px; }
+      .metadata { color: #7f8e8c; font-size: 13px; margin-bottom: 36px; }
+      .note { padding: 18px 22px; border: 1px solid #cce1d9; border-radius: 12px; background: #edf5ef; font-size: 14px; color: #466a61; }
+      mark { background: #e7eed2; color: inherit; padding: 2px 0; }
+      ul { padding-left: 24px; }
+      li { margin-bottom: 8px; }
+      code { background: #e9ece6; border-radius: 4px; padding: 2px 5px; font-size: .9em; }
+      footer { color: #879690; font-size: 12px; border-top: 1px solid #dce3df; padding: 22px 0 35px; }
+    </style>
+  </head>
+  <body>
+    <header><span class="brand">Sider / Field notes</span><a href="/">打开演示侧栏</a></header>
+    <main>
+      <div class="eyebrow">示例资料 · 浏览器扩展设计</div>
+      <article data-demo-article>
+        <h1>浏览器本地正文提取：设计笔记</h1>
+        <p class="intro">把网页带进对话，关键在于清楚说明引用了什么、来自哪里，以及有哪些内容没有被读取。</p>
+        <p class="metadata">Sider 示例文章 · 约 4 分钟阅读 · 2026 年 9 月</p>
+
+        <h2>1. 先确定需要引用的范围</h2>
+        <p>用户可能只想解释一句话，也可能需要分析整篇文章。划词、链接和正文应该是三个独立的入口。只发送 URL 时，不能假定聊天网站一定能够访问链接；需要依赖页面内容回答的问题，应同时附上已取得的正文。</p>
+        <p><mark data-demo-selection>正文提取应优先保留文章结构，并为每段内容附上可回到原页的来源信息。</mark> 文章标题、分节标题、段落和列表都能帮助模型理解上下文。导航菜单、重复推荐和广告通常不属于正文。</p>
+
+        <h2>2. 在浏览器内处理内容</h2>
+        <p>浏览器扩展可以在用户授权后读取当前页面的 DOM，在本地判断主文章区域，再将可见且已经加载的文字整理成引用快照。页面内容先经过预览，由用户决定是否填入聊天输入框。</p>
+        <ul>
+          <li>优先寻找明确的文章区域，例如 article 或 main。</li>
+          <li>保留段落边界，移除隐藏文本、脚本、表单输入和重复导航。</li>
+          <li>记录页面标题、URL、采集时间与提取方式。</li>
+          <li>没有可靠正文时，说明提取质量，并允许改用划词或手动编辑。</li>
+        </ul>
+
+        <h2>3. 将引用快照绑定到变量</h2>
+        <p>变量只是扩展中的模板语法。例如，“分析 {{url}}”会在填入之前替换为真实地址；“根据 {{content}} 列出关键结论”会展开为引用快照的正文。聊天网站最终收到的是普通文本。</p>
+        <p>用户点击添加引用时，内容应被冻结。切换浏览器标签页不会改变已有资料。多条引用需要稳定的别名，例如 r1 和 r2，删除其中一条不应让其它引用的名称发生变化。</p>
+
+        <h2>4. 明确长页面与动态内容的边界</h2>
+        <p>无限滚动、登录后展开、嵌套 iframe 和复杂在线文档都会影响正文取得范围。一次抓取只代表当时能够读取的内容，不代表网站上的全部资料。扩展应提示“仅当前加载内容”，避免宣称已经读完完整网页。</p>
+        <p>提示词超过预算时，应显示实际长度和超出量，让用户选择章节、删减引用或提高预算。静默截断可能恰好删除关键结论，因此预算不应该成为偷偷裁剪正文的理由。</p>
+
+        <h2>5. 将来源保留在答案旁边</h2>
+        <p>每条引用都应保留一个回到来源的入口。对划词引用，可以使用原文与前后文辅助重新定位；如果页面发生变化，定位失败也应明确提示。来源卡片比难以辨认的一大段粘贴文本更容易检查和复用。</p>
+        <p>模板的任务指令与网页资料需要清楚分隔。网页中出现的命令、角色说明或要求忽略其它规则的文字，都应被当作待分析的资料。</p>
+      </article>
+      <aside class="note">这是本地演示资料。演示侧栏的划词入口使用上方高亮句子，正文入口读取本篇文章。真实扩展会读取你正在浏览的页面；演示模式不会填入真实 ChatGPT。</aside>
+    </main>
+    <footer>Sider 原型资料 · 内容在本地生成，用于验证引用与模板体验。</footer>
+  </body>
+</html>

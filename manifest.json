@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Sider · 网页引用与提示词",
+  "version": "0.4.0",
+  "description": "每个标签页独立使用原版 ChatGPT 侧栏，发送前自动附加当前划词、链接与正文，引用格式可自定义。",
+  "minimum_chrome_version": "145",
+  "permissions": ["sidePanel", "storage", "activeTab", "scripting", "contextMenus", "declarativeNetRequestWithHostAccess"],
+  "host_permissions": ["https://chatgpt.com/*"],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "background": {"service_worker": "background.js", "type": "module"},
+  "action": {"default_title": "打开 Sider"},
+  "side_panel": {"default_path": "panel.html"},
+  "content_scripts": [{
+    "matches": ["https://chatgpt.com/*"],
+    "js": ["chatgpt-content.js"],
+    "run_at": "document_idle",
+    "all_frames": true
+  }],
+  "commands": {
+    "open-side-panel": {"suggested_key": {"default": "Ctrl+Shift+Y"}, "description": "打开 Sider 侧栏"},
+    "capture-selection": {"suggested_key": {"default": "Alt+Shift+Q"}, "description": "引用当前网页划词"}
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; frame-src https://chatgpt.com; base-uri 'none';"
+  }
+}

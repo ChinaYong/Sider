@@ -1,0 +1,22 @@
+{
+  "name": "sider-context",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "description": "A small browser context and prompt layer for the original ChatGPT website.",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/*.test.js",
+    "dev": "node scripts/serve.mjs",
+    "check": "npm run test && npm run build"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "turndown": "^7.2.0",
+    "turndown-plugin-gfm": "^1.0.2"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "jsdom": "^26.0.0"
+  }
+}
