@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Sider · 网页引用与提示词",
-  "version": "0.4.0",
+  "version": "0.4.3",
   "description": "每个标签页独立使用原版 ChatGPT 侧栏，发送前自动附加当前划词、链接与正文，引用格式可自定义。",
   "minimum_chrome_version": "145",
   "permissions": ["sidePanel", "storage", "activeTab", "scripting", "contextMenus", "declarativeNetRequestWithHostAccess"],

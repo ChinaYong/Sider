@@ -12,6 +12,7 @@ let disposed = false;
 let toastTimer;
 let siteSource;
 let sitePurpose;
+let hasConnected = false;
 const diagnostics = { version: globalThis.chrome?.runtime?.getManifest?.().version || '0.4.0', sourceTabId, browser: navigator.userAgent, stage: '启动', rule: false, connected: false, enhancementReady: false };
 
 function showToast(text) {
@@ -27,9 +28,10 @@ async function request(message) {
   return result;
 }
 
-function status(text, kind = '') {
+function status(text, kind = '', detail = text) {
   $('#connection-status > span').textContent = text;
   $('#connection-status').className = kind;
+  $('#connection-status').title = detail;
 }
 
 function renderDiagnostics() {
@@ -38,6 +40,10 @@ function renderDiagnostics() {
 
 function failed(error) {
   clearTimeout(timer);
+  if (hasConnected) {
+    enhancementUnavailable(`网页引用连接暂时中断：${error}`);
+    return;
+  }
   diagnostics.stage = '连接失败'; diagnostics.error = error;
   status('ChatGPT 连接失败', 'failed');
   $('#loading-title').textContent = 'ChatGPT 没有完成加载';
@@ -45,6 +51,14 @@ function failed(error) {
   $('#loading-symbol').hidden = true;
   $('#recovery-actions').hidden = false;
   $('#loading-screen').hidden = false;
+  renderDiagnostics();
+}
+
+function enhancementUnavailable(detail) {
+  diagnostics.stage = 'ChatGPT 已连接，网页引用尚未就绪';
+  diagnostics.enhancementReady = false;
+  diagnostics.warning = `${detail} 可继续使用 ChatGPT；需要网页引用时，请点击右上角 ↻ 重新连接。`;
+  status('ChatGPT · 网页引用未就绪', 'warning', diagnostics.warning);
   renderDiagnostics();
 }
 
@@ -82,18 +96,33 @@ async function poll(run, startedAt) {
     diagnostics.connected = Boolean(result.connected);
     diagnostics.enhancementReady = Boolean(result.enhancementReady);
     if (result.connected) {
+      hasConnected = true;
+      delete diagnostics.warning;
       $('#loading-screen').hidden = true;
       diagnostics.stage = result.enhancementReady ? 'ChatGPT 与增强层就绪' : 'ChatGPT 已连接';
-      status(result.enhancementReady ? 'ChatGPT · 网页引用已就绪' : 'ChatGPT', 'connected');
+      status(result.enhancementReady ? 'ChatGPT · 网页引用已就绪' : 'ChatGPT · 正在准备网页引用', 'connected');
     }
-    renderDiagnostics();
-    if (result.enhancementReady) return;
-    if (Date.now() - startedAt > 35000) {
-      if (!result.connected) failed('35 秒内没有收到 ChatGPT 网页的连接回执。请检查网络、ChatGPT 登录状态及扩展的 chatgpt.com 访问权限。可在右上角“⋯”复制连接信息。');
+    if (result.enhancementReady) {
+      delete diagnostics.warning;
+      renderDiagnostics();
       return;
     }
-    timer = setTimeout(() => poll(run, startedAt), 700);
-  } catch (error) { if (run === generation) failed(error.message); }
+    const elapsed = Date.now() - startedAt;
+    if (elapsed > 35000) {
+      if (!hasConnected) {
+        failed('35 秒内没有收到 ChatGPT 网页的连接回执。请检查网络、ChatGPT 登录状态及扩展的 chatgpt.com 访问权限。可在右上角“⋯”复制连接信息。');
+        return;
+      }
+      enhancementUnavailable('网页引用没有完成加载。');
+    } else renderDiagnostics();
+    // Give a late enhancement layer time to recover, with fewer background checks.
+    if (elapsed < 120000) timer = setTimeout(() => poll(run, startedAt), elapsed > 35000 ? 5000 : 700);
+  } catch (error) {
+    if (run !== generation) return;
+    if (!hasConnected) { failed(error.message); return; }
+    enhancementUnavailable(`网页引用连接暂时中断：${error.message}`);
+    if (Date.now() - startedAt < 120000) timer = setTimeout(() => poll(run, startedAt), 5000);
+  }
 }
 
 async function start() {
@@ -107,6 +136,8 @@ async function start() {
   const run = ++generation;
   clearTimeout(timer);
   delete diagnostics.error;
+  delete diagnostics.warning;
+  hasConnected = false;
   diagnostics.connected = false; diagnostics.enhancementReady = false;
   diagnostics.stage = '安装内嵌兼容规则';
   status('正在打开 ChatGPT');
@@ -174,6 +205,8 @@ window.addEventListener('message', async event => {
       : '浏览器尚未允许读取当前网站。点击下方按钮后，请在浏览器的扩展权限提示中允许访问。也可以点击浏览器工具栏的 Sider 图标，仅授权当前标签页。';
     $('#site-dialog-title').textContent = sitePurpose === 'selection' ? '网页划词引用' : '允许引用当前网站';
     $('#grant-site').textContent = siteSource.url ? (sitePurpose === 'selection' ? '启用此网站' : '允许此网站') : '请求网站访问';
+    $('#site-status').hidden = true;
+    $('#site-status').textContent = '';
     $('#site-dialog').showModal();
   } catch (error) { showToast(error.message); }
 });
@@ -183,6 +216,8 @@ $('#grant-site').addEventListener('click', async () => {
   if (!source) return;
   const purpose = sitePurpose;
   const button = $('#grant-site'); button.disabled = true;
+  $('#site-status').hidden = true;
+  $('#site-status').textContent = '';
   try {
     if (!source.url) {
       const result = await request({ type: 'SIDER_SOURCE_ACCESS_REQUEST', tabId: sourceTabId });
@@ -197,7 +232,12 @@ $('#grant-site').addEventListener('click', async () => {
     if (purpose === 'selection') await request({ type: 'SIDER_ENABLE_SITE', tabId: source.tabId });
     $('#site-dialog').close();
     showToast(purpose === 'selection' ? `已在 ${new URL(source.url).hostname} 启用划词引用。` : '已允许引用此网站，划词会自动显示。');
-  } catch (error) { showToast(error.message); }
+  } catch (error) {
+    if ($('#site-dialog').open) {
+      $('#site-status').textContent = error.message;
+      $('#site-status').hidden = false;
+    } else showToast(error.message);
+  }
   finally { button.disabled = false; }
 });
 window.addEventListener('pagehide', () => {

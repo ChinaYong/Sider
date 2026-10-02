@@ -1,6 +1,6 @@
 import { getState, patchState, addReference, removeReference, updateReference, setReferenceSelected } from './store.js';
 import { TAB_CONTEXT_PREFIX, CONTEXT_SETTINGS_KEY } from './context.js';
-import { getTabContext, updateTabSelection, setTabAttachment, clearTabSelection, resetTabContext, removeTabContext, getContextSettings, patchContextSettings } from './context-store.js';
+import { getTabContext, updateTabSelection, setTabAttachment, applyTabDefaults, requestTabPage, invalidateTabSource, clearTabSelection, resetTabContext, removeTabContext, getContextSettings, patchContextSettings } from './context-store.js';
 
 const extensionRoot = chrome.runtime.getURL('/');
 const recentSources = new Map();
@@ -13,6 +13,7 @@ const ENHANCEMENT_MESSAGES = new Set(['SIDER_TAB_CONTEXT_GET', 'SIDER_TAB_ATTACH
 const CONTENT_MESSAGES = new Set(['SIDER_SELECTION_CHANGED', 'SIDER_OPEN_SOURCE_PANEL']);
 const tabOperations = new Map();
 const liveSources = new Map();
+const sourceVersions = new Map();
 const SITE_KEY = 'siderEnabledOrigins';
 const EMBED_RULE_ID = 731001;
 const EMBED_PERMISSION = 'declarativeNetRequestWithHostAccess';
@@ -159,11 +160,12 @@ async function sourceById(tabId, allowUnexposedURL = false) {
 }
 
 async function syncSourceContext(tabId) {
+  const version = sourceVersions.get(tabId) || 0;
   const tab = await sourceById(tabId, true);
   if (tab.status === 'loading') throw new Error('来源网页正在加载，请等待完成后重新发送。');
   if (!tab.url) {
     liveSources.delete(tabId);
-    return { context: await resetTabContext(tabId), needsAccess: true };
+    return { context: await invalidateTabSource(tabId), needsAccess: true };
   }
   if (liveSources.get(tabId) !== tab.url) {
     await injectPage(tabId);
@@ -179,7 +181,7 @@ async function syncSourceContext(tabId) {
   }
   if (!result?.ok || !result.source) throw new Error(result?.error || '网页没有响应，请刷新来源网页后重试。');
   const current = await sourceById(tabId);
-  if (result.source.url !== current.url || current.url !== tab.url) throw new Error('来源网页正在跳转，请稍后重新发送。');
+  if (result.source.url !== current.url || current.url !== tab.url || current.status === 'loading' || version !== (sourceVersions.get(tabId) || 0)) throw new Error('来源网页正在跳转，请稍后重新发送。');
   if (result.reference) {
     validateReference(result.reference, {});
     if (result.reference.kind !== 'selection' || result.reference.url !== current.url) throw new Error('划词来源与当前网页不符。');
@@ -187,38 +189,73 @@ async function syncSourceContext(tabId) {
   return { context: await updateTabSelection(tabId, { url: current.url, title: current.title || result.source.title }, result.reference || null), needsAccess: false };
 }
 
-async function contextResponse(tabId, sync = true) {
+async function contextResponse(tabId, sync = true, { defaultKinds, settings: savedSettings } = {}) {
   let snapshot;
   if (sync) {
-    try { snapshot = await syncSourceContext(tabId); }
+    const settings = savedSettings || await getContextSettings();
+    try {
+      snapshot = await syncSourceContext(tabId);
+      snapshot.context = await applyTabDefaults(tabId, settings, defaultKinds);
+      if (snapshot.needsAccess) {
+        if (snapshot.context.pageRequested) snapshot.context = await requestTabPage(tabId, sourceAccessError().message);
+      } else if (snapshot.context.pageRequested && !snapshot.context.attachments.page && !snapshot.context.pageError) {
+        snapshot.context = await captureRequestedPage(tabId);
+      }
+    }
     catch (error) {
       if (!['SOURCE_ACCESS_REQUIRED', 'SOURCE_UNSUPPORTED'].includes(error.code)) throw error;
-      snapshot = { context: await resetTabContext(tabId), needsAccess: error.code === 'SOURCE_ACCESS_REQUIRED' };
+      if (error.code === 'SOURCE_UNSUPPORTED') snapshot = { context: await resetTabContext(tabId), needsAccess: false };
+      else {
+        await invalidateTabSource(tabId);
+        const context = await applyTabDefaults(tabId, settings, defaultKinds);
+        snapshot = { context: context.pageRequested ? await requestTabPage(tabId, error.message) : context, needsAccess: true };
+      }
     }
   } else snapshot = { context: await getTabContext(tabId), needsAccess: false };
   return { ok: true, ...snapshot, settings: await getContextSettings() };
 }
 
+async function captureRequestedPage(tabId) {
+  const version = sourceVersions.get(tabId) || 0;
+  try {
+    const tab = await sourceById(tabId);
+    if (tab.status === 'loading') throw new Error('来源网页正在加载，请等待完成后重试正文。');
+    const result = await chrome.tabs.sendMessage(tabId, { type: 'SIDER_PAGE_CAPTURE', kind: 'page' }, { frameId: 0 });
+    if (!result?.ok || !result.reference) throw new Error(result?.error || '没有取得网页正文。');
+    validateReference(result.reference, {});
+    const current = await sourceById(tabId);
+    if (result.reference.url !== current.url || current.url !== tab.url || current.status === 'loading' || version !== (sourceVersions.get(tabId) || 0)) throw new Error('页面已经跳转，请重新引用正文。');
+    return await setTabAttachment(tabId, 'page', result.reference);
+  } catch (error) {
+    if (version !== (sourceVersions.get(tabId) || 0) || error.code === 'SOURCE_UNSUPPORTED') throw error;
+    const context = await requestTabPage(tabId, error?.message || '没有取得网页正文，请重试或取消正文引用。');
+    if (error.code === 'SOURCE_ACCESS_REQUIRED') throw error;
+    return context;
+  }
+}
+
 function changeTabAttachment(tabId, kind, enabled) {
   return withTab(tabId, async () => {
-    if (!['url', 'page'].includes(kind) || typeof enabled !== 'boolean') throw new Error('网页引用选项无效。');
+    if (!['selection', 'url', 'page'].includes(kind) || typeof enabled !== 'boolean') throw new Error('网页引用选项无效。');
     if (!enabled) {
+      await applyTabDefaults(tabId, await getContextSettings());
       await setTabAttachment(tabId, kind, false);
       return contextResponse(tabId, false);
     }
     await syncSourceContext(tabId);
-    const tab = await sourceById(tabId);
-    let reference = true;
+    await applyTabDefaults(tabId, await getContextSettings());
     if (kind === 'page') {
-      const result = await chrome.tabs.sendMessage(tabId, { type: 'SIDER_PAGE_CAPTURE', kind: 'page' }, { frameId: 0 });
-      if (!result?.ok || !result.reference) throw new Error(result?.error || '没有取得网页正文。');
-      validateReference(result.reference, {});
-      const current = await sourceById(tabId);
-      if (result.reference.url !== current.url || current.url !== tab.url) throw new Error('页面已经跳转，请重新引用正文。');
-      reference = result.reference;
-    }
-    await setTabAttachment(tabId, kind, reference);
+      await requestTabPage(tabId);
+      await captureRequestedPage(tabId);
+    } else await setTabAttachment(tabId, kind, true);
     return contextResponse(tabId, false);
+  });
+}
+
+function changeContextSettings(tabId, patch) {
+  return withTab(tabId, async () => {
+    const { settings, changedDefaults } = await patchContextSettings(patch, { includeChanges: true });
+    return contextResponse(tabId, changedDefaults.length > 0, { defaultKinds: changedDefaults, settings });
   });
 }
 
@@ -506,10 +543,7 @@ async function enhancementRequest(message, sender) {
   if (inner.type === 'SIDER_TAB_CONTEXT_GET') return withTab(tabId, () => contextResponse(tabId));
   if (inner.type === 'SIDER_TAB_ATTACHMENT_SET') return changeTabAttachment(tabId, inner.kind, inner.enabled);
   if (inner.type === 'SIDER_TAB_SELECTION_CLEAR') return clearCurrentSelection(tabId);
-  if (inner.type === 'SIDER_CONTEXT_SETTINGS_PATCH') return withTab(tabId, async () => {
-    await patchContextSettings(inner.patch);
-    return contextResponse(tabId, false);
-  });
+  if (inner.type === 'SIDER_CONTEXT_SETTINGS_PATCH') return changeContextSettings(tabId, inner.patch);
 }
 
 async function sourceInfo(target) {
@@ -684,14 +718,11 @@ async function handleMessage(message, sender) {
   switch (message.type) {
     case 'SIDER_ENHANCEMENT_REQUEST': return enhancementRequest(message, sender);
     case 'SIDER_SELECTION_CHANGED': return receiveSelection(message, sender);
-    case 'SIDER_OPEN_SOURCE_PANEL': return { ok: true };
+    case 'SIDER_OPEN_SOURCE_PANEL': return changeTabAttachment(sender.tab.id, 'selection', true);
     case 'SIDER_TAB_CONTEXT_GET': return withTab(message.tabId, () => contextResponse(message.tabId));
     case 'SIDER_TAB_ATTACHMENT_SET': return changeTabAttachment(message.tabId, message.kind, message.enabled);
     case 'SIDER_TAB_SELECTION_CLEAR': return clearCurrentSelection(message.tabId);
-    case 'SIDER_CONTEXT_SETTINGS_PATCH': {
-      await patchContextSettings(message.patch);
-      return withTab(message.tabId, () => contextResponse(message.tabId, false));
-    }
+    case 'SIDER_CONTEXT_SETTINGS_PATCH': return changeContextSettings(message.tabId, message.patch);
     case 'SIDER_STATE_GET': return { ok: true, state: await getState() };
     case 'SIDER_STATE_PATCH': return { ok: true, state: await patchState(message.patch) };
     case 'SIDER_ADD_REFERENCE':
@@ -750,6 +781,7 @@ async function contextCapture(info, tab, kind) {
       result.context = await updateTabSelection(tab.id, source, reference);
     }
     if (!result.context.selection) throw new Error('请先在网页正文中划词。');
+    result.context = await setTabAttachment(tab.id, 'selection', true);
     return result;
   });
 }
@@ -798,6 +830,7 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
   if (tab.active && (change.url || change.status === 'complete')) rememberSource(tab);
   if (change.status === 'loading' || change.url) {
+    sourceVersions.set(tabId, (sourceVersions.get(tabId) || 0) + 1);
     liveSources.delete(tabId);
     void withTab(tabId, () => resetTabContext(tabId, { url: isWebURL(tab.url) && !isChatURL(tab.url) ? tab.url : '', title: tab.title || '' })).catch(() => {});
     for (const [key, frame] of chatFrames) if (frame.tabId === tabId) chatFrames.delete(key);
@@ -806,6 +839,7 @@ chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
   liveSources.delete(tabId);
+  sourceVersions.delete(tabId);
   void withTab(tabId, () => removeTabContext(tabId)).finally(() => tabOperations.delete(tabId)).catch(() => {});
   for (const [bridgeId, registration] of embedRegistrations) if (registration.tabId === tabId) void unregisterEmbed({ bridgeId }).catch(() => {});
   for (const [windowId, id] of recentSources) if (id === tabId) recentSources.delete(windowId);

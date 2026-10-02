@@ -3,7 +3,9 @@ export const CONTEXT_SETTINGS_KEY = 'sider.contextSettings.v1';
 export const MAX_CONTEXT_CHARS = 1000000;
 export const CONTEXT_VARIABLES = Object.freeze(['selection', 'selection.context', 'context', 'url', 'title', 'content', 'page.content']);
 export const PAGE_ATTACHMENT_VARIABLES = Object.freeze([...CONTEXT_VARIABLES.filter(variable => !['content', 'page.content'].includes(variable)), 'filename']);
+export const DEFAULT_REFERENCE_KEYS = Object.freeze({ selection: 'defaultSelection', url: 'defaultUrl', page: 'defaultPage' });
 export const DEFAULT_CONTEXT_SETTINGS = Object.freeze({
+  defaultSelection: true, defaultUrl: false, defaultPage: false,
   selectionTemplate: '网页划词：\n{{selection}}', selectionPosition: 'prepend',
   urlTemplate: '网页 URL：{{url}}', urlPosition: 'append',
   pageTemplate: '网页正文：\n{{content}}', pagePosition: 'append',
@@ -16,7 +18,7 @@ function webURL(value) {
 }
 
 export function createTabContext(tabId) {
-  return { tabId: Number.isInteger(tabId) ? tabId : null, revision: 0, url: '', title: '', selection: null, selectionIncluded: true, attachments: { url: false, page: null } };
+  return { tabId: Number.isInteger(tabId) ? tabId : null, revision: 0, url: '', title: '', selection: null, selectionIncluded: true, attachments: { url: false, page: null }, defaultsInitialized: false, pageRequested: false, pageError: '' };
 }
 
 // Keep source text intact. The store rejects invalid captures; composition also
@@ -40,10 +42,15 @@ export function normalizeContext(raw, tabId = raw?.tabId) {
   const initial = createTabContext(tabId);
   if (!raw || typeof raw !== 'object') return initial;
   const source = { url: webURL(raw.url), title: String(raw.title ?? '') };
+  const page = normalizeContextReference(raw.attachments?.page, 'page', source);
   return {
     ...initial, revision: Number.isSafeInteger(raw.revision) && raw.revision >= 0 ? raw.revision : 0, ...source,
     selection: normalizeContextReference(raw.selection, 'selection', source), selectionIncluded: raw.selectionIncluded !== false,
-    attachments: { url: raw.attachments?.url === true, page: normalizeContextReference(raw.attachments?.page, 'page', source) },
+    attachments: { url: raw.attachments?.url === true, page },
+    // Older session contexts already contain the user's current choices.
+    defaultsInitialized: typeof raw.defaultsInitialized === 'boolean' ? raw.defaultsInitialized : Boolean(source.url),
+    pageRequested: raw.pageRequested === true || Boolean(page),
+    pageError: !page && raw.pageRequested === true && typeof raw.pageError === 'string' ? raw.pageError : '',
   };
 }
 
@@ -56,6 +63,8 @@ export function normalizeContextSettings(raw) {
   if (Number.isFinite(Number(raw.pageThreshold)) && Number(raw.pageThreshold) >= 1) settings.pageThreshold = Math.min(MAX_CONTEXT_CHARS, Math.floor(Number(raw.pageThreshold)));
   if (typeof raw.pageAttachmentTemplate === 'string') settings.pageAttachmentTemplate = raw.pageAttachmentTemplate;
   for (const kind of ['selection', 'url', 'page']) {
+    const defaultKey = DEFAULT_REFERENCE_KEYS[kind];
+    if (typeof raw[defaultKey] === 'boolean') settings[defaultKey] = raw[defaultKey];
     const templateKey = `${kind}Template`, positionKey = `${kind}Position`;
     if (typeof raw[templateKey] === 'string') settings[templateKey] = raw[templateKey];
     if (['prepend', 'append'].includes(raw[positionKey])) settings[positionKey] = raw[positionKey];
@@ -71,6 +80,19 @@ export function validateContextReference(raw, kind, source) {
   return reference;
 }
 
+export function validateContextTemplate(template, { label = '引用', attachment = false } = {}) {
+  const text = String(template ?? '');
+  const errors = [];
+  if (!text.trim()) errors.push(`${label}的追加格式不能为空，请在设置中修改。`);
+  const allowed = attachment ? PAGE_ATTACHMENT_VARIABLES : CONTEXT_VARIABLES;
+  for (const match of text.matchAll(/\{\{([^{}]*)\}\}/g)) {
+    const variable = match[1].trim();
+    if (attachment && ['content', 'page.content'].includes(variable)) errors.push(`附件说明不能使用 {{${variable}}}，请使用 {{filename}} 引用正文附件。`);
+    else if (!allowed.includes(variable)) errors.push(`未知变量 {{${variable}}}，请在设置中修改。`);
+  }
+  return [...new Set(errors)];
+}
+
 export function composeContextPrompt(question, rawContext, rawSettings = {}, { attachmentName } = {}) {
   const draft = String(question ?? '');
   const context = normalizeContext(rawContext);
@@ -83,6 +105,7 @@ export function composeContextPrompt(question, rawContext, rawSettings = {}, { a
   if (context.selection && context.selectionIncluded) included.push('selection');
   if (context.attachments.url) included.push('url');
   if (context.attachments.page) included.push('page');
+  if (context.pageRequested && !context.attachments.page) errors.push(context.pageError || '网页正文尚未就绪，请重试、授权或取消正文引用。');
   if (included.length && !context.url) errors.push('当前网页地址无效，请重新引用。');
 
   const checkReference = kind => {
@@ -105,12 +128,11 @@ export function composeContextPrompt(question, rawContext, rawSettings = {}, { a
     return undefined;
   };
   const expandTemplate = (template, label, filename) => {
-    if (!template.trim()) errors.push(`${label}的追加格式不能为空，请在设置中修改。`);
+    errors.push(...validateContextTemplate(template, { label, attachment: filename !== undefined }));
     return template.replace(/\{\{([^{}]*)\}\}/g, (token, expression) => {
       const variable = expression.trim();
-      if (filename !== undefined && ['content', 'page.content'].includes(variable)) { errors.push(`附件说明不能使用 {{${variable}}}，请使用 {{filename}} 引用正文附件。`); return token; }
       const allowed = filename === undefined ? CONTEXT_VARIABLES : PAGE_ATTACHMENT_VARIABLES;
-      if (!allowed.includes(variable)) { errors.push(`未知变量 {{${variable}}}，请在设置中修改。`); return token; }
+      if (!allowed.includes(variable)) return token;
       const replacement = variable === 'filename' ? filename : value(variable);
       if (replacement === undefined || !String(replacement).trim()) { errors.push(`变量 {{${variable}}} 缺少内容，请检查当前网页引用。`); return token; }
       return replacement;

@@ -232,3 +232,13 @@ test('attachment settings migration ignores the old send limit and retains exist
   for (const pageThreshold of [Infinity, NaN, 0, -1]) assert.equal(normalizeContextSettings({ pageThreshold }).pageThreshold, 10000);
   assert.equal(normalizeContextSettings({ pageMode: 'invalid' }).pageMode, 'auto');
 });
+
+test('a requested body without a snapshot blocks sending until it is captured or explicitly cancelled', () => {
+  const current = pageContext('正文'); current.attachments.page = null; current.pageRequested = true;
+  assert.match(composeContextPrompt('问题', current).errors.join(' '), /尚未就绪/);
+  current.pageError = '没有取得网页正文，请重试。';
+  assert.match(composeContextPrompt('问题', current).errors.join(' '), /没有取得网页正文/);
+  current.pageRequested = false;
+  assert.deepEqual(composeContextPrompt('问题', current).errors, []);
+  assert.equal(composeContextPrompt('问题', current).text, '问题');
+});

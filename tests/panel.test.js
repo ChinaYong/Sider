@@ -6,12 +6,15 @@ import { JSDOM } from 'jsdom';
 let instance = 0;
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
-async function fixture(t, { extension = true, sourceTab = '13' } = {}) {
+async function fixture(t, { extension = true, sourceTab = '13', permissionsGranted = true } = {}) {
   const html = await readFile(new URL('../src/panel.html', import.meta.url), 'utf8');
   const { window } = new JSDOM(html, { url: `https://panel.test/${sourceTab === null ? '' : '?sourceTab=' + sourceTab}` });
   const names = ['window','document','chrome','setTimeout','clearTimeout','setInterval','clearInterval'];
   const original = new Map(names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
   const calls = []; const ports = []; const permissions = []; const timers = new Map(); let sequence = 0;
+  const originalNow = Date.now;
+  let now = originalNow();
+  Date.now = () => now;
   const frameMessages = [];
   const frame = window.document.querySelector('iframe');
   // Model the stable WindowProxy across iframe navigations. Any DOMWindow
@@ -26,7 +29,7 @@ async function fixture(t, { extension = true, sourceTab = '13' } = {}) {
     },
     windows: { async getCurrent() { return { id: 7 }; } },
     tabs: { async get(id) { return { id, windowId: 7 }; } },
-    permissions: { async request(details) { permissions.push(details); return true; } },
+    permissions: { async request(details) { permissions.push(details); return permissionsGranted; } },
   };
   Object.assign(globalThis, { window, document: window.document });
   if (extension) globalThis.chrome = chrome; else delete globalThis.chrome;
@@ -39,11 +42,14 @@ async function fixture(t, { extension = true, sourceTab = '13' } = {}) {
   t.after(() => {
     window.dispatchEvent(new window.Event('pagehide'));
     window.close();
+    Date.now = originalNow;
     for (const name of names) if (original.get(name)) Object.defineProperty(globalThis, name, original.get(name)); else delete globalThis[name];
   });
   await import(`../src/panel.js?instance=${++instance}`);
   await settle();
   return { window, document: window.document, calls, ports, permissions, timers, frameMessages,
+    advanceTime(milliseconds) { now += milliseconds; },
+    setPermissionGranted(value) { permissionsGranted = value; },
     async resolve(index, result) { calls[index].resolve(result); await settle(); },
     async tick(delay) { const [id, timer] = [...timers].find(([,entry]) => entry.delay === delay) || []; if(timer) { timers.delete(id); void timer.fn(); await settle(); } },
   };
@@ -113,6 +119,93 @@ test('allowing capture on a known site requests only that origin and does not en
   assert.deepEqual(f.permissions, [{ origins: ['https://article.example/*'] }]);
   assert.equal(f.calls.some(call => call.message.type === 'SIDER_ENABLE_SITE'), false);
   assert.match(f.document.querySelector('#toast').textContent, /已允许引用/);
+});
+
+test('denied site access remains actionable inside its dialog and can be retried', async t => {
+  const f = await fixture(t, { permissionsGranted: false });
+  await f.resolve(0, { ok: true, compatibility: true });
+  const frame = f.document.querySelector('iframe');
+  f.window.dispatchEvent(new f.window.MessageEvent('message', { origin: 'https://chatgpt.com', source: frame.contentWindow, data: { type: 'SIDER_SOURCE_ACCESS_REQUEST', bridgeId: f.calls[0].message.bridgeId } }));
+  await settle();
+  await f.resolve(f.calls.length - 1, { ok: true, source: { tabId: 13, url: 'https://article.example/story' } });
+  const grant = f.document.querySelector('#grant-site');
+  grant.click(); await settle();
+  const inlineStatus = f.document.querySelector('#site-status');
+  assert.equal(f.document.querySelector('#site-dialog').open, true);
+  assert.equal(inlineStatus.hidden, false);
+  assert.match(inlineStatus.textContent, /权限未授予/);
+  assert.equal(grant.disabled, false);
+  assert.equal(f.document.querySelector('#toast').hidden, true);
+
+  f.setPermissionGranted(true);
+  grant.click(); await settle();
+  assert.equal(f.permissions.length, 2);
+  assert.equal(f.document.querySelector('#site-dialog').open, false);
+  assert.equal(inlineStatus.hidden, true);
+  assert.equal(inlineStatus.textContent, '');
+  assert.equal(grant.disabled, false);
+});
+
+test('late webpage enhancements recover after a non-blocking timeout warning', async t => {
+  const f = await fixture(t);
+  await f.resolve(0, { ok: true, compatibility: true });
+  f.advanceTime(36000);
+  await f.resolve(1, { ok: true, compatibility: true, connected: true, enhancementReady: false });
+  const status = f.document.querySelector('#connection-status');
+  assert.equal(f.document.querySelector('#loading-screen').hidden, true);
+  assert.equal(f.document.querySelector('iframe').hidden, false);
+  assert.equal(status.className, 'warning');
+  assert.match(status.textContent, /网页引用未就绪/);
+  assert.match(status.title, /可继续使用 ChatGPT/);
+  assert.match(f.document.querySelector('#diagnostics-text').textContent, /warning:.*重新连接/);
+  assert.equal(f.document.querySelector('#toast').hidden, true);
+  assert.ok([...f.timers.values()].some(timer => timer.delay === 5000));
+
+  f.advanceTime(5000);
+  await f.tick(5000);
+  await f.resolve(f.calls.length - 1, { ok: true, compatibility: true, connected: true, enhancementReady: true });
+  assert.equal(status.className, 'connected');
+  assert.match(status.textContent, /网页引用已就绪/);
+  assert.doesNotMatch(f.document.querySelector('#diagnostics-text').textContent, /warning:/);
+  assert.ok(![...f.timers.values()].some(timer => timer.delay === 5000));
+});
+
+test('an unavailable enhancement stops checking after two minutes while ChatGPT remains visible', async t => {
+  const f = await fixture(t);
+  await f.resolve(0, { ok: true, compatibility: true });
+  f.advanceTime(36000);
+  await f.resolve(1, { ok: true, compatibility: true, connected: true, enhancementReady: false });
+  f.advanceTime(85000);
+  await f.tick(5000);
+  await f.resolve(f.calls.length - 1, { ok: true, compatibility: true, connected: true, enhancementReady: false });
+  assert.equal(f.document.querySelector('#loading-screen').hidden, true);
+  assert.equal(f.document.querySelector('#connection-status').className, 'warning');
+  assert.ok(![...f.timers.values()].some(timer => [700, 5000].includes(timer.delay)));
+});
+
+test('a temporary enhancement connection error does not cover a connected ChatGPT page', async t => {
+  const f = await fixture(t);
+  await f.resolve(0, { ok: true, compatibility: true });
+  await f.resolve(1, { ok: true, compatibility: true, connected: true, enhancementReady: false });
+  await f.tick(700);
+  await f.resolve(f.calls.length - 1, { ok: false, error: '后台暂时失联' });
+  assert.equal(f.document.querySelector('#loading-screen').hidden, true);
+  assert.equal(f.document.querySelector('#connection-status').className, 'warning');
+  assert.match(f.document.querySelector('#diagnostics-text').textContent, /后台暂时失联/);
+  assert.ok([...f.timers.values()].some(timer => timer.delay === 5000));
+});
+
+test('a lifecycle reconnection error retains an already connected ChatGPT page', async t => {
+  const f = await fixture(t);
+  await f.resolve(0, { ok: true, compatibility: true });
+  await f.resolve(1, { ok: true, compatibility: true, connected: true, enhancementReady: true });
+  f.ports[0].disconnect();
+  await f.tick(500);
+  await f.resolve(f.calls.length - 1, { ok: false, error: '无法恢复后台连接' });
+  assert.equal(f.document.querySelector('#loading-screen').hidden, true);
+  assert.equal(f.document.querySelector('#connection-status').className, 'warning');
+  assert.match(f.document.querySelector('#diagnostics-text').textContent, /无法恢复后台连接/);
+  assert.match(f.document.querySelector('#diagnostics-text').textContent, /enhancementReady: false/);
 });
 
 test('a frame load alone cannot report a working ChatGPT connection', async t => {

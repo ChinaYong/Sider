@@ -31,11 +31,14 @@ function fixture(t, options = {}) {
       const inner = message.request;
       if (inner.type === 'SIDER_TAB_CONTEXT_GET') return result();
       if (inner.type === 'SIDER_TAB_SELECTION_CLEAR') {
-        context = normalizeContext({ ...context, selectionIncluded: false, revision: context.revision + 1 }, context.tabId); return result();
+        context = normalizeContext({ ...context, selection: null, selectionIncluded: true, revision: context.revision + 1 }, context.tabId); return result();
       }
       if (inner.type === 'SIDER_TAB_ATTACHMENT_SET') {
+        if (!['url', 'page'].includes(inner.kind)) return { ok: false, error: '网页引用选项无效。' };
         if (needsAccess && inner.enabled) return { ok: false, code: 'SOURCE_ACCESS_REQUIRED', error: '当前网页尚未授权。' };
-        context = normalizeContext({ ...context, attachments: { ...context.attachments, [inner.kind]: inner.kind === 'url' ? inner.enabled : inner.enabled ? page() : null }, revision: context.revision + 1 }, context.tabId);
+        const update = inner.kind === 'url' ? { attachments: { ...context.attachments, url: inner.enabled } }
+            : { attachments: { ...context.attachments, page: inner.enabled ? page() : null }, pageRequested: inner.enabled, pageError: '' };
+        context = normalizeContext({ ...context, ...update, revision: context.revision + 1 }, context.tabId);
         return result();
       }
       if (inner.type === 'SIDER_CONTEXT_SETTINGS_PATCH') { settings = normalizeContextSettings({ ...settings, ...inner.patch }); return result(); }
@@ -84,6 +87,9 @@ test('live selection replaces the preview and remains outside the native questio
   assert.ok(f.root.querySelector('.chips').textContent.includes('<img'));
   f.click('[aria-label="取消划词"]'); await pause();
   assert.equal(f.root.querySelector('.selection-chip'), null);
+  assert.equal(f.context.selection, null);
+  assert.equal(f.calls.at(-1).request.type, 'SIDER_TAB_SELECTION_CLEAR');
+  assert.equal(f.root.querySelector('.status.error'), null);
   assert.equal(f.editor.value, '这个词是什么意思？');
   assert.equal(f.root.querySelector('#expand'), null);
   assert.equal(f.root.querySelector('[data-pane="variables"]'), null);
@@ -103,6 +109,92 @@ test('URL and body are removable current-page choices and never edit or send the
   assert.equal(f.root.querySelector('[data-chip="page"]'), null);
   assert.equal(f.submitted.length, 0);
   assert.ok(f.calls.every(message => message.type === 'SIDER_ENHANCEMENT_REQUEST' && message.bridgeId === 'test-bridge-0001' && !Object.hasOwn(message.request, 'tabId')));
+});
+
+test('background refresh preserves focused reference controls while updating real context changes', async t => {
+  const f = fixture(t); await f.seed({ selection: selection(), attachments: { url: true, page: page() } });
+  const selectionChip = f.root.querySelector('[data-chip="selection"]');
+  const pageChip = f.root.querySelector('[data-chip="page"]');
+  for (const kind of ['selection', 'url', 'page']) {
+    const cancel = f.root.querySelector(`[data-chip="${kind}"] button`);
+    cancel.focus(); await f.api.refresh(); await f.api.refresh();
+    assert.equal(f.root.querySelector(`[data-chip="${kind}"] button`), cancel);
+    assert.equal(f.root.activeElement, cancel);
+  }
+  await f.seed({ selection: selection('新的划词'), attachments: { page: null }, pageRequested: true, pageError: '正文提取失败。' });
+  assert.equal(f.root.querySelector('[data-chip="selection"]'), selectionChip);
+  assert.equal(selectionChip.querySelector('.excerpt').textContent, '新的划词');
+  assert.equal(f.root.querySelector('[data-chip="page"]'), pageChip);
+  assert.equal(pageChip.querySelector('.excerpt').textContent, '正文 · 未就绪');
+  assert.equal(f.root.activeElement, pageChip.querySelector('button'));
+  f.click('[data-pane="references"]');
+  const url = f.root.querySelector('[data-attachment="url"]');
+  const body = f.root.querySelector('[data-attachment="page"]');
+  for (const entry of [url, body]) {
+    entry.focus(); await f.api.refresh(); await f.api.refresh();
+    assert.equal(f.root.querySelector(`[data-attachment="${entry.dataset.attachment}"]`), entry);
+    assert.equal(f.root.activeElement, entry);
+  }
+  await f.seed({ title: '新页面标题', attachments: { url: false, page: null }, pageRequested: false, pageError: '', selection: null });
+  assert.equal(f.root.querySelector('.source').textContent, '新页面标题');
+  assert.equal(url.getAttribute('aria-pressed'), 'false');
+  assert.equal(body.getAttribute('aria-pressed'), 'false');
+  assert.equal(f.root.activeElement, body);
+  assert.equal(f.root.querySelectorAll('[data-chip]').length, 0);
+  f.click('[data-attachment="url"]'); await pause();
+  assert.equal(f.context.attachments.url, true, 'retained control reads the latest attachment state');
+  assert.deepEqual(f.submitted, []);
+});
+
+test('refresh cannot enable another body request while its reference control is pending', async t => {
+  const f = fixture(t); await f.api.refresh();
+  let release, started = 0;
+  const gate = new Promise(resolve => { release = resolve; });
+  t.after(release);
+  const original = f.chrome.runtime.sendMessage;
+  f.chrome.runtime.sendMessage = async message => {
+    if (message.request.type === 'SIDER_TAB_ATTACHMENT_SET' && message.request.kind === 'page') { started++; await gate; }
+    return original(message);
+  };
+  f.click('[data-pane="references"]');
+  const entry = f.root.querySelector('[data-attachment="page"]');
+  f.click('[data-attachment="page"]');
+  assert.equal(entry.disabled, true);
+  await f.seed({ title: '采集中仍可更新标题', selection: selection('新的划词'), pageRequested: true });
+  await f.api.refresh();
+  assert.equal(f.root.querySelector('[data-attachment="page"]'), entry);
+  assert.equal(entry.getAttribute('aria-pressed'), 'true');
+  assert.equal(entry.disabled, true);
+  f.click('[data-attachment="page"]');
+  assert.equal(started, 1);
+  release(); await pause();
+  assert.ok(f.context.attachments.page);
+  assert.equal(f.root.querySelector('.popover').hidden, true);
+  assert.deepEqual(f.submitted, []);
+});
+
+test('body chip keeps its pending cancel action disabled across refresh and delivery-label changes', async t => {
+  const f = fixture(t); await f.seed({ attachments: { url: true, page: page() } });
+  let release, started = 0;
+  const gate = new Promise(resolve => { release = resolve; });
+  t.after(release);
+  const original = f.chrome.runtime.sendMessage;
+  f.chrome.runtime.sendMessage = async message => {
+    if (message.request.type === 'SIDER_TAB_ATTACHMENT_SET' && message.request.kind === 'page' && !message.request.enabled) { started++; await gate; }
+    return original(message);
+  };
+  const cancel = f.root.querySelector('[aria-label="取消正文引用"]');
+  f.click('[aria-label="取消正文引用"]');
+  await f.seed({}, { pageMode: 'file' }); await f.api.refresh();
+  assert.equal(f.root.querySelector('[aria-label="取消正文引用"]'), cancel);
+  assert.equal(cancel.disabled, true);
+  assert.equal(f.root.querySelector('[data-chip="page"] .excerpt').textContent, '正文 · 附件');
+  f.click('[aria-label="取消正文引用"]');
+  assert.equal(started, 1);
+  release(); await pause(); await f.api.refresh();
+  assert.equal(f.root.querySelector('[data-chip="page"]'), null);
+  assert.ok(f.root.querySelector('[data-chip="url"]'));
+  assert.deepEqual(f.submitted, []);
 });
 
 test('settings alone contain variables and control prefix, suffix, and exact native send text', async t => {
@@ -354,4 +446,73 @@ test('manual text mode sends full body beyond the removed legacy character limit
   f.editor.value = '保留全文'; f.send(); await pause();
   assert.equal(f.submitted.length, 1);
   assert.equal(f.submitted[0], `保留全文\n\n网页正文：\n${body}`);
+});
+
+test('references only offer URL and body while default selection remains configurable', async t => {
+  const f = fixture(t); await f.seed({ selection: selection(), selectionIncluded: false }, { defaultSelection: false });
+  f.editor.value = '保留原问题';
+  f.click('[data-pane="references"]');
+  assert.deepEqual(Array.from(f.root.querySelectorAll('[data-attachment]'), entry => entry.dataset.attachment), ['url', 'page']);
+  assert.equal(f.root.querySelector('.selection-chip'), null);
+  f.click('[data-pane="settings"]');
+  assert.equal(f.root.querySelector('#default-selection').checked, false);
+  f.root.querySelector('#default-selection').checked = true;
+  f.click('#save-settings'); await pause();
+  assert.equal(f.settings.defaultSelection, true);
+  await f.seed({ selection: selection('新的划词'), selectionIncluded: true });
+  assert.equal(f.root.querySelector('.selection-chip .excerpt').textContent, '新的划词');
+  f.click('[data-pane="references"]');
+  assert.equal(f.root.querySelector('[data-attachment="selection"]'), null);
+  assert.equal(f.editor.value, '保留原问题');
+  assert.deepEqual(f.submitted, []);
+});
+
+test('selection close uses the clear operation accepted by the previous background', async t => {
+  const f = fixture(t); await f.seed({ selection: selection(), attachments: { url: true, page: page() } });
+  f.editor.value = '取消后继续提问';
+  f.click('[aria-label="取消划词"]'); await pause(); await f.api.refresh();
+  assert.equal(f.context.selection, null);
+  assert.equal(f.root.querySelector('.selection-chip'), null);
+  assert.ok(f.root.querySelector('[data-chip="url"]'));
+  assert.ok(f.root.querySelector('[data-chip="page"]'));
+  assert.equal(f.root.querySelector('.status.error'), null);
+  assert.deepEqual(f.calls.filter(message => message.request.type !== 'SIDER_TAB_CONTEXT_GET').map(message => message.request), [{ type: 'SIDER_TAB_SELECTION_CLEAR' }]);
+  assert.equal(f.editor.value, '取消后继续提问');
+  assert.deepEqual(f.submitted, []);
+  f.send(); await pause();
+  assert.equal(f.submitted.length, 1);
+  assert.ok(f.submitted[0].includes('取消后继续提问'));
+  assert.ok(f.submitted[0].includes('完整的网页正文'));
+  assert.ok(!f.submitted[0].includes(selection().content));
+});
+
+test('failed default body shows retry and cancellation while blocking a partial native send', async t => {
+  const f = fixture(t); await f.seed({ pageRequested: true, pageError: '没有取得网页正文。' }, { defaultPage: true });
+  f.editor.value = '需要正文才能回答';
+  assert.equal(f.root.querySelector('[data-chip="page"] .excerpt').textContent, '正文 · 未就绪');
+  assert.equal(f.root.querySelector('#page-retry').hidden, false);
+  f.send(); await pause();
+  assert.deepEqual(f.submitted, []); assert.equal(f.editor.value, '需要正文才能回答');
+  f.click('#page-retry'); await pause();
+  assert.equal(f.root.querySelector('#page-retry').hidden, true);
+  assert.equal(f.root.querySelector('[data-chip="page"] .excerpt').textContent, '正文');
+  f.send(); await pause();
+  assert.deepEqual(f.submitted, ['需要正文才能回答\n\n网页正文：\n完整的网页正文']);
+  await f.seed({ attachments: { page: null }, pageRequested: true, pageError: '提取失败。' });
+  f.editor.value = '取消后直接提问';
+  f.click('[aria-label="取消正文引用"]'); await pause();
+  f.send(); await pause();
+  assert.equal(f.submitted.at(-1), '取消后直接提问');
+});
+
+test('withheld default body offers authorization and can be cancelled without sending the draft', async t => {
+  const f = fixture(t); await f.seed({ pageRequested: true, pageError: '当前网页尚未授权。' }, { defaultPage: true });
+  await f.setNeedsAccess(true); f.editor.value = '等待授权的问题';
+  assert.equal(f.root.querySelector('#source-access').hidden, false);
+  assert.equal(f.root.querySelector('#page-retry').hidden, true);
+  f.send(); await pause();
+  assert.deepEqual(f.submitted, []); assert.equal(f.editor.value, '等待授权的问题');
+  f.click('[aria-label="取消正文引用"]'); await pause();
+  assert.equal(f.context.pageRequested, false);
+  assert.equal(f.editor.value, '等待授权的问题');
 });

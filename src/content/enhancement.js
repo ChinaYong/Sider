@@ -1,4 +1,4 @@
-import { TAB_CONTEXT_PREFIX, CONTEXT_SETTINGS_KEY, normalizeContext, normalizeContextSettings, composeContextPrompt } from '../context.js';
+import { TAB_CONTEXT_PREFIX, CONTEXT_SETTINGS_KEY, normalizeContext, normalizeContextSettings, composeContextPrompt, validateContextTemplate } from '../context.js';
 import { fillComposer, findComposer, getComposerText } from './composer.js';
 import { createAttachmentManager } from './attachments.js';
 
@@ -6,6 +6,9 @@ const CSS = `
 :host{all:initial;display:block;position:relative;font-family:system-ui,"Microsoft YaHei",sans-serif;font-size:12px;line-height:1.5;width:100%;min-width:0;z-index:30;--surface:#fff;--line:#e6e6e6;--muted:#888;--hover:#f4f4f4;--ink:#262626;color:var(--ink);color-scheme:light}
 *{box-sizing:border-box}[hidden]{display:none!important}button,input,select,textarea{font:inherit;color:inherit}button{cursor:pointer;border:0;background:transparent;padding:6px 8px;border-radius:7px;line-height:1.4;white-space:nowrap}button:hover{background:var(--hover)}button:disabled{opacity:.45;cursor:wait}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid #10a37f;outline-offset:1px}.bar{display:flex;gap:5px;align-items:center;min-height:32px;padding:4px 2px;border-top:1px solid var(--line);margin-top:5px;min-width:0}.bar>button{font-size:11px;padding:5px 7px;flex:none}.bar>button:last-child{margin-left:auto}.chips{display:flex;gap:5px;align-items:center;flex-wrap:wrap;min-width:0;flex:1}.chip{display:flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:7px;background:var(--hover);font-size:11px;padding-left:7px;max-width:100%;min-width:0}.chip button{font-size:15px;line-height:1;padding:4px 6px;flex:none;color:var(--muted)}.selection-chip{flex:1;max-width:100%;color:var(--ink)}.selection-chip .excerpt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.selection-icon{color:#10a37f;flex:none}.popover{position:fixed;z-index:2147483646;width:380px;max-width:calc(100vw - 20px);max-height:min(600px,75dvh);background:var(--surface);border:1px solid var(--line);border-radius:13px;padding:14px;box-shadow:0 8px 36px #0002;overflow:auto;color:var(--ink);overscroll-behavior:contain}.heading{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:8px}.heading strong{font-size:13px;font-weight:600}.heading button{font-size:18px;padding:0 5px}.source{font-size:11px;color:var(--muted);line-height:1.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0 0 9px}.note{font-size:11px;line-height:1.75;color:var(--muted);margin:8px 0;white-space:pre-line;overflow-wrap:anywhere}.attachment-actions{display:flex;gap:7px}.attachment-actions button{flex:1;border:1px solid var(--line);padding:9px}.attachment-actions button[aria-pressed="true"]{color:#10a37f;border-color:#10a37f;background:var(--hover)}.form label{display:block;font-size:11px;margin:10px 0 5px}.form input,.form textarea,.form select{display:block;width:100%;border:1px solid var(--line);border-radius:7px;padding:7px 9px;background:var(--surface);font-size:12px;line-height:1.8;resize:vertical}.form textarea{max-height:200px}.format-heading{font-size:12px;font-weight:600;margin:14px 0 5px}.format-heading:first-child{margin-top:0}.position-field{display:flex;align-items:center;gap:9px;margin:6px 0}.position-field label{margin:0;white-space:nowrap}.position-field select{width:auto;flex:1}.footer{display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end;margin-top:12px}.footer button{border:1px solid var(--line);font-size:11px}.footer .primary{background:var(--ink);color:var(--surface);border-color:var(--ink)}.status{font-size:11px;line-height:1.7;margin:2px 2px 6px;color:var(--muted);overflow-wrap:anywhere}.status.error{color:#b45c3c}.access{font-size:11px;color:#10a37f;border:1px solid var(--line);margin-bottom:6px}:host([data-dark]){--surface:#2f2f2f;--line:#454545;--hover:#383838;--muted:#aaa;--ink:#ececec;color-scheme:dark}
 .popover{inset:auto;margin:0}
+.chip button:disabled{cursor:pointer}
+.default-options{min-width:0;border:0;margin:0 0 14px;padding:0;display:flex;flex-wrap:wrap;gap:8px 14px}.default-options legend{font-size:12px;font-weight:600;margin-bottom:7px}.form label.default-option{display:flex;align-items:center;gap:6px;margin:0;font-size:12px;cursor:pointer}.form .default-option input{display:inline-block;width:auto;flex:none;margin:0;padding:0;accent-color:#10a37f}
+.form [aria-invalid="true"]{border-color:#b45c3c}.form .field-error{color:#b45c3c;margin:5px 0}
 `;
 
 /** The original ChatGPT editor stays the only question editor. */
@@ -35,7 +38,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   host.id = 'sider-enhancement';
   host.dataset.siderEnhancement = 'true';
   const root = host.attachShadow({ mode: 'open' });
-  root.innerHTML = `<style>${CSS}</style><div class="status" role="status" hidden></div><button type="button" id="source-access" class="access" hidden>允许当前网站</button><div class="bar" aria-label="网页引用工具"><button type="button" data-pane="references" title="添加当前网页的链接或正文">引用</button><div class="chips" aria-label="当前网页引用"></div><button type="button" data-pane="settings" aria-label="引用设置" title="引用设置">⋯</button></div><section class="popover" popover="manual" role="dialog" aria-label="网页引用" hidden><div class="heading"><strong id="pane-title"></strong><button type="button" id="close-pane" aria-label="关闭">×</button></div><div id="pane-body"></div></section>`;
+  root.innerHTML = `<style>${CSS}</style><div class="status" role="status" hidden></div><button type="button" id="source-access" class="access" hidden>允许当前网站</button><button type="button" id="page-retry" class="access" hidden>重试正文</button><div class="bar" aria-label="网页引用工具"><button type="button" data-pane="references" title="选择当前网页的链接或正文">引用</button><div class="chips" aria-label="当前网页引用"></div><button type="button" data-pane="settings" aria-label="引用设置" title="引用设置">⋯</button></div><section class="popover" popover="manual" role="dialog" aria-label="网页引用" hidden><div class="heading"><strong id="pane-title"></strong><button type="button" id="close-pane" aria-label="关闭">×</button></div><div id="pane-body"></div></section>`;
   const $ = selector => root.querySelector(selector);
 
   function report(message, error = false, accessRequired = needsAccess) {
@@ -50,6 +53,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   function applyResponse(result, sequence, startedEpoch) {
     if (disposed || sequence < lastAppliedRequest) return;
     lastAppliedRequest = sequence;
+    const previousPageError = context?.pageError;
     if (result.context) {
       const next = normalizeContext(result.context, result.context.tabId);
       if (!context || next.tabId !== context.tabId || next.revision >= context.revision) {
@@ -60,7 +64,10 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     if (result.settings && startedEpoch === settingsEpoch) settings = normalizeContextSettings(result.settings);
     if (typeof result.needsAccess === 'boolean') needsAccess = result.needsAccess;
     $('#source-access').hidden = !needsAccess;
+    $('#page-retry').hidden = !context?.pageError || needsAccess;
     renderChips();
+    if (context?.pageError && !delivering) report(context.pageError, true);
+    else if (previousPageError && !context?.pageError && $('.status').textContent.includes(previousPageError)) report('');
     if (pane === 'references') renderReferences();
     if (delivery?.stamp && delivery.stamp !== contextStamp()) delivery.abort.abort();
     if (ownedAttachment && !delivering) {
@@ -110,17 +117,29 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
 
   function renderChips() {
     const chips = [];
-    if (context?.selection && context.selectionIncluded !== false) chips.push(chip('selection', context.selection.content, '取消划词', () => request({ type: 'SIDER_TAB_SELECTION_CLEAR' })));
-    if (context?.attachments.url) chips.push(chip('url', 'URL', '取消 URL 引用', () => request({ type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'url', enabled: false })));
-    if (context?.attachments.page) {
+    if (context?.selection && context.selectionIncluded !== false) chips.push(['selection', context.selection.content, '取消划词', () => request({ type: 'SIDER_TAB_SELECTION_CLEAR' })]);
+    if (context?.attachments.url) chips.push(['url', 'URL', '取消 URL 引用', () => request({ type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'url', enabled: false })]);
+    if (context?.pageRequested) {
       const asFile = composeContextPrompt('引用', context, settings).pageDelivery === 'file';
-      chips.push(chip('page', asFile ? '正文 · 附件' : '正文', '取消正文引用', async () => {
+      const title = context.pageError ? '正文 · 未就绪' : !context.attachments.page ? '正文 · 准备中' : asFile ? '正文 · 附件' : '正文';
+      chips.push(['page', title, '取消正文引用', async () => {
         delivery?.abort.abort();
         await request({ type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: false });
         await clearAttachment();
-      }));
+      }]);
     }
-    $('.chips').replaceChildren(...chips);
+    const container = $('.chips');
+    const kinds = new Set(chips.map(([kind]) => kind));
+    // Polling must preserve focused controls and the disabled state of pending actions.
+    for (const element of [...container.children]) if (!kinds.has(element.dataset.chip)) element.remove();
+    for (const [index, [kind, title, removeLabel, remove]] of chips.entries()) {
+      let element = container.querySelector(`[data-chip="${kind}"]`);
+      if (!element) element = chip(kind, title, removeLabel, remove);
+      if (element.title !== title) element.title = title;
+      const excerpt = element.querySelector('.excerpt');
+      if (excerpt.textContent !== title) excerpt.textContent = title;
+      if (container.children[index] !== element) container.insertBefore(element, container.children[index] || null);
+    }
   }
 
   function showPane(name) {
@@ -139,23 +158,32 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   }
 
   function renderReferences() {
-    const body = $('#pane-body'); body.replaceChildren();
-    const source = document.createElement('p'); source.className = 'source';
-    source.textContent = context?.title || '当前网页'; source.title = context?.url || ''; body.append(source);
-    const actions = document.createElement('div'); actions.className = 'attachment-actions';
-    for (const [kind, name] of [['url', 'URL'], ['page', '正文']]) {
-      const active = Boolean(context?.attachments[kind]);
-      const entry = button(name, async () => {
-        if (kind === 'page' && !active) report('正在提取当前网页正文…');
-        await request({ type: 'SIDER_TAB_ATTACHMENT_SET', kind, enabled: !active });
-        report(active ? `已取消${name === 'URL' ? ' URL ' : ''}引用。` : `发送时会附加${name === 'URL' ? '网页 URL' : '网页正文'}。`);
-        showPane(null);
-      });
-      entry.dataset.attachment = kind; entry.setAttribute('aria-pressed', String(active)); actions.append(entry);
+    const body = $('#pane-body');
+    let source = body.querySelector('.source');
+    if (!source) {
+      source = document.createElement('p'); source.className = 'source'; body.append(source);
+      const actions = document.createElement('div'); actions.className = 'attachment-actions'; body.append(actions);
+      for (const [kind, name] of [['url', 'URL'], ['page', '正文']]) {
+        const entry = button(name, async () => {
+          const active = kind === 'page' ? Boolean(context?.pageRequested) : Boolean(context?.attachments.url);
+          if (kind === 'page' && !active) report('正在提取当前网页正文…');
+          await request({ type: 'SIDER_TAB_ATTACHMENT_SET', kind, enabled: !active });
+          if (context?.pageError) report(context.pageError, true);
+          else report(active ? `已取消${name}引用。` : `发送时会附加${kind === 'url' ? '网页 URL' : '网页正文'}。`);
+          showPane(null);
+        });
+        entry.dataset.attachment = kind; actions.append(entry);
+      }
+      const note = document.createElement('p'); note.className = 'note';
+      note.textContent = '引用仅用于当前标签页。写好问题后，按回车或点击 ChatGPT 发送按钮，自动附加已选内容。'; body.append(note);
     }
-    body.append(actions);
-    const note = document.createElement('p'); note.className = 'note';
-    note.textContent = '引用仅用于当前标签页。写好问题后，按回车或点击 ChatGPT 发送按钮，自动附加已选内容。'; body.append(note);
+    const title = context?.title || '当前网页';
+    if (source.textContent !== title) source.textContent = title;
+    if (source.title !== (context?.url || '')) source.title = context?.url || '';
+    for (const kind of ['url', 'page']) {
+      const active = kind === 'page' ? Boolean(context?.pageRequested) : Boolean(context?.attachments.url);
+      body.querySelector(`[data-attachment="${kind}"]`).setAttribute('aria-pressed', String(active));
+    }
     positionPopover();
   }
 
@@ -177,6 +205,15 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   function renderSettings() {
     const body = $('#pane-body');
     const fields = {};
+    const defaults = document.createElement('fieldset'); defaults.className = 'default-options';
+    const legend = document.createElement('legend'); legend.textContent = '默认附加'; defaults.append(legend);
+    for (const [key, kind, name] of [['defaultSelection', 'selection', '划词'], ['defaultUrl', 'url', '网页链接'], ['defaultPage', 'page', '网页正文']]) {
+      const label = document.createElement('label'); label.className = 'default-option';
+      const input = document.createElement('input'); input.type = 'checkbox'; input.id = `default-${kind}`; input.checked = settings[key];
+      label.htmlFor = input.id; label.append(input, document.createTextNode(name)); defaults.append(label); fields[key] = input;
+    }
+    body.append(defaults);
+    const defaultNote = document.createElement('p'); defaultNote.className = 'note'; defaultNote.textContent = '修改后保存，立即应用到当前网页，后续网页沿用。引用标签可临时取消；默认正文在打开侧栏时采集。'; body.append(defaultNote);
     for (const [kind, name, hint] of [['selection', '划词', '{{selection}} 划词 · {{context}} 附近段落'], ['url', '网页链接', '{{url}} 当前网页 URL · {{title}} 网页标题'], ['page', '网页正文', '{{content}} 网页正文 · {{url}} 当前网页 URL']]) {
       const heading = document.createElement('div'); heading.className = 'format-heading'; heading.textContent = name; body.append(heading);
       fields[`${kind}Template`] = field(body, kind === 'page' ? '正文格式（作为附件时写入文件）' : '附加文本格式', 'textarea', settings[`${kind}Template`], `${kind}-template`);
@@ -192,13 +229,38 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     fields.pageAttachmentTemplate = field(body, '附件引用说明（添加到问题中）', 'textarea', settings.pageAttachmentTemplate, 'page-attachment-template');
     const note = document.createElement('p'); note.className = 'note'; note.textContent = '{{filename}} 附件文件名 · {{title}} 网页标题 · {{url}} 网页 URL\n正文格式完整保留在附件中，问题仍留在输入框。变量只用于设置格式；附件上传完成后才发送。'; body.append(note);
     const footer = document.createElement('div'); footer.className = 'footer';
+    const errorBox = document.createElement('p'); errorBox.id = 'settings-error'; errorBox.className = 'note field-error'; errorBox.setAttribute('role', 'alert'); errorBox.hidden = true;
+    let invalidField;
+    const clearError = () => {
+      invalidField?.removeAttribute('aria-invalid'); invalidField?.removeAttribute('aria-describedby');
+      invalidField = null; errorBox.hidden = true; errorBox.textContent = '';
+    };
+    const showError = (message, input) => {
+      clearError(); errorBox.textContent = message; errorBox.hidden = false;
+      if (input) {
+        invalidField = input; input.setAttribute('aria-invalid', 'true'); input.setAttribute('aria-describedby', errorBox.id);
+        input.after(errorBox); input.focus(); input.scrollIntoView?.({ block: 'nearest' });
+      } else footer.before(errorBox);
+    };
+    body.append(errorBox);
+    for (const input of [...Object.values(fields), threshold]) input.addEventListener('input', event => { if (event.target === invalidField) clearError(); });
     const save = button('保存', async () => {
-      const pageThreshold = Number(threshold.value);
-      if (!Number.isInteger(pageThreshold) || pageThreshold < 1 || pageThreshold > 1000000) throw new Error('转换阈值须为 1 至 1,000,000 的整数。');
+      clearError();
+      let pageThreshold = Number(threshold.value);
+      if (!Number.isInteger(pageThreshold) || pageThreshold < 1 || pageThreshold > 1000000) {
+        if (mode.value === 'auto') { showError('转换阈值须为 1 至 1,000,000 的整数。', threshold); return; }
+        pageThreshold = settings.pageThreshold;
+      }
       const patch = { pageThreshold };
-      for (const [key, element] of Object.entries(fields)) patch[key] = element.value;
-      await request({ type: 'SIDER_CONTEXT_SETTINGS_PATCH', patch });
-      showPane(null); report('设置已保存。');
+      for (const [key, element] of Object.entries(fields)) patch[key] = element.type === 'checkbox' ? element.checked : element.value;
+      for (const [key, label] of [['selectionTemplate', '划词'], ['urlTemplate', 'URL'], ['pageTemplate', '正文'], ['pageAttachmentTemplate', '正文附件说明']]) {
+        if (key === 'pageAttachmentTemplate' && patch.pageMode === 'text') continue;
+        const error = validateContextTemplate(patch[key], { label, attachment: key === 'pageAttachmentTemplate' })[0];
+        if (error) { showError(error, fields[key]); return; }
+      }
+      try { await request({ type: 'SIDER_CONTEXT_SETTINGS_PATCH', patch }); }
+      catch (error) { showError(error.message || '设置保存失败，请重试。'); throw error; }
+      showPane(null); report(context?.pageError ? `设置已保存。${context.pageError}` : '设置已保存。', Boolean(context?.pageError));
     }, 'primary'); save.id = 'save-settings'; footer.append(save); body.append(footer);
     positionPopover();
   }
@@ -337,6 +399,11 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   for (const item of root.querySelectorAll('[data-pane]')) item.addEventListener('click', () => showPane(pane === item.dataset.pane ? null : item.dataset.pane));
   $('#close-pane').addEventListener('click', () => showPane(null));
   $('#source-access').addEventListener('click', () => run($('#source-access'), () => requestSitePermission('SIDER_SOURCE_ACCESS_REQUEST')));
+  $('#page-retry').addEventListener('click', () => run($('#page-retry'), async () => {
+    report('正在提取当前网页正文…');
+    await request({ type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: true });
+    report(context?.pageError || '正文引用已就绪。', Boolean(context?.pageError));
+  }));
   const outside = event => { if (!event.composedPath().includes(host)) showPane(null); };
   const keyboard = event => { if (event.key === 'Escape') showPane(null); };
   document.addEventListener('pointerdown', outside, true); document.addEventListener('keydown', keyboard, true);

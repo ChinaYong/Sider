@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TAB_CONTEXT_PREFIX, CONTEXT_SETTINGS_KEY, DEFAULT_CONTEXT_SETTINGS } from '../src/context.js';
-import { getTabContext, updateTabSelection, setTabAttachment, clearTabSelection, resetTabContext, removeTabContext, getContextSettings, patchContextSettings } from '../src/context-store.js';
+import { getTabContext, updateTabSelection, setTabAttachment, applyTabDefaults, requestTabPage, invalidateTabSource, clearTabSelection, resetTabContext, removeTabContext, getContextSettings, patchContextSettings } from '../src/context-store.js';
 
 let sessionData = {}, localData = {}, failSessionWrite = false, failLocalWrite = false;
 const source = { url: 'https://example.com/article', title: '文章一' };
@@ -228,4 +228,90 @@ test('failed attachment settings persistence retains the previous mode and lets 
   const updated = await patchContextSettings({ pageMode: 'text' });
   assert.equal(updated.pageMode, 'text');
   assert.equal(updated.pageAttachmentTemplate, initial.pageAttachmentTemplate);
+});
+
+test('old settings retain custom formats and initialize only the former automatic selection default', async () => {
+  resetStorage();
+  const legacy = { selectionTemplate: '原格式 {{selection}}', urlPosition: 'prepend' };
+  localData[CONTEXT_SETTINGS_KEY] = structuredClone(legacy);
+  const settings = await getContextSettings();
+  assert.equal(settings.defaultSelection, true); assert.equal(settings.defaultUrl, false); assert.equal(settings.defaultPage, false);
+  assert.equal(settings.selectionTemplate, legacy.selectionTemplate); assert.equal(settings.urlPosition, legacy.urlPosition);
+  assert.deepEqual(localData[CONTEXT_SETTINGS_KEY], legacy);
+});
+
+test('default patches validate booleans atomically and failed writes retain the saved choices', async () => {
+  resetStorage();
+  const before = await patchContextSettings({ defaultSelection: false, defaultUrl: true });
+  for (const key of ['defaultSelection', 'defaultUrl', 'defaultPage']) {
+    for (const value of ['false', 0, null, {}, []]) {
+      await assert.rejects(patchContextSettings({ [key]: value, pageTemplate: '不应保存' }), /默认附加/);
+      assert.deepEqual(await getContextSettings(), before);
+    }
+  }
+  failLocalWrite = true;
+  await assert.rejects(patchContextSettings({ defaultPage: true }), /QUOTA/);
+  assert.deepEqual(await getContextSettings(), before);
+  await Promise.all([patchContextSettings({ defaultPage: true }), patchContextSettings({ defaultUrl: false })]);
+  const next = await getContextSettings();
+  assert.equal(next.defaultSelection, false); assert.equal(next.defaultPage, true); assert.equal(next.defaultUrl, false);
+});
+
+test('settings change metadata reports only defaults changed in that atomic save', async () => {
+  resetStorage();
+  const first = await patchContextSettings({ defaultUrl: true }, { includeChanges: true });
+  assert.deepEqual(first.changedDefaults, ['url']);
+  const formatOnly = await patchContextSettings({ defaultUrl: true, urlTemplate: '网址 {{url}}' }, { includeChanges: true });
+  assert.deepEqual(formatOnly.changedDefaults, []);
+  assert.equal(formatOnly.settings.urlTemplate, '网址 {{url}}');
+});
+
+test('initial defaults apply once and explicit cancellation survives polling and unchanged selection reads', async () => {
+  resetStorage(); await patchContextSettings({ defaultUrl: true, defaultPage: true });
+  await updateTabSelection(1, source, selected('词'));
+  const settings = await getContextSettings();
+  const first = await applyTabDefaults(1, settings);
+  assert.equal(first.attachments.url, true); assert.equal(first.pageRequested, true);
+  await setTabAttachment(1, 'selection', false); await setTabAttachment(1, 'url', false); await setTabAttachment(1, 'page', false);
+  const cancelled = await getTabContext(1);
+  await updateTabSelection(1, source, selected('词'));
+  assert.deepEqual(await applyTabDefaults(1, settings), cancelled);
+  const newSelection = await updateTabSelection(1, source, selected('新词'));
+  assert.equal(newSelection.selectionIncluded, true);
+  assert.equal(newSelection.attachments.url, false); assert.equal(newSelection.pageRequested, false);
+});
+
+test('new selections honor a disabled default while explicit inclusion survives the same selection and title updates', async () => {
+  resetStorage(); await patchContextSettings({ defaultSelection: false });
+  assert.equal((await updateTabSelection(1, source, selected('词'))).selectionIncluded, false);
+  await setTabAttachment(1, 'selection', true);
+  const same = await updateTabSelection(1, { ...source, title: '新标题' }, { ...selected('词'), title: '新标题' });
+  assert.equal(same.selectionIncluded, true);
+  assert.equal((await updateTabSelection(1, source, selected('新词'))).selectionIncluded, false);
+  await assert.rejects(setTabAttachment(2, 'selection', true), /划词/);
+  await assert.rejects(setTabAttachment(1, 'selection', 'true'), /划词/);
+});
+
+test('legacy session choices and body snapshots survive default initialization', async () => {
+  resetStorage();
+  sessionData[`${TAB_CONTEXT_PREFIX}1`] = { tabId: 1, revision: 9, ...source, selection: selected('词'), selectionIncluded: false, attachments: { url: true, page: { ...source, content: '旧快照' } } };
+  const restored = await getTabContext(1);
+  const initialized = await applyTabDefaults(1, await getContextSettings());
+  assert.deepEqual(initialized, restored);
+  assert.equal(initialized.selectionIncluded, false); assert.equal(initialized.attachments.url, true);
+  assert.equal(initialized.attachments.page.content, '旧快照'); assert.equal(initialized.pageRequested, true);
+});
+
+test('authorization clears source material but preserves temporary cancellation when the source becomes available', async () => {
+  resetStorage(); const settings = await patchContextSettings({ defaultPage: true, defaultUrl: true });
+  await updateTabSelection(1, source, selected('词')); await applyTabDefaults(1, settings);
+  await setTabAttachment(1, 'page', false); await setTabAttachment(1, 'url', false);
+  const unavailable = await invalidateTabSource(1);
+  assert.equal(unavailable.url, ''); assert.equal(unavailable.selection, null);
+  await updateTabSelection(1, source, null);
+  const restored = await applyTabDefaults(1, settings);
+  assert.equal(restored.pageRequested, false); assert.equal(restored.attachments.url, false);
+  await requestTabPage(1, '提取失败');
+  const failed = await getTabContext(1);
+  assert.equal(failed.pageRequested, true); assert.equal(failed.pageError, '提取失败'); assert.equal(failed.attachments.page, null);
 });

@@ -13,6 +13,7 @@ function fixture(t) {
   const app = document.querySelector('#app');
   editor.value = '原版输入框中的问题';
   let settings = normalizeContextSettings();
+  let failSave = false;
   const context = { ...createTabContext(1), url: 'https://example.com/article', title: '当前网页' };
   const calls = [];
   const appEvents = [];
@@ -24,7 +25,10 @@ function fixture(t) {
       getURL: () => 'chrome-extension://settings-test/',
       async sendMessage(message) {
         calls.push(structuredClone(message));
-        if (message.request.type === 'SIDER_CONTEXT_SETTINGS_PATCH') settings = normalizeContextSettings({ ...settings, ...message.request.patch });
+        if (message.request.type === 'SIDER_CONTEXT_SETTINGS_PATCH') {
+          if (failSave) { failSave = false; return { ok: false, error: '设置保存失败。' }; }
+          settings = normalizeContextSettings({ ...settings, ...message.request.patch });
+        }
         return response();
       },
     },
@@ -78,7 +82,7 @@ function fixture(t) {
     element.dispatchEvent(new window.KeyboardEvent('keyup', { key, bubbles: true, composed: true }));
     return !keydown.defaultPrevented && !beforeInput.defaultPrevented;
   }
-  return { window, document, api, root, $, editor, form, calls, appEvents, formEvents, clickControl, typeText, get nativeSubmits() { return nativeSubmits; }, get settings() { return structuredClone(settings); } };
+  return { window, document, api, root, $, editor, form, calls, appEvents, formEvents, clickControl, typeText, failNextSave() { failSave = true; }, get nativeSubmits() { return nativeSubmits; }, get settings() { return structuredClone(settings); } };
 }
 
 test('settings textareas retain focus and accept typing despite native composer focus handlers', async t => {
@@ -194,4 +198,121 @@ test('native popover opens once, closes on outside click, and leaves the top lay
   assert.equal(opened, false);
   assert.equal(f.api.host.isConnected, false);
   assert.deepEqual(transitions, ['open', 'close', 'open', 'close']);
+});
+
+test('default checkboxes stay editable across refresh and persist boolean choices without touching the native draft', async t => {
+  const f = fixture(t); await f.api.refresh();
+  f.clickControl(f.$('[data-pane="settings"]'));
+  assert.equal(f.$('#pane-body').firstElementChild.tagName, 'FIELDSET');
+  const selection = f.$('#default-selection'), url = f.$('#default-url'), page = f.$('#default-page');
+  assert.equal(selection.checked, true); assert.equal(url.checked, false); assert.equal(page.checked, false);
+  for (const checkbox of [selection, url, page]) assert.ok(f.clickControl(checkbox));
+  assert.equal(selection.checked, false); assert.equal(url.checked, true); assert.equal(page.checked, true);
+  assert.equal(f.root.activeElement, page);
+  await f.api.refresh(); await f.api.refresh();
+  assert.equal(f.$('#default-page'), page); assert.equal(f.root.activeElement, page);
+  assert.equal(selection.checked, false); assert.equal(url.checked, true); assert.equal(page.checked, true);
+  f.clickControl(f.$('#save-settings')); await new Promise(resolve => setImmediate(resolve));
+  const patch = f.calls.find(message => message.request.type === 'SIDER_CONTEXT_SETTINGS_PATCH').request.patch;
+  assert.equal(patch.defaultSelection, false); assert.equal(patch.defaultUrl, true); assert.equal(patch.defaultPage, true);
+  assert.equal(f.settings.defaultSelection, false); assert.equal(f.settings.defaultUrl, true); assert.equal(f.settings.defaultPage, true);
+  assert.equal(f.editor.value, '原版输入框中的问题'); assert.equal(f.nativeSubmits, 0);
+  assert.deepEqual(f.appEvents, []); assert.deepEqual(f.formEvents, []);
+  f.clickControl(f.$('[data-pane="settings"]'));
+  assert.equal(f.$('#default-selection').checked, false); assert.equal(f.$('#default-url').checked, true); assert.equal(f.$('#default-page').checked, true);
+});
+
+test('a failed settings save keeps checkbox edits open and preserves the last saved defaults', async t => {
+  const f = fixture(t); await f.api.refresh();
+  f.clickControl(f.$('[data-pane="settings"]'));
+  f.clickControl(f.$('#default-selection')); f.clickControl(f.$('#default-page'));
+  f.failNextSave(); f.clickControl(f.$('#save-settings')); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.$('.popover').hidden, false); assert.equal(f.$('#default-selection').checked, false); assert.equal(f.$('#default-page').checked, true);
+  assert.equal(f.settings.defaultSelection, true); assert.equal(f.settings.defaultPage, false);
+  assert.match(f.$('.status').textContent, /设置保存失败/);
+  assert.equal(f.$('#settings-error').hidden, false); assert.match(f.$('#settings-error').textContent, /设置保存失败/);
+  assert.equal(f.editor.value, '原版输入框中的问题'); assert.equal(f.nativeSubmits, 0);
+  f.clickControl(f.$('#save-settings')); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.$('.popover').hidden, true); assert.equal(f.settings.defaultSelection, false); assert.equal(f.settings.defaultPage, true);
+});
+
+test('invalid formats focus the field and keep settings edits without saving or touching the question', async t => {
+  const f = fixture(t); await f.api.refresh();
+  f.clickControl(f.$('[data-pane="settings"]'));
+  f.clickControl(f.$('#default-page'));
+  const template = f.$('#url-template'); template.value = '来源：{{unknown}}';
+  f.clickControl(f.$('#save-settings')); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.$('.popover').hidden, false);
+  assert.equal(f.root.activeElement, template); assert.equal(template.getAttribute('aria-invalid'), 'true');
+  assert.equal(template.getAttribute('aria-describedby'), 'settings-error');
+  assert.match(f.$('#settings-error').textContent, /未知变量.*unknown/);
+  assert.equal(f.$('#settings-error').previousElementSibling, template);
+  assert.equal(f.calls.filter(message => message.request.type === 'SIDER_CONTEXT_SETTINGS_PATCH').length, 0);
+  assert.equal(f.settings.defaultPage, false); assert.equal(f.$('#default-page').checked, true);
+  await f.api.refresh(); assert.equal(f.root.activeElement, template); assert.equal(template.value, '来源：{{unknown}}');
+  template.value = '来源：{{ url }}'; template.dispatchEvent(new f.window.InputEvent('input', { bubbles: true, composed: true }));
+  assert.equal(template.hasAttribute('aria-invalid'), false); assert.equal(f.$('#settings-error').hidden, true);
+  f.clickControl(f.$('#save-settings')); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.settings.urlTemplate, '来源：{{ url }}'); assert.equal(f.settings.defaultPage, true);
+  assert.equal(f.$('.popover').hidden, true); assert.equal(f.editor.value, '原版输入框中的问题'); assert.equal(f.nativeSubmits, 0);
+});
+
+test('empty formats and body variables in attachment notes are rejected before settings are persisted', async t => {
+  const f = fixture(t); await f.api.refresh();
+  f.clickControl(f.$('[data-pane="settings"]'));
+  const template = f.$('#selection-template'); template.value = ' \n ';
+  f.clickControl(f.$('#save-settings')); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.root.activeElement, template); assert.match(f.$('#settings-error').textContent, /不能为空/);
+  template.value = '{{selection}}';
+  const attachment = f.$('#page-attachment-template'); attachment.value = '全文 {{page.content}}';
+  f.clickControl(f.$('#save-settings')); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.root.activeElement, attachment); assert.match(f.$('#settings-error').textContent, /附件说明不能使用.*filename/);
+  assert.equal(template.hasAttribute('aria-invalid'), false);
+  assert.equal(f.calls.filter(message => message.request.type === 'SIDER_CONTEXT_SETTINGS_PATCH').length, 0);
+  assert.equal(f.editor.value, '原版输入框中的问题'); assert.equal(f.nativeSubmits, 0);
+});
+
+test('valid templates can be saved without collecting their referenced content first', async t => {
+  const f = fixture(t); await f.api.refresh();
+  f.clickControl(f.$('[data-pane="settings"]'));
+  f.$('#selection-template').value = '{{selection.context}}\n{{content}}';
+  f.$('#url-template').value = '{{title}}\n{{selection}}';
+  f.$('#page-attachment-template').value = '{{ filename }} {{context}} {{url}}';
+  f.clickControl(f.$('#save-settings')); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.$('.popover').hidden, true);
+  assert.equal(f.settings.selectionTemplate, '{{selection.context}}\n{{content}}');
+  assert.equal(f.settings.urlTemplate, '{{title}}\n{{selection}}');
+  assert.equal(f.editor.value, '原版输入框中的问题'); assert.equal(f.nativeSubmits, 0);
+});
+
+test('text mode preserves an unused legacy attachment note and validates it when attachments become possible', async t => {
+  const f = fixture(t); await f.api.refresh();
+  f.clickControl(f.$('[data-pane="settings"]'));
+  f.$('#page-mode').value = 'text';
+  f.$('#page-attachment-template').value = '旧附件格式 {{content}}';
+  f.clickControl(f.$('#save-settings')); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.settings.pageMode, 'text'); assert.equal(f.settings.pageAttachmentTemplate, '旧附件格式 {{content}}');
+  f.clickControl(f.$('[data-pane="settings"]')); f.clickControl(f.$('#default-url'));
+  f.clickControl(f.$('#save-settings')); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.settings.defaultUrl, true); assert.equal(f.settings.pageAttachmentTemplate, '旧附件格式 {{content}}');
+  f.clickControl(f.$('[data-pane="settings"]')); f.$('#page-mode').value = 'auto';
+  f.clickControl(f.$('#save-settings')); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.settings.pageMode, 'text'); assert.equal(f.$('.popover').hidden, false);
+  assert.equal(f.root.activeElement, f.$('#page-attachment-template'));
+  assert.match(f.$('#settings-error').textContent, /附件说明不能使用/);
+  assert.equal(f.editor.value, '原版输入框中的问题'); assert.equal(f.nativeSubmits, 0);
+});
+
+test('an invalid automatic threshold is focused, while switching to text preserves the saved unused threshold', async t => {
+  const f = fixture(t); await f.api.refresh();
+  f.clickControl(f.$('[data-pane="settings"]'));
+  const threshold = f.$('#page-threshold'); threshold.value = '';
+  f.clickControl(f.$('#save-settings')); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.root.activeElement, threshold); assert.equal(threshold.getAttribute('aria-invalid'), 'true');
+  assert.equal(f.calls.filter(message => message.request.type === 'SIDER_CONTEXT_SETTINGS_PATCH').length, 0);
+  const mode = f.$('#page-mode'); mode.value = 'text'; mode.dispatchEvent(new f.window.Event('change', { bubbles: true, composed: true }));
+  assert.equal(threshold.disabled, true);
+  f.clickControl(f.$('#save-settings')); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.settings.pageMode, 'text'); assert.equal(f.settings.pageThreshold, 10000);
+  assert.equal(f.$('.popover').hidden, true); assert.equal(f.editor.value, '原版输入框中的问题');
 });
