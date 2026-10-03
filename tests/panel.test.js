@@ -6,7 +6,7 @@ import { JSDOM } from 'jsdom';
 let instance = 0;
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
-async function fixture(t, { extension = true, sourceTab = '13', permissionsGranted = true } = {}) {
+async function fixture(t, { extension = true, sourceTab = '13', permissionsGranted = true, connectError = '' } = {}) {
   const html = await readFile(new URL('../src/panel.html', import.meta.url), 'utf8');
   const { window } = new JSDOM(html, { url: `https://panel.test/${sourceTab === null ? '' : '?sourceTab=' + sourceTab}` });
   const names = ['window','document','chrome','setTimeout','clearTimeout','setInterval','clearInterval'];
@@ -25,7 +25,7 @@ async function fixture(t, { extension = true, sourceTab = '13', permissionsGrant
     runtime: {
       id: 'panel-test',
       sendMessage(message) { return new Promise(resolve => calls.push({ message, resolve })); },
-      connect({ name }) { const listeners = []; const messages = []; const port = { name, messages, postMessage(message) { messages.push(message); }, onDisconnect: { addListener(fn) { listeners.push(fn); } }, disconnect() { for(const fn of listeners) fn(); } }; ports.push(port); return port; },
+      connect({ name }) { if (connectError) throw new Error(connectError); const listeners = []; const messages = []; const port = { name, messages, postMessage(message) { messages.push(message); }, onDisconnect: { addListener(fn) { listeners.push(fn); } }, disconnect() { for(const fn of listeners) fn(); } }; ports.push(port); return port; },
     },
     windows: { async getCurrent() { return { id: 7 }; } },
     tabs: { async get(id) { return { id, windowId: 7 }; } },
@@ -79,12 +79,15 @@ test('opens original ChatGPT automatically only after the compatibility rule is 
   assert.equal(f.calls[0].message.windowId, 7);
   assert.equal(f.calls[0].message.tabId, 13);
   assert.equal(frame.hasAttribute('src'), false);
+  assert.equal(f.document.querySelector('#loading-screen').hidden, true);
   assert.equal(f.document.querySelector('#enable-embed'), null);
   assert.equal(f.document.querySelector('#prompt-input'), null);
   await f.resolve(0, { ok: true, compatibility: true });
   assert.equal(new URL(frame.src).hostname, 'chatgpt.com');
   assert.equal(new URL(frame.src).searchParams.get('sider_bridge'), f.calls[0].message.bridgeId);
   assert.equal(frame.hidden, false);
+  assert.equal(f.document.querySelector('#loading-screen').hidden, true, 'pending load and bridge must not mask first paint');
+  assert.equal(f.document.querySelector('#connection-status').className, '');
   assert.equal(f.calls[1].message.type, 'SIDER_EMBED_STATUS_GET');
   assert.equal(f.ports[0].name, 'sider-panel-lifecycle');
 });
@@ -212,9 +215,12 @@ test('a frame load alone cannot report a working ChatGPT connection', async t =>
   const f = await fixture(t);
   await f.resolve(0, { ok: true, compatibility: true });
   f.document.querySelector('iframe').dispatchEvent(new f.window.Event('load'));
-  assert.equal(f.document.querySelector('#loading-screen').hidden, false);
+  assert.equal(f.document.querySelector('#loading-screen').hidden, true);
+  assert.equal(f.document.querySelector('iframe').hidden, false);
+  assert.notEqual(f.document.querySelector('#connection-status').className, 'connected');
   await f.resolve(1, { ok: true, compatibility: true, connected: false, enhancementReady: false });
-  assert.equal(f.document.querySelector('#loading-screen').hidden, false);
+  assert.equal(f.document.querySelector('#loading-screen').hidden, true);
+  assert.notEqual(f.document.querySelector('#connection-status').className, 'connected');
   await f.tick(700);
   await f.resolve(2, { ok: true, compatibility: true, connected: true, enhancementReady: true });
   assert.equal(f.document.querySelector('#loading-screen').hidden, true);
@@ -237,9 +243,54 @@ test('an obsolete poll result cannot overwrite a newer retry', async t => {
   await f.resolve(0, { ok: true, compatibility: true });
   f.document.querySelector('#reload-chatgpt').click(); await settle();
   await f.resolve(1, { ok: true, connected: true, enhancementReady: true });
-  assert.equal(f.document.querySelector('#loading-screen').hidden, false);
+  assert.equal(f.document.querySelector('#loading-screen').hidden, true);
+  assert.notEqual(f.document.querySelector('#connection-status').className, 'connected');
   await f.resolve(2, { ok: false, error: '重试失败' });
   assert.match(f.document.querySelector('#loading-detail').textContent, /重试失败/);
+  assert.equal(f.document.querySelector('#loading-screen').hasAttribute('data-inline'), true);
+  assert.equal(f.document.querySelector('iframe').hidden, false);
+});
+
+test('a missing bridge shows compact recovery without covering a started ChatGPT page and clears on connection', async t => {
+  const f = await fixture(t);
+  await f.resolve(0, { ok: true, compatibility: true });
+  const frame = f.document.querySelector('iframe'); const recovery = f.document.querySelector('#loading-screen');
+  f.advanceTime(36000);
+  await f.resolve(1, { ok: true, compatibility: true, connected: false, enhancementReady: false });
+  assert.equal(frame.hidden, false); assert.equal(new URL(frame.src).hostname, 'chatgpt.com');
+  assert.equal(recovery.hidden, false); assert.equal(recovery.hasAttribute('data-inline'), true);
+  assert.equal(f.document.querySelector('#recovery-actions').hidden, false);
+  assert.match(f.document.querySelector('#loading-title').textContent, /尚未确认/);
+  assert.match(f.document.querySelector('#diagnostics-text').textContent, /error:/);
+  frame.dispatchEvent(new f.window.Event('load'));
+  await f.resolve(f.calls.length - 1, { ok: true, compatibility: true, connected: true, enhancementReady: true });
+  assert.equal(recovery.hidden, true); assert.equal(recovery.hasAttribute('data-inline'), false);
+  assert.doesNotMatch(f.document.querySelector('#diagnostics-text').textContent, /error:/);
+});
+
+test('retry keeps the old ChatGPT frame visible while registration is pending or fails', async t => {
+  const f = await fixture(t);
+  await f.resolve(0, { ok: true, compatibility: true });
+  await f.resolve(1, { ok: true, compatibility: true, connected: true, enhancementReady: true });
+  const frame = f.document.querySelector('iframe'); const previousURL = frame.src;
+  f.document.querySelector('#reload-chatgpt').click(); await settle();
+  assert.equal(frame.src, previousURL); assert.equal(frame.hidden, false);
+  assert.equal(f.document.querySelector('#loading-screen').hidden, true);
+  await f.resolve(f.calls.length - 1, { ok: false, error: '暂时无法准备连接' });
+  assert.equal(frame.src, previousURL); assert.equal(frame.hidden, false);
+  assert.equal(f.document.querySelector('#loading-screen').hasAttribute('data-inline'), true);
+  assert.match(f.document.querySelector('#loading-detail').textContent, /无法准备/);
+});
+
+test('a lifecycle startup error cannot put a full-screen mask back over first paint', async t => {
+  const f = await fixture(t, { connectError: '后台连接端口暂时不可用' });
+  await f.resolve(0, { ok: true, compatibility: true });
+  assert.equal(new URL(f.document.querySelector('iframe').src).hostname, 'chatgpt.com');
+  assert.equal(f.document.querySelector('iframe').hidden, false);
+  assert.equal(f.document.querySelector('#loading-screen').hasAttribute('data-inline'), true);
+  assert.match(f.document.querySelector('#loading-detail').textContent, /连接端口/);
+  await f.resolve(1, { ok: true, compatibility: true, connected: true, enhancementReady: true });
+  assert.equal(f.document.querySelector('#loading-screen').hidden, true);
 });
 
 test('localhost preview clearly requires installation and does not fake ChatGPT', async t => {

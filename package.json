@@ -1,6 +1,6 @@
 {
   "name": "sider-context",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "private": true,
   "type": "module",
   "description": "A small browser context and prompt layer for the original ChatGPT website.",

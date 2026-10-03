@@ -12,6 +12,12 @@ await build({ ...common, entryPoints: { 'page-content': path.join(root, 'src/con
 for (const [source, dest] of [['manifest.json', 'manifest.json'], ['src/panel.html', 'panel.html'], ['src/styles.css', 'styles.css']]) {
   await copyFile(path.join(root, source), path.join(outdir, dest));
 }
+const iconDir = path.join(outdir, 'icons');
+await mkdir(iconDir, { recursive: true });
+for (const size of [16, 32, 48, 128]) {
+  const filename = `icon-${size}.png`;
+  await copyFile(path.join(root, 'assets', 'icons', filename), path.join(iconDir, filename));
+}
 const packages = ['@mozilla/readability', 'turndown', 'turndown-plugin-gfm'];
 let notices = 'Sider third-party notices\n\n';
 for (const name of packages) {

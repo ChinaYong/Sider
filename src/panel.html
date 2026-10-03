@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>ChatGPT · Sider</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/icon-32.png">
   <link rel="stylesheet" href="styles.css">
   <script type="module" src="panel.js"></script>
 </head>
@@ -15,7 +16,7 @@
   </header>
   <main>
     <iframe id="chatgpt-frame" title="原版 ChatGPT" allow="microphone; clipboard-write" referrerpolicy="origin" hidden></iframe>
-    <section id="loading-screen" class="loading-screen" aria-live="polite">
+    <section id="loading-screen" class="loading-screen" aria-live="polite" hidden>
       <span id="loading-symbol" class="spinner" aria-hidden="true"></span>
       <h1 id="loading-title">正在打开 ChatGPT</h1>
       <p id="loading-detail">正在准备侧栏连接…</p>

@@ -45,8 +45,10 @@ function failed(error) {
     return;
   }
   diagnostics.stage = '连接失败'; diagnostics.error = error;
-  status('ChatGPT 连接失败', 'failed');
-  $('#loading-title').textContent = 'ChatGPT 没有完成加载';
+  const navigationStarted = $('#chatgpt-frame').hasAttribute('src');
+  status(navigationStarted ? 'ChatGPT 连接尚未确认' : 'ChatGPT 连接失败', 'failed');
+  $('#loading-screen').toggleAttribute('data-inline', navigationStarted);
+  $('#loading-title').textContent = navigationStarted ? '尚未确认 ChatGPT 连接' : 'ChatGPT 没有完成加载';
   $('#loading-detail').textContent = error;
   $('#loading-symbol').hidden = true;
   $('#recovery-actions').hidden = false;
@@ -98,7 +100,9 @@ async function poll(run, startedAt) {
     if (result.connected) {
       hasConnected = true;
       delete diagnostics.warning;
+      delete diagnostics.error;
       $('#loading-screen').hidden = true;
+      $('#loading-screen').removeAttribute('data-inline');
       diagnostics.stage = result.enhancementReady ? 'ChatGPT 与增强层就绪' : 'ChatGPT 已连接';
       status(result.enhancementReady ? 'ChatGPT · 网页引用已就绪' : 'ChatGPT · 正在准备网页引用', 'connected');
     }
@@ -128,9 +132,10 @@ async function poll(run, startedAt) {
 async function start() {
   if (!isExtension) {
     status('需要安装浏览器扩展');
+    $('#loading-screen').hidden = false;
     $('#loading-symbol').hidden = true;
     $('#loading-title').textContent = '请在浏览器侧栏打开 Sider';
-    $('#loading-detail').textContent = '在 Tabbit 的扩展管理页加载 Q:\\1Coding\\Sider\\dist，再点击扩展图标。此页面只提供安装提示；原版 ChatGPT 在已安装的扩展侧栏中加载。';
+    $('#loading-detail').textContent = '在浏览器的扩展管理页加载构建生成的 dist 文件夹，再点击扩展图标。原版 ChatGPT 在已安装的扩展侧栏中加载。';
     return;
   }
   const run = ++generation;
@@ -141,7 +146,8 @@ async function start() {
   diagnostics.connected = false; diagnostics.enhancementReady = false;
   diagnostics.stage = '安装内嵌兼容规则';
   status('正在打开 ChatGPT');
-  $('#loading-screen').hidden = false;
+  $('#loading-screen').hidden = true;
+  $('#loading-screen').removeAttribute('data-inline');
   $('#loading-symbol').hidden = false;
   $('#recovery-actions').hidden = true;
   $('#loading-title').textContent = '正在打开 ChatGPT';
@@ -152,12 +158,13 @@ async function start() {
     const registered = await request({ type: 'SIDER_EMBED_REGISTER', bridgeId, windowId, tabId: sourceTabId });
     if (run !== generation) return;
     diagnostics.rule = registered.compatibility;
-    connectLifecycle();
     const frame = $('#chatgpt-frame');
     frame.hidden = false;
+    // Show the site's first paint without waiting for load or the document-idle bridge.
     frame.src = `https://chatgpt.com/?sider_bridge=${encodeURIComponent(bridgeId)}`;
     diagnostics.stage = '等待 ChatGPT 网页回执';
     $('#loading-detail').textContent = '正在加载 chatgpt.com…';
+    connectLifecycle();
     void poll(run, Date.now());
   } catch (error) { if (run === generation) failed(error.message); }
 }
