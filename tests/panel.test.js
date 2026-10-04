@@ -2,11 +2,78 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { JSDOM } from 'jsdom';
+import { AI_WEB_SETTINGS_KEY, BUILTIN_AI_SITES, normalizeAIWebSettings } from '../src/ai-web.js';
 
 let instance = 0;
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
-async function fixture(t, { extension = true, sourceTab = '13', permissionsGranted = true, connectError = '' } = {}) {
+test('global AI selection loads Gemini and a different website cannot perform its handshake', async t => {
+  const f = await fixture(t, { aiSettings: { activeSiteId: 'gemini', customSites: [] } });
+  assert.equal(f.calls[0].message.siteId, 'gemini');
+  await f.resolve(0, { ok: true, compatibility: true, site: BUILTIN_AI_SITES[1] });
+  assert.equal(new URL(f.document.querySelector('iframe').src).origin, 'https://gemini.google.com');
+  const port = responsePort(); requestHandshake(f, port); assert.equal(port.messages.length, 0);
+  requestHandshake(f, port, { origin: 'https://gemini.google.com' });
+  assert.equal(port.messages[0].site.id, 'gemini');
+});
+
+test('global website changes keep a live frame and draft until the user reloads', async t => {
+  const f = await fixture(t); await f.resolve(0, { ok: true, compatibility: true });
+  const before = f.document.querySelector('iframe').src;
+  f.updateAI({ activeSiteId: 'claude', customSites: [] });
+  assert.equal(f.document.querySelector('iframe').src, before);
+  assert.equal(f.document.querySelector('#ai-settings-updated').hidden, false);
+  f.document.querySelector('#ai-settings-updated').click(); await settle();
+  const call = f.calls.findIndex((entry, index) => index > 0 && entry.message.type === 'SIDER_EMBED_REGISTER');
+  assert.equal(f.calls[call].message.siteId, 'claude');
+  await f.resolve(call, { ok: true, compatibility: true, site: BUILTIN_AI_SITES[2] });
+  assert.equal(new URL(f.document.querySelector('iframe').src).origin, 'https://claude.ai');
+  assert.equal(f.document.querySelector('#ai-settings-updated').hidden, true);
+});
+
+test('a failed switch keeps the previous frame origin and bridge greeting usable', async t => {
+  const f = await fixture(t); await f.resolve(0, { ok: true, compatibility: true });
+  const before = f.document.querySelector('iframe').src;
+  f.updateAI({ activeSiteId: 'claude', customSites: [] }); f.document.querySelector('#reload-chatgpt').click(); await settle();
+  const index = f.calls.findIndex((entry, index) => index > 0 && entry.message.type === 'SIDER_EMBED_REGISTER');
+  await f.resolve(index, { ok: false, error: 'Permission denied' });
+  assert.equal(f.document.querySelector('iframe').src, before);
+  const port = responsePort(); requestHandshake(f, port); assert.equal(port.messages[0].site.id, 'chatgpt');
+});
+
+test('website settings remain available after an embedding failure and denied permission keeps edits', async t => {
+  const f = await fixture(t, { permissionsGranted: false });
+  await f.resolve(0, { ok: false, error: 'Frame blocked' });
+  f.document.querySelector('#ai-settings-toggle').click(); await settle();
+  await f.resolve(f.calls.length - 1, { ok: true, settings: normalizeAIWebSettings() });
+  const select = f.document.querySelector('#ai-active-site'); select.value = 'gemini'; select.dispatchEvent(new f.window.Event('change'));
+  f.document.querySelector('#ai-save-settings').click(); await settle();
+  assert.deepEqual(f.permissions.at(-1), { origins: ['https://gemini.google.com/*'] });
+  assert.equal(f.document.querySelector('#ai-settings-dialog').open, true);
+  assert.equal(select.value, 'gemini'); assert.match(f.document.querySelector('#ai-settings-error').textContent, /未授予/);
+  assert.equal(f.calls.some(entry => entry.message.type === 'SIDER_AI_WEB_SETTINGS_SAVE'), false);
+});
+
+test('custom website advanced settings validate and remain intact when saving fails', async t => {
+  const f = await fixture(t); await f.resolve(0, { ok: true, compatibility: true });
+  f.document.querySelector('#ai-settings-toggle').click(); await settle();
+  await f.resolve(f.calls.length - 1, { ok: true, settings: normalizeAIWebSettings() });
+  f.document.querySelector('#ai-add-site').click();
+  f.document.querySelector('#ai-site-name').value = 'My AI'; f.document.querySelector('#ai-site-url').value = 'https://my-ai.test/chat';
+  f.document.querySelector('#ai-selector-composer').value = '[';
+  f.document.querySelector('#ai-apply-site').click(); assert.match(f.document.querySelector('#ai-settings-error').textContent, /选择器无效/);
+  f.document.querySelector('#ai-selector-composer').value = '#question'; f.document.querySelector('#ai-send-shortcut').value = 'ctrl-enter';
+  f.document.querySelector('#ai-apply-site').click(); f.document.querySelector('#ai-save-settings').click(); await settle();
+  const index = f.calls.length - 1; assert.equal(f.calls[index].message.type, 'SIDER_AI_WEB_SETTINGS_SAVE');
+  assert.equal(f.calls[index].message.settings.customSites[0].selectors.composer, '#question');
+  assert.equal(f.calls[index].message.settings.customSites[0].sendShortcut, 'ctrl-enter');
+  await f.resolve(index, { ok: false, error: 'Storage failed' });
+  assert.equal(f.document.querySelector('#ai-settings-dialog').open, true);
+  assert.match(f.document.querySelector('#ai-settings-error').textContent, /Storage failed/);
+  f.document.querySelector('#ai-edit-site').click(); assert.equal(f.document.querySelector('#ai-site-name').value, 'My AI');
+});
+
+async function fixture(t, { extension = true, sourceTab = '13', permissionsGranted = true, connectError = '', aiSettings } = {}) {
   const html = await readFile(new URL('../src/panel.html', import.meta.url), 'utf8');
   const { window } = new JSDOM(html, { url: `https://panel.test/${sourceTab === null ? '' : '?sourceTab=' + sourceTab}` });
   const names = ['window','document','chrome','setTimeout','clearTimeout','setInterval','clearInterval'];
@@ -16,6 +83,8 @@ async function fixture(t, { extension = true, sourceTab = '13', permissionsGrant
   let now = originalNow();
   Date.now = () => now;
   const frameMessages = [];
+  let storedAI = normalizeAIWebSettings(aiSettings);
+  const storageListeners = new Set();
   const frame = window.document.querySelector('iframe');
   // Model the stable WindowProxy across iframe navigations. Any DOMWindow
   // message would reproduce the startup about:blank origin mismatch.
@@ -25,11 +94,12 @@ async function fixture(t, { extension = true, sourceTab = '13', permissionsGrant
     runtime: {
       id: 'panel-test',
       sendMessage(message) { return new Promise(resolve => calls.push({ message, resolve })); },
-      connect({ name }) { if (connectError) throw new Error(connectError); const listeners = []; const messages = []; const port = { name, messages, postMessage(message) { messages.push(message); }, onDisconnect: { addListener(fn) { listeners.push(fn); } }, disconnect() { for(const fn of listeners) fn(); } }; ports.push(port); return port; },
+      connect({ name }) { if (connectError) throw new Error(connectError); const listeners = []; const messages = []; const receivers = []; const port = { name, messages, postMessage(message) { messages.push(message); }, onMessage: { addListener(fn) { receivers.push(fn); } }, receive(message) { for (const fn of receivers) fn(message); }, onDisconnect: { addListener(fn) { listeners.push(fn); } }, disconnect() { for(const fn of listeners) fn(); } }; ports.push(port); return port; },
     },
     windows: { async getCurrent() { return { id: 7 }; } },
     tabs: { async get(id) { return { id, windowId: 7 }; } },
     permissions: { async request(details) { permissions.push(details); return permissionsGranted; } },
+    storage: { local: { async get(key) { return { [key]: structuredClone(storedAI) }; } }, onChanged: { addListener(fn) { storageListeners.add(fn); }, removeListener(fn) { storageListeners.delete(fn); } } },
   };
   Object.assign(globalThis, { window, document: window.document });
   if (extension) globalThis.chrome = chrome; else delete globalThis.chrome;
@@ -50,6 +120,7 @@ async function fixture(t, { extension = true, sourceTab = '13', permissionsGrant
   return { window, document: window.document, calls, ports, permissions, timers, frameMessages,
     advanceTime(milliseconds) { now += milliseconds; },
     setPermissionGranted(value) { permissionsGranted = value; },
+    updateAI(settings) { storedAI = normalizeAIWebSettings(settings); for (const listener of storageListeners) listener({ [AI_WEB_SETTINGS_KEY]: { newValue: structuredClone(storedAI) } }, 'local'); },
     async resolve(index, result) { calls[index].resolve(result); await settle(); },
     async tick(delay) { const [id, timer] = [...timers].find(([,entry]) => entry.delay === delay) || []; if(timer) { timers.delete(id); void timer.fn(); await settle(); } },
   };
@@ -159,7 +230,7 @@ test('late webpage enhancements recover after a non-blocking timeout warning', a
   assert.equal(f.document.querySelector('iframe').hidden, false);
   assert.equal(status.className, 'warning');
   assert.match(status.textContent, /网页引用未就绪/);
-  assert.match(status.title, /可继续使用 ChatGPT/);
+  assert.match(status.title, /重新连接.*原站入口/);
   assert.match(f.document.querySelector('#diagnostics-text').textContent, /warning:.*重新连接/);
   assert.equal(f.document.querySelector('#toast').hidden, true);
   assert.ok([...f.timers.values()].some(timer => timer.delay === 5000));
@@ -209,6 +280,39 @@ test('a lifecycle reconnection error retains an already connected ChatGPT page',
   assert.equal(f.document.querySelector('#connection-status').className, 'warning');
   assert.match(f.document.querySelector('#diagnostics-text').textContent, /无法恢复后台连接/);
   assert.match(f.document.querySelector('#diagnostics-text').textContent, /enhancementReady: false/);
+});
+
+test('an owning lifecycle report updates failures and recovery after the initial ready poll has ended', async t => {
+  const f = await fixture(t);
+  await f.resolve(0, { ok: true, compatibility: true });
+  await f.resolve(1, { ok: true, compatibility: true, connected: true, enhancementReady: true });
+  const before = f.calls.length;
+  const bridgeId = f.calls[0].message.bridgeId;
+  f.ports[0].receive({ type: 'SIDER_ENHANCEMENT_READY', bridgeId: 'another-panel-bridge' });
+  await settle(); assert.equal(f.calls.length, before);
+  f.ports[0].receive({ type: 'SIDER_ENHANCEMENT_READY', bridgeId, ready: true, detail: 'obsolete payload' });
+  await settle(); assert.equal(f.calls.at(-1).message.type, 'SIDER_EMBED_STATUS_GET');
+  await f.resolve(f.calls.length - 1, { ok: true, compatibility: true, connected: true, enhancementReady: false, enhancementDetail: '实时连接失败，原站提示已保留。' });
+  assert.match(f.document.querySelector('#connection-status').textContent, /网页引用未就绪/);
+  assert.match(f.document.querySelector('#diagnostics-text').textContent, /实时连接失败/);
+  assert.doesNotMatch(f.document.querySelector('#diagnostics-text').textContent, /可继续使用/);
+  assert.equal(f.document.querySelector('#loading-screen').hidden, true);
+  f.ports[0].receive({ type: 'SIDER_ENHANCEMENT_READY', bridgeId, ready: false });
+  await settle(); await f.resolve(f.calls.length - 1, { ok: true, compatibility: true, connected: true, enhancementReady: true });
+  assert.match(f.document.querySelector('#connection-status').textContent, /网页引用已就绪/);
+  assert.doesNotMatch(f.document.querySelector('#diagnostics-text').textContent, /实时连接失败/);
+});
+
+test('a newer lifecycle report supersedes pending status reads and a disconnected port cannot update the panel', async t => {
+  const f = await fixture(t); await f.resolve(0, { ok: true, compatibility: true });
+  const report = { type: 'SIDER_ENHANCEMENT_READY', bridgeId: f.calls[0].message.bridgeId };
+  f.ports[0].receive(report); await settle();
+  await f.resolve(1, { ok: true, compatibility: true, connected: true, enhancementReady: true });
+  assert.doesNotMatch(f.document.querySelector('#connection-status').textContent, /已就绪/);
+  await f.resolve(f.calls.length - 1, { ok: true, compatibility: true, connected: true, enhancementReady: false, enhancementDetail: '发送控件缺失。' });
+  assert.match(f.document.querySelector('#diagnostics-text').textContent, /发送控件缺失/);
+  f.ports[0].disconnect(); const before = f.calls.length;
+  f.ports[0].receive(report); await settle(); assert.equal(f.calls.length, before);
 });
 
 test('a frame load alone cannot report a working ChatGPT connection', async t => {
@@ -349,7 +453,7 @@ test('the ChatGPT child receives its bound bridge over the transferred MessagePo
   await f.resolve(0, { ok: true, compatibility: true });
   const port = responsePort();
   requestHandshake(f, port, { data: { type: 'SIDER_EMBED_HELLO_REQUEST', bridgeId: 'attacker-chosen-bridge' } });
-  assert.deepEqual(port.messages, [{ type: 'SIDER_EMBED_HELLO', bridgeId: f.calls[0].message.bridgeId }]);
+  assert.deepEqual(port.messages, [{ type: 'SIDER_EMBED_HELLO', bridgeId: f.calls[0].message.bridgeId, site: BUILTIN_AI_SITES[0] }]);
   assert.equal(port.closed, 1);
   assert.equal(f.frameMessages.length, 0);
 });

@@ -7,7 +7,9 @@ const EXCLUDED_TAGS = new Set([
   'IFRAME', 'OBJECT', 'EMBED', 'CANVAS',
 ]);
 const BLOCK_SELECTOR = 'p,li,blockquote,pre,td,th,h1,h2,h3,h4,h5,h6,div,section,article,main';
-const LOADED_WARNING = '仅包含采集时已加载的网页内容；未加载、未展开或其他框架中的内容可能未包含。';
+const MAIN_SELECTOR = 'main,[role="main"],article';
+const EVIDENCE_SELECTOR = 'p,li,h2,h3,h4,h5,h6,pre,table,details,aside,footer,blockquote,[role="note"]';
+const LOADED_WARNING = '仅包含采集时已加载的网页正文；未加载的内容、其他框架及图片中的文字可能未包含。';
 
 export function isSupportedDocument(document) {
   return /^https?:$/.test(document.location?.protocol || '');
@@ -65,38 +67,112 @@ function normaliseInline(text) {
 }
 
 function cleanClone(original, clone) {
-  const originals = [original, ...original.querySelectorAll('*')];
-  const clones = [clone, ...clone.querySelectorAll('*')];
-  for (let index = 0; index < originals.length; index += 1) {
-    const source = originals[index];
-    const target = clones[index];
-    if (source.nodeType !== 1 || !target) continue;
-    if (source !== original && isExcluded(source)) {
-      target.remove();
-      continue;
-    }
+  const clean = (source, target) => {
     for (const attribute of [...target.attributes]) {
       const name = attribute.name.toLowerCase();
       if (name.startsWith('on') || name === 'srcdoc') target.removeAttribute(attribute.name);
       if (['href', 'src', 'action', 'formaction'].includes(name)) {
-        const value = attribute.value.trim();
-        if (/^(?:javascript|vbscript|data):/i.test(value)) target.removeAttribute(attribute.name);
+        try {
+          const url = new URL(attribute.value.trim(), source.ownerDocument.baseURI);
+          if (/^(?:javascript|vbscript|data):$/i.test(url.protocol)) target.removeAttribute(attribute.name);
+          else target.setAttribute(attribute.name, url.href);
+        } catch { target.removeAttribute(attribute.name); }
       }
     }
-  }
-  clone.querySelectorAll('nav,aside,footer,[role="navigation"]').forEach(element => element.remove());
+    let sourceChild = source.firstElementChild;
+    let targetChild = target.firstElementChild;
+    while (sourceChild && targetChild) {
+      const nextSource = sourceChild.nextElementSibling;
+      const nextTarget = targetChild.nextElementSibling;
+      const navigation = sourceChild.matches('nav,[role="navigation"]');
+      const peripheral = sourceChild.matches('aside,footer') && !sourceChild.closest(MAIN_SELECTOR) && sourceChild.getAttribute('role') !== 'note';
+      if (navigation || peripheral || isExcluded(sourceChild)) targetChild.remove();
+      else clean(sourceChild, targetChild);
+      sourceChild = nextSource;
+      targetChild = nextTarget;
+    }
+  };
+  clean(original, clone);
   return clone;
 }
 
 function sanitizedDocument(document) {
   const clone = document.cloneNode(true);
   cleanClone(document.documentElement, clone.documentElement);
+  // Head elements are visually hidden, but their metadata describes the source.
+  const head = clone.createElement('head');
+  const title = clone.createElement('title');
+  title.textContent = document.title;
+  head.append(title);
+  for (const source of document.querySelectorAll('meta[name],meta[property]')) {
+    const meta = clone.createElement('meta');
+    for (const attribute of ['name', 'property', 'content']) {
+      if (source.hasAttribute(attribute)) meta.setAttribute(attribute, source.getAttribute(attribute));
+    }
+    head.append(meta);
+  }
+  clone.head?.remove();
+  clone.documentElement.prepend(head);
+  // Keep inert metadata in the detached head for Readability's JSON-LD parser.
+  // It is never included in the fallback body or executed in the live document.
+  for (const source of document.querySelectorAll('script[type="application/ld+json"]')) {
+    const data = clone.createElement('script');
+    data.type = 'application/ld+json';
+    data.textContent = source.textContent;
+    head.append(data);
+  }
   return clone;
 }
 
 function tableNeedsTextFallback(table) {
   return Boolean(table.querySelector('[rowspan]:not([rowspan="1"]),[colspan]:not([colspan="1"])'))
-    || !table.querySelector('tr')?.querySelector('th');
+    || !table.rows[0]?.cells.length || ![...table.rows[0].cells].every(cell => cell.tagName === 'TH')
+    || Boolean(table.querySelector('pre,table,br,ul,ol,blockquote,td p+p,th p+p'));
+}
+
+function tableMarkdown(table, converter) {
+  const rows = [...table.rows].filter(row => row.closest('table') === table);
+  const caption = [...table.children].find(node => node.tagName === 'CAPTION');
+  const title = caption ? converter.turndown(caption).trim() : '';
+  const converted = new Map();
+  const cellText = cell => {
+    if (!converted.has(cell)) converted.set(cell, converter.turndown(cell).trim());
+    return converted.get(cell);
+  };
+  if (!tableNeedsTextFallback(table) && rows.every(row => [...row.cells].every(cell => !cellText(cell).includes('\n')))) {
+    const lines = rows.map(row => `| ${[...row.cells].map(cell => cellText(cell).replace(/\\?\|/g, '\\|')).join(' | ')} |`);
+    lines.splice(1, 0, `| ${[...rows[0].cells].map(() => '---').join(' | ')} |`);
+    return `\n\n${title ? `${title}\n\n` : ''}${lines.join('\n')}\n\n`;
+  }
+  const spans = new Map();
+  const content = rows.map((row, index) => {
+    const inherited = new Map(spans);
+    for (const [column, span] of spans) {
+      if (--span.remaining === 0) spans.delete(column);
+    }
+    const cells = [];
+    let column = 1;
+    for (const cell of row.cells) {
+      while (inherited.has(column)) column += 1;
+      const width = cell.colSpan || 1;
+      const remaining = row.parentElement.rows.length - row.sectionRowIndex;
+      const height = cell.rowSpan === 0 ? remaining : Math.min(cell.rowSpan || 1, remaining);
+      const label = `第 ${index + 1} 行第 ${column} 列`;
+      const merged = [height > 1 && `跨 ${height} 行`, width > 1 && `跨 ${width} 列`].filter(Boolean);
+      cells.push({ column, merged, content: cellText(cell) });
+      if (height > 1) for (let offset = 0; offset < width; offset += 1) spans.set(column + offset, { label, remaining: height - 1 });
+      column += width;
+    }
+    if (!inherited.size && cells.every(cell => !cell.merged.length && !/[\n|]/.test(cell.content))) {
+      return `第 ${index + 1} 行：${cells.map(cell => cell.content).join(' | ')}`;
+    }
+    const entries = [
+      ...[...inherited].map(([column, span]) => ({ column, text: `第 ${column} 列：沿用${span.label}` })),
+      ...cells.map(cell => ({ column: cell.column, text: `第 ${cell.column} 列${cell.merged.length ? `（${cell.merged.join('，')}）` : ''}：${cell.content.includes('\n') ? '\n\n' : ''}${cell.content}` })),
+    ].sort((left, right) => left.column - right.column);
+    return `第 ${index + 1} 行：\n${entries.map(entry => entry.text).join('\n\n')}`;
+  });
+  return `\n\n[表格，按行保留]\n${title ? `${title}\n\n` : ''}${content.join('\n\n')}\n\n`;
 }
 
 function createMarkdownConverter() {
@@ -104,16 +180,31 @@ function createMarkdownConverter() {
     headingStyle: 'atx', codeBlockStyle: 'fenced', preformattedCode: true,
   });
   converter.use(gfm);
-  converter.addRule('unstructured-table', {
-    filter: node => node.nodeName === 'TABLE' && tableNeedsTextFallback(node),
+  converter.addRule('loaded-details', {
+    filter: 'details',
+    replacement: (content, node) => `\n\n${node.hasAttribute('open') ? '' : '[折叠内容，已加载]\n\n'}${content.trim()}\n\n`,
+  });
+  converter.addRule('details-summary', {
+    filter: 'summary', replacement: content => `\n\n${content.trim()}\n\n`,
+  });
+  converter.addRule('preformatted-block', {
+    filter: node => node.nodeName === 'PRE' || (node.nodeName === 'DIV' && /highlight-(?:text|source)-[\w+.-]+/.test(node.className) && node.firstElementChild?.nodeName === 'PRE'),
     replacement: (_content, node) => {
-      const rows = Array.from(node.querySelectorAll('tr')).map((row, index) => {
-        const cells = Array.from(row.children).filter(cell => ['TH', 'TD'].includes(cell.nodeName))
-          .map(cell => normaliseInline(cell.textContent));
-        return `第 ${index + 1} 行：${cells.join(' | ')}`;
-      });
-      return `\n\n[表格，按行保留]\n${rows.join('\n')}\n\n`;
+      const pre = node.nodeName === 'PRE' ? node : node.firstElementChild;
+      const code = pre.textContent.replace(/\r\n?/g, '\n');
+      const element = pre.querySelector('code') || pre;
+      const classes = `${element.className} ${pre.className} ${node.className}`;
+      const language = (classes.match(/(?:language-|lang-|highlight-(?:text|source)-)([\w+.-]+)/) || [])[1]
+        || (pre.getAttribute('data-language') || '').match(/^[\w+.-]+$/)?.[0] || '';
+      let longest = 0;
+      for (const [run] of code.matchAll(/`+/g)) longest = Math.max(longest, run.length);
+      const fence = '`'.repeat(Math.max(3, longest + 1));
+      return `\n\n${fence}${language}\n${code}${code.endsWith('\n') ? '' : '\n'}${fence}\n\n`;
     },
+  });
+  converter.addRule('structured-table', {
+    filter: 'table',
+    replacement: (_content, node) => tableMarkdown(node, converter),
   });
   return converter;
 }
@@ -130,38 +221,61 @@ function readableText(root) {
   return visit(root).replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
+function mainRegion(document) {
+  let best = null;
+  let length = 0;
+  for (const region of document.querySelectorAll(MAIN_SELECTOR)) {
+    if (region.parentElement?.closest(MAIN_SELECTOR)) continue;
+    const size = region.textContent.trim().length;
+    if (size > length) { best = region; length = size; }
+  }
+  return best;
+}
+
+function missesMainContent(article, region) {
+  const text = normaliseInline(article.textContent);
+  if (text.length < normaliseInline(region.textContent).length * 0.85) return true;
+  const retained = new Set([...article.content.querySelectorAll(EVIDENCE_SELECTOR)].map(node => normaliseInline(node.textContent)));
+  for (const node of region.querySelectorAll(EVIDENCE_SELECTOR)) {
+    const original = normaliseInline(node.textContent);
+    if (original && !retained.has(original) && !text.includes(original)) return true;
+  }
+  return false;
+}
+
 export function extractPage(document) {
   const clone = sanitizedDocument(document);
+  const main = mainRegion(clone);
+  // Readability mutates its input. Preserve just the fallback region, not a
+  // second complete document, and pass its DOM output directly to Turndown.
+  const fallback = (main || clone.body)?.cloneNode(true);
+  if (!fallback) throw new Error('当前页面没有可提取的正文。');
   const warnings = [LOADED_WARNING];
-  if ([...clone.querySelectorAll('table')].some(tableNeedsTextFallback)) {
-    warnings.push('无表头或含合并单元格的表格按行保留，原布局可能发生变化。');
-  }
   let article;
   try {
-    article = new Readability(clone.cloneNode(true), { keepClasses: true }).parse();
+    article = new Readability(clone, { keepClasses: true, serializer: element => element }).parse();
   } catch {
     warnings.push('正文识别失败，已使用主区域或可见文本提取。');
   }
-  const converter = createMarkdownConverter();
-  if (article?.textContent?.trim()) {
-    const content = converter.turndown(article.content).trim();
-    if (content) {
-      return {
-        title: article.title || document.title || '未命名网页', content,
-        extraction: { method: 'readability', scope: 'currently-loaded', warnings },
-      };
-    }
+  let region = article?.textContent?.trim() ? article.content : fallback;
+  let method = region === fallback ? (main ? 'main-region' : 'visible-text') : 'readability';
+  if (main && region !== fallback && missesMainContent(article, fallback)) {
+    region = fallback;
+    method = 'main-region';
+    warnings.push('正文识别结果遗漏了主区域内容，已保留主区域中的段落、代码、表格和说明。');
+  } else if (region === fallback) {
+    warnings.push('已使用主区域或可见文本作为降级结果，请检查引用预览。');
   }
-  const regions = [...clone.querySelectorAll('main,[role="main"],article')]
-    .sort((left, right) => readableText(right).length - readableText(left).length);
-  const region = regions[0] || clone.body;
-  if (!region) throw new Error('当前页面没有可提取的正文。');
-  const content = converter.turndown(region).trim() || readableText(region);
+  if ([...region.querySelectorAll('table')].some(tableNeedsTextFallback)) {
+    warnings.push('无表头或复杂表格按行保留，合并单元格关系已标注。');
+  }
+  if (region.querySelector('details:not([open])')) warnings.push('包含页面中已加载的折叠正文，采集时未自动展开页面。');
+  const content = createMarkdownConverter().turndown(region).trim() || readableText(region);
   if (!content) throw new Error('没有找到可读取的网页正文，请尝试划词或截取需要的区域。');
-  warnings.push('已使用主区域或可见文本作为降级结果，请检查引用预览。');
   return {
-    title: document.title || '未命名网页', content,
-    extraction: { method: regions.length ? 'main-region' : 'visible-text', scope: 'currently-loaded', warnings },
+    title: article?.title || document.title || '未命名网页', content,
+    metadata: { author: article?.byline || '', publishedAt: article?.publishedTime || '' },
+    extraction: { method, scope: 'currently-loaded', warnings },
   };
 }
 

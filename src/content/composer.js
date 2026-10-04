@@ -1,6 +1,7 @@
 const COMPOSER_SELECTORS = [
   '#prompt-textarea',
   '#pending-home-input',
+  '#pending-conversation-input',
   '[data-testid="prompt-textarea"]',
   '[data-composer-body] [contenteditable="true"][role="textbox"]',
   '[data-composer-body] textarea',
@@ -14,9 +15,10 @@ const COMPOSER_SELECTORS = [
 
 const filling = new WeakSet();
 
-function isUsable(element) {
+export function isUsableComposer(element) {
   if (element.disabled || element.readOnly || element.getAttribute('aria-disabled') === 'true') return false;
-  if (element.tagName !== 'TEXTAREA' && element.getAttribute('contenteditable') !== 'true') return false;
+  const editable = element.getAttribute('contenteditable');
+  if (element.tagName !== 'TEXTAREA' && !['true', '', 'plaintext-only'].includes(editable)) return false;
   if (element.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
   const view = element.ownerDocument.defaultView;
   for (let parent = element; parent; parent = parent.parentElement) {
@@ -28,10 +30,10 @@ function isUsable(element) {
 
 export function findComposer(document) {
   for (const selector of COMPOSER_SELECTORS) {
-    const candidate = [...document.querySelectorAll(selector)].find(isUsable);
+    const candidate = [...document.querySelectorAll(selector)].find(isUsableComposer);
     if (candidate) return candidate;
   }
-  const editors = [...document.querySelectorAll('[contenteditable="true"][role="textbox"]')].filter(isUsable);
+  const editors = [...document.querySelectorAll('[contenteditable="true"][role="textbox"]')].filter(isUsableComposer);
   if (editors.length === 1) return editors[0];
   return null;
 }
@@ -67,8 +69,8 @@ export function getComposerText(element) {
   return value.replace(/\r\n?/g, '\n');
 }
 
-function waitForComposer(document, timeoutMs) {
-  const immediate = findComposer(document);
+function waitForComposer(document, timeoutMs, locate) {
+  const immediate = locate(document);
   if (immediate) return Promise.resolve(immediate);
   return new Promise((resolve) => {
     const view = document.defaultView;
@@ -82,7 +84,7 @@ function waitForComposer(document, timeoutMs) {
       resolve(element);
     };
     const check = () => {
-      const element = findComposer(document);
+      const element = locate(document);
       if (element) finish(element);
     };
     const observer = new view.MutationObserver(check);
@@ -141,11 +143,13 @@ function writeComposer(element, text) {
 }
 
 /** Fill a draft only. This module never presses Enter, clicks Send, or submits a form. */
-export async function fillComposer(document, text, mode = 'append', { timeoutMs = 8000, expectedPrevious } = {}) {
+export async function fillComposer(document, text, mode = 'append', { timeoutMs = 8000, expectedPrevious, expectedEditor, isCurrent = () => true, locate = findComposer, siteName = 'ChatGPT' } = {}) {
   if (typeof text !== 'string' || !text.trim()) return { ok: false, error: '请先输入问题。' };
   if (!['append', 'replace'].includes(mode)) return { ok: false, error: '不支持的填入方式。' };
-  const element = await waitForComposer(document, timeoutMs);
-  if (!element) return { ok: false, error: '没有找到可用的 ChatGPT 输入框，请确认已登录且会话已加载。' };
+  const element = await waitForComposer(document, timeoutMs, locate);
+  if (!element) return { ok: false, error: `没有找到可用的 ${siteName} 输入框，请确认已登录且会话已加载。` };
+  if (expectedEditor && element !== expectedEditor) return { ok: false, error: '输入框在准备过程中发生了变化，请检查草稿后重试。' };
+  if (!isCurrent()) return { ok: false, error: '输入框或会话在准备过程中发生了变化，请检查草稿后重试。' };
   if (filling.has(element)) return { ok: false, error: '正在准备发送内容，请稍后再试。' };
 
   filling.add(element);
@@ -155,13 +159,13 @@ export async function fillComposer(document, text, mode = 'append', { timeoutMs 
     const incoming = text.replace(/\r\n?/g, '\n');
     const expected = mode === 'replace' || !previous ? incoming : `${previous}\n\n${incoming}`;
     if (!writeComposer(element, expected)) {
-      return { ok: false, error: '输入框不接受自动编辑，原草稿已保留。请刷新 ChatGPT 后重试。' };
+      return { ok: false, error: `输入框不接受自动编辑，原草稿已保留。请刷新 ${siteName} 后重试。` };
     }
     // Allow the page's editor to reconcile before reporting success.
     await new Promise((resolve) => document.defaultView.setTimeout(resolve, 50));
-    const current = findComposer(document);
-    if (!current || getComposerText(current) !== expected) {
-      return { ok: false, error: 'ChatGPT 输入框未完整保留发送内容，请检查草稿后重试。' };
+    const current = locate(document);
+    if (!isCurrent() || expectedEditor && current !== expectedEditor || !current || getComposerText(current) !== expected) {
+      return { ok: false, error: `${siteName} 输入框未完整保留发送内容，请检查草稿后重试。` };
     }
     return { ok: true, filled: true, mode, characters: expected.length };
   } catch {

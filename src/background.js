@@ -1,6 +1,7 @@
 import { getState, patchState, addReference, removeReference, updateReference, setReferenceSelected } from './store.js';
 import { TAB_CONTEXT_PREFIX, CONTEXT_SETTINGS_KEY } from './context.js';
 import { getTabContext, updateTabSelection, setTabAttachment, applyTabDefaults, requestTabPage, invalidateTabSource, clearTabSelection, resetTabContext, removeTabContext, getContextSettings, patchContextSettings } from './context-store.js';
+import { AI_WEB_SETTINGS_KEY, BUILTIN_AI_SITES, normalizeAIWebSettings, validateAIWebSettings, normalizeCustomAISite, listAISites, selectedAISite, siteForURL, aiSitePattern } from './ai-web.js';
 
 const extensionRoot = chrome.runtime.getURL('/');
 const recentSources = new Map();
@@ -22,6 +23,51 @@ let embedQueue = Promise.resolve();
 let embedInitialization = Promise.resolve();
 let embedRuleInstalled = false;
 let requestSequence = 0;
+let aiWebSettings = normalizeAIWebSettings();
+let aiSettingsLoaded = false;
+const aiSettingsInitialization = chrome.storage.local.get(AI_WEB_SETTINGS_KEY).then(data => { aiWebSettings = normalizeAIWebSettings(data[AI_WEB_SETTINGS_KEY]); aiSettingsLoaded = true; });
+let aiSettingsQueue = Promise.resolve();
+let installedEmbedSignature = '';
+let installedEmbedRuleIds = [EMBED_RULE_ID];
+let aiScriptsQueue = Promise.resolve();
+
+function syncAIScripts(settings = aiWebSettings) {
+  const operation = aiScriptsQueue.then(() => performAIScriptSync(settings));
+  aiScriptsQueue = operation.catch(() => {});
+  return operation;
+}
+
+async function performAIScriptSync(settings) {
+  if (!chrome.scripting.getRegisteredContentScripts) return;
+  const sites = new Map(listAISites(settings).map(site => [site.origin, site]));
+  for (const registration of embedRegistrations.values()) if (registration.site) sites.set(registration.site.origin, registration.site);
+  const desired = [];
+  for (const site of sites.values()) {
+    if (site.id === 'chatgpt' || !await chrome.permissions.contains({ origins: [aiSitePattern(site)] })) continue;
+    desired.push({ id: `sider-ai-${encodeURIComponent(site.origin)}`, matches: [aiSitePattern(site)], js: ['ai-content.js'], runAt: 'document_idle', allFrames: true, persistAcrossSessions: true });
+  }
+  const current = (await chrome.scripting.getRegisteredContentScripts()).filter(script => script.id.startsWith('sider-ai-'));
+  const removed = current.filter(script => !desired.some(next => next.id === script.id && JSON.stringify(next.matches) === JSON.stringify(script.matches) && JSON.stringify(next.js) === JSON.stringify(script.js)));
+  if (removed.length) await chrome.scripting.unregisterContentScripts({ ids: removed.map(script => script.id) });
+  const added = desired.filter(script => !current.some(old => old.id === script.id && !removed.includes(old)));
+  if (added.length) await chrome.scripting.registerContentScripts(added);
+}
+
+async function saveAISettings(raw) {
+  const operation = aiSettingsQueue.then(async () => {
+    await aiSettingsInitialization;
+    const settings = validateAIWebSettings(raw);
+    const selected = selectedAISite(settings);
+    if (!await chrome.permissions.contains({ origins: [aiSitePattern(selected)] })) throw new Error(`尚未获得 ${selected.name} 的网站访问权限，请在 AI 网站设置中授权后保存。`);
+    // Register before committing so script-install failures remain reviewable in settings.
+    const previous = aiWebSettings;
+    try { await syncAIScripts(settings); await chrome.storage.local.set({ [AI_WEB_SETTINGS_KEY]: settings }); aiWebSettings = settings; }
+    catch (error) { aiWebSettings = previous; await syncAIScripts().catch(() => {}); throw error; }
+    return { ok: true, settings, sites: listAISites(settings) };
+  });
+  aiSettingsQueue = operation.catch(() => {});
+  return operation;
+}
 
 function parseURL(value) {
   try { return new URL(value); } catch { return null; }
@@ -33,7 +79,7 @@ function isWebURL(value) {
 
 function isChatURL(value) {
   const url = parseURL(value);
-  return url?.protocol === 'https:' && url.hostname === 'chatgpt.com';
+  return Boolean(url && (siteForURL(value, aiWebSettings) || [...embedRegistrations.values()].some(registration => registration.site?.origin === url.origin)));
 }
 
 function isExtensionSender(sender) {
@@ -111,7 +157,7 @@ async function sourceTab(message = {}, sender = {}, { allowUnexposedURL = false 
       if (allowUnexposedURL) return tab;
       throw sourceAccessError();
     }
-    if (isChatURL(tab?.url)) throw new Error('当前标签页是 ChatGPT，请先切回要引用的网页。');
+    if (isChatURL(tab?.url)) throw new Error(`当前标签页是 ${siteForURL(tab.url, aiWebSettings)?.name || 'AI 网站'}，请先切回要引用的网页。`);
     if (!isWebURL(tab?.url)) {
       const sourceWindowId = Number.isInteger(message.windowId) ? message.windowId : (await chrome.windows.getLastFocused()).id;
       const lastId = recentSources.get(sourceWindowId);
@@ -125,7 +171,7 @@ async function sourceTab(message = {}, sender = {}, { allowUnexposedURL = false 
     throw sourceAccessError();
   }
   if (!tab || !isWebURL(tab.url) || isChatURL(tab.url)) {
-    throw new Error('请先打开一个普通网页再引用；浏览器内部页面与 ChatGPT 页面不支持采集。');
+    throw new Error('请先打开一个普通网页再引用；浏览器内部页面与 AI 网站页面不支持采集。');
   }
   rememberSource(tab);
   return tab;
@@ -155,7 +201,7 @@ async function sourceById(tabId, allowUnexposedURL = false) {
     if (allowUnexposedURL) return tab;
     throw sourceAccessError();
   }
-  if (!isWebURL(tab.url) || isChatURL(tab.url)) throw Object.assign(new Error('浏览器内部页面与 ChatGPT 页面不支持网页引用。'), { code: 'SOURCE_UNSUPPORTED' });
+  if (!isWebURL(tab.url) || isChatURL(tab.url)) throw Object.assign(new Error('浏览器内部页面与 AI 网站页面不支持网页引用。'), { code: 'SOURCE_UNSUPPORTED' });
   return tab;
 }
 
@@ -189,7 +235,7 @@ async function syncSourceContext(tabId) {
   return { context: await updateTabSelection(tabId, { url: current.url, title: current.title || result.source.title }, result.reference || null), needsAccess: false };
 }
 
-async function contextResponse(tabId, sync = true, { defaultKinds, settings: savedSettings } = {}) {
+async function contextResponse(tabId, sync = true, { defaultKinds, settings: savedSettings, refreshPage = false } = {}) {
   let snapshot;
   if (sync) {
     const settings = savedSettings || await getContextSettings();
@@ -198,13 +244,19 @@ async function contextResponse(tabId, sync = true, { defaultKinds, settings: sav
       snapshot.context = await applyTabDefaults(tabId, settings, defaultKinds);
       if (snapshot.needsAccess) {
         if (snapshot.context.pageRequested) snapshot.context = await requestTabPage(tabId, sourceAccessError().message);
-      } else if (snapshot.context.pageRequested && !snapshot.context.attachments.page && !snapshot.context.pageError) {
+      } else if (snapshot.context.pageRequested && (refreshPage || (!snapshot.context.attachments.page && !snapshot.context.pageError))) {
+        // Refresh once at send preparation. Polls and later send checks reuse
+        // this snapshot so an in-flight attachment cannot change underneath it.
         snapshot.context = await captureRequestedPage(tabId);
       }
     }
     catch (error) {
       if (!['SOURCE_ACCESS_REQUIRED', 'SOURCE_UNSUPPORTED'].includes(error.code)) throw error;
-      if (error.code === 'SOURCE_UNSUPPORTED') snapshot = { context: await resetTabContext(tabId), needsAccess: false };
+      if (error.code === 'SOURCE_UNSUPPORTED') {
+        const wasCapturingPage = refreshPage && snapshot?.context.pageRequested;
+        snapshot = { context: await resetTabContext(tabId), needsAccess: false };
+        if (wasCapturingPage) throw error;
+      }
       else {
         await invalidateTabSource(tabId);
         const context = await applyTabDefaults(tabId, settings, defaultKinds);
@@ -321,13 +373,14 @@ function embedRegistration(sender, bridgeId) {
   if (queryId && queryId !== bridgeId) return null;
   const registration = embedRegistrations.get(bridgeId);
   if (!registration) return null;
+  if (parseURL(sender.url)?.origin !== (registration.site || BUILTIN_AI_SITES[0]).origin) return null;
   if (sender.tab && sender.tab.windowId !== registration.windowId) return null;
   return registration;
 }
 
-function embedCompatibilityRule() {
+function embedCompatibilityRule(site = BUILTIN_AI_SITES[0], id = EMBED_RULE_ID) {
   return {
-    id: EMBED_RULE_ID,
+    id,
     priority: 1,
     action: {
       type: 'modifyHeaders',
@@ -338,8 +391,8 @@ function embedCompatibilityRule() {
     },
     condition: {
       // Domains include subdomains, so also anchor the exact HTTPS hostname.
-      urlFilter: '|https://chatgpt.com/',
-      requestDomains: ['chatgpt.com'],
+      urlFilter: `|${site.origin}/`,
+      requestDomains: [new URL(site.origin).hostname],
       // Keep matching after a navigation initiated by ChatGPT inside the frame.
       // Chrome 145+ matches the actual top frame, including extension panels.
       topDomains: [chrome.runtime.id],
@@ -348,30 +401,55 @@ function embedCompatibilityRule() {
   };
 }
 
-async function updateEmbedRule(enabled) {
+function embedSites() {
+  return [...new Map([...embedRegistrations.values()].map(registration => {
+    const site = registration.site || BUILTIN_AI_SITES[0]; return [site.origin, site];
+  })).values()].sort((a, b) => a.origin.localeCompare(b.origin));
+}
+
+function compatibilityRules(sites) {
+  let customId = EMBED_RULE_ID + 10;
+  return sites.map(site => {
+    const builtinIndex = BUILTIN_AI_SITES.findIndex(builtin => builtin.origin === site.origin);
+    return embedCompatibilityRule(site, builtinIndex >= 0 ? EMBED_RULE_ID + builtinIndex : customId++);
+  });
+}
+
+function canonicalRule(value) {
+  if (Array.isArray(value)) return value.map(canonicalRule);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalRule(value[key])]));
+  return value;
+}
+
+async function updateEmbedRule(enabled, sites = embedSites()) {
   const permitted = await chrome.permissions.contains({ permissions: [EMBED_PERMISSION] });
   if (!permitted) {
     embedRuleInstalled = false;
+    installedEmbedSignature = '';
     if (enabled) throw new Error('内嵌权限尚未授权。请在扩展管理页启用新版 Sider，并允许新增的内嵌权限。');
     return;
   }
   if (!chrome.declarativeNetRequest?.updateSessionRules) {
-    throw new Error('当前浏览器不支持范围受限的兼容嵌入，请使用 ChatGPT 标签页。');
+    throw new Error('当前浏览器不支持范围受限的兼容嵌入，请使用原站标签页。');
   }
-  if (enabled && !await chrome.permissions.contains({ origins: ['https://chatgpt.com/*'] })) {
-    throw new Error('请允许扩展访问 chatgpt.com 后再启用兼容嵌入。');
+  for (const site of enabled ? sites : []) {
+    if (!await chrome.permissions.contains({ origins: [aiSitePattern(site)] })) throw new Error(`请允许扩展访问 ${new URL(site.origin).host} 后再启用兼容嵌入。`);
   }
-  if (enabled && embedRuleInstalled) return;
+  const rules = enabled ? compatibilityRules(sites) : [];
+  const signature = JSON.stringify(rules);
+  if (enabled && embedRuleInstalled && signature === installedEmbedSignature) return;
   try {
     // The update is atomic. Never retry using less restrictive matching conditions.
     await chrome.declarativeNetRequest.updateSessionRules({
-      removeRuleIds: [EMBED_RULE_ID],
-      addRules: enabled ? [embedCompatibilityRule()] : [],
+      removeRuleIds: [...new Set([...installedEmbedRuleIds, ...rules.map(rule => rule.id)])],
+      addRules: rules,
     });
   } catch (error) {
-    throw new Error(`${enabled ? '兼容嵌入规则安装失败' : '兼容嵌入规则移除失败'}：${error?.message || '浏览器拒绝了规则更新'}。请使用 ChatGPT 标签页。`);
+    throw new Error(`${enabled ? '兼容嵌入规则安装失败' : '兼容嵌入规则移除失败'}：${error?.message || '浏览器拒绝了规则更新'}。请使用原站标签页。`);
   }
-  embedRuleInstalled = enabled;
+  embedRuleInstalled = enabled && rules.length > 0;
+  installedEmbedSignature = signature;
+  installedEmbedRuleIds = rules.length ? rules.map(rule => rule.id) : [EMBED_RULE_ID];
 }
 
 function changeEmbed(operation) {
@@ -388,23 +466,40 @@ async function persistEmbeds() {
 }
 
 async function restoreEmbeds() {
+  await aiSettingsInitialization;
   if (chrome.storage.session) {
     const stored = (await chrome.storage.session.get(EMBED_STORAGE_KEY))[EMBED_STORAGE_KEY];
     for (const [id, value] of Object.entries(stored || {})) {
-      if (/^[a-zA-Z0-9-]{16,100}$/.test(id) && Number.isInteger(value?.windowId)) embedRegistrations.set(id, { windowId: value.windowId, ...(Number.isInteger(value.tabId) ? { tabId: value.tabId } : {}) });
+      if (!/^[a-zA-Z0-9-]{16,100}$/.test(id) || !Number.isInteger(value?.windowId)) continue;
+      let site = BUILTIN_AI_SITES[0];
+      if (value.site) {
+        site = BUILTIN_AI_SITES.find(builtin => builtin.id === value.site.id && builtin.origin === value.site.origin);
+        if (site) site = listAISites({ builtinOverrides: { [site.id]: value.site } }).find(candidate => candidate.id === site.id);
+        if (!site) { try { site = normalizeCustomAISite(value.site); } catch { continue; } }
+      }
+      embedRegistrations.set(id, { windowId: value.windowId, site, ...(Number.isInteger(value.tabId) ? { tabId: value.tabId } : {}) });
     }
   }
   // Worker suspension does not mean that the sidebar has closed.
   // Keep session rules and registrations together across worker restarts.
   const permitted = await chrome.permissions.contains({ permissions: [EMBED_PERMISSION] });
   const rules = permitted ? await chrome.declarativeNetRequest?.getSessionRules?.() : [];
-  const expected = embedCompatibilityRule();
-  embedRuleInstalled = Boolean(rules?.some(rule => rule.id === EMBED_RULE_ID && Object.keys(rule.condition || {}).length === Object.keys(expected.condition).length && Object.entries(expected.condition).every(([key, value]) => JSON.stringify(rule.condition[key]) === JSON.stringify(value))));
+  const expected = compatibilityRules(embedSites());
+  installedEmbedRuleIds = rules?.filter(rule => rule.id >= EMBED_RULE_ID && rule.id < EMBED_RULE_ID + 10000).map(rule => rule.id) || [];
+  if (!installedEmbedRuleIds.length) installedEmbedRuleIds = [EMBED_RULE_ID];
+  embedRuleInstalled = Boolean(expected.length && expected.every(next => rules?.some(rule => JSON.stringify(canonicalRule(rule)) === JSON.stringify(canonicalRule(next)))));
+  installedEmbedSignature = embedRuleInstalled ? JSON.stringify(expected) : '';
+  await syncAIScripts().catch(error => chrome.storage.local.set({ siderLastEvent: { ok: false, error: `AI 网站脚本注册失败：${error.message}`, at: Date.now() } }));
 }
 
 function embedStatus(bridgeId) {
   const ports = [...chatPorts].filter(entry => entry.bridgeId === bridgeId && entry.reportedEmbedded && embedRegistration(entry.port.sender, bridgeId));
-  return { ok: true, registered: embedRegistrations.has(bridgeId), compatibility: embedRuleInstalled, connected: ports.length > 0, enhancementReady: ports.some(entry => entry.enhancementReady) };
+  return { ok: true, registered: embedRegistrations.has(bridgeId), compatibility: embedRuleInstalled, connected: ports.length > 0, enhancementReady: ports.some(entry => entry.enhancementReady), enhancementDetail: ports.find(entry => entry.enhancementDetail)?.enhancementDetail || '' };
+}
+
+function notifyEmbedStatus(bridgeId) {
+  const status = embedStatus(bridgeId);
+  try { panelPorts.get(bridgeId)?.postMessage({ type: 'SIDER_ENHANCEMENT_READY', bridgeId, ready: status.enhancementReady, detail: status.enhancementDetail }); } catch {}
 }
 
 function registerEmbed(message) {
@@ -420,20 +515,32 @@ function registerEmbed(message) {
     }
     const previous = embedRegistrations.get(message.bridgeId);
     if (previous && (previous.windowId !== message.windowId || previous.tabId !== message.tabId)) throw new Error('侧栏连接已经属于另一个标签页。');
-    await updateEmbedRule(true);
+    await aiSettingsInitialization;
+    const site = message.reuseSite && message.siteId && previous?.site?.id === message.siteId ? previous.site : listAISites(aiWebSettings).find(candidate => candidate.id === (message.siteId || aiWebSettings.activeSiteId));
+    if (!site) throw new Error('所选 AI 网站已移除，请重新打开侧栏。');
+    const desired = new Map(embedSites().map(candidate => [candidate.origin, candidate]));
+    if (previous?.site && ![...embedRegistrations].some(([id, registration]) => id !== message.bridgeId && registration.site?.origin === previous.site.origin)) desired.delete(previous.site.origin);
+    desired.set(site.origin, site);
+    await syncAIScripts();
+    await updateEmbedRule(true, [...desired.values()].sort((a, b) => a.origin.localeCompare(b.origin)));
     // A successful response means the browser has accepted the narrow session rule.
-    embedRegistrations.set(message.bridgeId, { windowId: message.windowId, ...(Number.isInteger(message.tabId) ? { tabId: message.tabId } : {}) });
+    embedRegistrations.set(message.bridgeId, { windowId: message.windowId, site, ...(Number.isInteger(message.tabId) ? { tabId: message.tabId } : {}) });
+    if (!message.reuseSite) for (const entry of chatPorts) if (entry.bridgeId === message.bridgeId) { entry.reportedEmbedded = false; entry.enhancementReady = false; }
     await persistEmbeds();
-    return { ok: true, compatibility: true };
+    return { ok: true, compatibility: true, site };
   });
 }
 
 function unregisterEmbed(message) {
   return changeEmbed(async () => {
     const registered = embedRegistrations.has(message.bridgeId);
-    if (registered && embedRegistrations.size === 1) await updateEmbedRule(false);
+    if (registered) {
+      const remaining = new Map([...embedRegistrations].filter(([id]) => id !== message.bridgeId).map(([, registration]) => [(registration.site || BUILTIN_AI_SITES[0]).origin, registration.site || BUILTIN_AI_SITES[0]]));
+      await updateEmbedRule(remaining.size > 0, [...remaining.values()].sort((a, b) => a.origin.localeCompare(b.origin)));
+    }
     embedRegistrations.delete(message.bridgeId);
     await persistEmbeds();
+    await syncAIScripts();
     for (const [key, frame] of chatFrames) if (frame.bridgeId === message.bridgeId) chatFrames.delete(key);
     return { ok: true };
   });
@@ -460,7 +567,7 @@ function callChatPort(entry, message) {
     const requestId = `sider-${Date.now()}-${++requestSequence}`;
     const timer = setTimeout(() => {
       entry.pending.delete(requestId);
-      reject(new Error('侧栏中的 ChatGPT 没有响应。'));
+      reject(new Error('侧栏中的 AI 网站没有响应。'));
     }, 12000);
     entry.pending.set(requestId, {
       resolve: (result) => { clearTimeout(timer); resolve(result); },
@@ -493,7 +600,8 @@ chrome.runtime.onConnect.addListener((port) => {
     });
     return;
   }
-  if (port.name !== 'sider-chat-bridge' || !isChatSender(port.sender)) {
+  const pendingSettingsSender = !aiSettingsLoaded && port.sender?.id === chrome.runtime.id && isWebURL(port.sender.url);
+  if (port.name !== 'sider-chat-bridge' || !isChatSender(port.sender) && !pendingSettingsSender) {
     port.disconnect();
     return;
   }
@@ -508,13 +616,16 @@ chrome.runtime.onConnect.addListener((port) => {
   chatPorts.add(entry);
   port.onMessage.addListener(async (message) => {
     await embedInitialization;
+    if (!isChatSender(port.sender)) { port.disconnect(); return; }
     if (message?.type === 'SIDER_CHAT_READY') {
       entry.bridgeId = message.bridgeId;
       entry.reportedEmbedded = Boolean(message.embedded && embedRegistration(port.sender, message.bridgeId));
       entry.at = Date.now();
       registerChatFrame(message, port.sender);
-    } else if (message?.type === 'SIDER_ENHANCEMENT_READY' && message.bridgeId === entry.bridgeId && entry.reportedEmbedded) {
+    } else if (message?.type === 'SIDER_ENHANCEMENT_READY' && message.bridgeId === entry.bridgeId && entry.reportedEmbedded && embedRegistration(port.sender, entry.bridgeId)) {
       entry.enhancementReady = Boolean(message.ready);
+      entry.enhancementDetail = typeof message.detail === 'string' ? message.detail.slice(0, 1000) : '';
+      notifyEmbedStatus(entry.bridgeId);
     } else if (message?.type === 'SIDER_CHAT_RESULT' && typeof message.requestId === 'string') {
       const pending = entry.pending.get(message.requestId);
       if (!pending) return;
@@ -525,9 +636,10 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onDisconnect.addListener(() => {
     void chrome.runtime.lastError;
     chatPorts.delete(entry);
+    if (entry.reportedEmbedded && embedRegistration(port.sender, entry.bridgeId)) notifyEmbedStatus(entry.bridgeId);
     // A document navigation closes this port. Only the owning panel closes
     // its registration and compatibility rule.
-    for (const pending of entry.pending.values()) pending.reject(new Error('ChatGPT 页面或侧栏已关闭。'));
+    for (const pending of entry.pending.values()) pending.reject(new Error('AI 网站页面或侧栏已关闭。'));
     entry.pending.clear();
   });
 });
@@ -540,7 +652,7 @@ async function enhancementRequest(message, sender) {
   const tabId = registration.tabId;
   if (!Number.isInteger(tabId)) throw new Error('侧栏尚未绑定来源标签页，请关闭旧侧栏并在来源网页上重新打开。');
   if (inner.type === 'SIDER_SOURCE_INFO') return sourceInfo({ tabId });
-  if (inner.type === 'SIDER_TAB_CONTEXT_GET') return withTab(tabId, () => contextResponse(tabId));
+  if (inner.type === 'SIDER_TAB_CONTEXT_GET') return withTab(tabId, () => contextResponse(tabId, true, { refreshPage: inner.refreshPage === true }));
   if (inner.type === 'SIDER_TAB_ATTACHMENT_SET') return changeTabAttachment(tabId, inner.kind, inner.enabled);
   if (inner.type === 'SIDER_TAB_SELECTION_CLEAR') return clearCurrentSelection(tabId);
   if (inner.type === 'SIDER_CONTEXT_SETTINGS_PATCH') return changeContextSettings(tabId, inner.patch);
@@ -576,15 +688,18 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 });
 
-async function openChat() {
-  const tabs = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
+async function openChat(siteId) {
+  await aiSettingsInitialization;
+  const site = listAISites(aiWebSettings).find(candidate => candidate.id === (siteId || aiWebSettings.activeSiteId)) || [...embedRegistrations.values()].find(registration => registration.site?.id === siteId)?.site;
+  if (!site) throw new Error('此 AI 网站已移除，请更新 AI 网站设置。');
+  const tabs = (await chrome.tabs.query({ url: aiSitePattern(site) })).filter(tab => parseURL(tab.url)?.origin === site.origin);
   const currentWindow = await chrome.windows.getLastFocused();
   const ranked = [...tabs].sort((a, b) =>
     Number(b.windowId === currentWindow.id) - Number(a.windowId === currentWindow.id) ||
     Number(b.active) - Number(a.active) || (b.lastAccessed || 0) - (a.lastAccessed || 0));
   const tab = ranked[0]
     ? await chrome.tabs.update(ranked[0].id, { active: true })
-    : await chrome.tabs.create({ url: 'https://chatgpt.com/', active: true, windowId: currentWindow.id });
+    : await chrome.tabs.create({ url: site.url, active: true, windowId: currentWindow.id });
   if (Number.isInteger(tab.windowId)) await chrome.windows.update(tab.windowId, { focused: true });
   return tab;
 }
@@ -644,17 +759,18 @@ async function fillChat(message) {
     }
   }
 
-  const tab = await openChat();
+  const site = selectedAISite(aiWebSettings);
+  const tab = await openChat(site.id);
   await waitForTab(tab.id);
   const loaded = await chrome.tabs.get(tab.id);
-  if (!isChatURL(loaded.url)) throw new Error('请在 ChatGPT 标签页完成登录后再填入。');
+  if (parseURL(loaded.url)?.origin !== site.origin) throw new Error(`请在 ${site.name} 标签页完成登录后再填入。`);
   try {
-    await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, files: ['chatgpt-content.js'] });
-    const result = await chrome.tabs.sendMessage(tab.id, payload, { frameId: 0 });
-    if (!result?.ok || !result.filled) throw new Error(result?.error || '没有确认提示词已填入，请检查 ChatGPT 草稿。');
+    await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, files: ['ai-content.js'] });
+    const result = await chrome.tabs.sendMessage(tab.id, { ...payload, site }, { frameId: 0 });
+    if (!result?.ok || !result.filled) throw new Error(result?.error || `没有确认提示词已填入，请检查 ${site.name} 草稿。`);
     return { ok: true, tabId: tab.id, embedded: false, filled: true };
   } catch (error) {
-    throw new Error(error?.message || '无法填入 ChatGPT，请复制提示词。');
+    throw new Error(error?.message || `无法填入 ${site.name}，请复制提示词。`);
   }
 }
 
@@ -713,13 +829,18 @@ function changeSite(message, sender, enabled) {
 }
 
 async function handleMessage(message, sender) {
+  await aiSettingsInitialization;
   await embedInitialization;
   authorize(message, sender);
   switch (message.type) {
+    case 'SIDER_AI_WEB_SETTINGS_GET':
+      await aiSettingsInitialization;
+      return { ok: true, settings: aiWebSettings, sites: listAISites(aiWebSettings) };
+    case 'SIDER_AI_WEB_SETTINGS_SAVE': return saveAISettings(message.settings);
     case 'SIDER_ENHANCEMENT_REQUEST': return enhancementRequest(message, sender);
     case 'SIDER_SELECTION_CHANGED': return receiveSelection(message, sender);
     case 'SIDER_OPEN_SOURCE_PANEL': return changeTabAttachment(sender.tab.id, 'selection', true);
-    case 'SIDER_TAB_CONTEXT_GET': return withTab(message.tabId, () => contextResponse(message.tabId));
+    case 'SIDER_TAB_CONTEXT_GET': return withTab(message.tabId, () => contextResponse(message.tabId, true, { refreshPage: message.refreshPage === true }));
     case 'SIDER_TAB_ATTACHMENT_SET': return changeTabAttachment(message.tabId, message.kind, message.enabled);
     case 'SIDER_TAB_SELECTION_CLEAR': return clearCurrentSelection(message.tabId);
     case 'SIDER_CONTEXT_SETTINGS_PATCH': return changeContextSettings(message.tabId, message.patch);
@@ -734,7 +855,7 @@ async function handleMessage(message, sender) {
     case 'SIDER_CAPTURE': return capture(message, sender);
     case 'SIDER_CHAT_READY': return registerChatFrame(message, sender);
     case 'SIDER_CHAT_FILL': return fillChat(message);
-    case 'SIDER_CHAT_OPEN': return { ok: true, tabId: (await openChat()).id };
+    case 'SIDER_CHAT_OPEN': return { ok: true, tabId: (await openChat(message.siteId)).id };
     case 'SIDER_EMBED_REGISTER': return registerEmbed(message);
     case 'SIDER_EMBED_STATUS_GET': return embedStatus(message.bridgeId);
     case 'SIDER_EMBED_UNREGISTER': return unregisterEmbed(message);
@@ -857,15 +978,27 @@ chrome.windows.onRemoved.addListener((windowId) => {
 });
 
 chrome.permissions.onRemoved?.addListener((removed) => {
-  if (!removed.permissions?.includes(EMBED_PERMISSION) && !removed.origins?.some((origin) => origin.includes('chatgpt.com'))) return;
   changeEmbed(async () => {
-    await updateEmbedRule(false);
-    embedRegistrations.clear();
+    const all = removed.permissions?.includes(EMBED_PERMISSION);
+    for (const [id, registration] of embedRegistrations) {
+      if (all || !await chrome.permissions.contains({ origins: [aiSitePattern(registration.site || BUILTIN_AI_SITES[0])] })) {
+        embedRegistrations.delete(id);
+        for (const entry of chatPorts) if (entry.bridgeId === id) { entry.reportedEmbedded = false; entry.enhancementReady = false; }
+        for (const [key, frame] of chatFrames) if (frame.bridgeId === id) chatFrames.delete(key);
+      }
+    }
+    await updateEmbedRule(embedRegistrations.size > 0);
     await persistEmbeds();
-    for (const [key, frame] of chatFrames) if (frame.embedded) chatFrames.delete(key);
+    await syncAIScripts();
   }).catch((error) => {
     chrome.storage.local.set({ siderLastEvent: { ok: false, error: error.message, at: Date.now() } }).catch(() => {});
   });
+});
+
+chrome.permissions.onAdded?.addListener(() => { void aiSettingsInitialization.then(syncAIScripts).catch(() => {}); });
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !changes[AI_WEB_SETTINGS_KEY]) return;
+  aiWebSettings = normalizeAIWebSettings(changes[AI_WEB_SETTINGS_KEY].newValue);
 });
 
 embedInitialization = restoreEmbeds();

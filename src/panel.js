@@ -1,3 +1,6 @@
+import { AI_WEB_SETTINGS_KEY, BUILTIN_AI_SITES, normalizeAIWebSettings, selectedAISite } from './ai-web.js';
+import { installAIWebSettings } from './ai-web-settings.js';
+
 const $ = selector => document.querySelector(selector);
 const isExtension = Boolean(globalThis.chrome?.runtime?.id);
 const bridgeId = crypto.randomUUID();
@@ -13,6 +16,9 @@ let toastTimer;
 let siteSource;
 let sitePurpose;
 let hasConnected = false;
+let activeSite = BUILTIN_AI_SITES[0];
+let loadedSite = null;
+let pendingSendPicker;
 const diagnostics = { version: globalThis.chrome?.runtime?.getManifest?.().version || '0.4.0', sourceTabId, browser: navigator.userAgent, stage: '启动', rule: false, connected: false, enhancementReady: false };
 
 function showToast(text) {
@@ -26,6 +32,41 @@ async function request(message) {
   const result = await chrome.runtime.sendMessage(message);
   if (!result?.ok) throw new Error(result?.error || '扩展后台没有响应。请在扩展管理页重新加载 Sider。');
   return result;
+}
+
+function pickNativeSendButton(site) {
+  if (!isExtension || !loadedSite || site.id !== loadedSite.id || site.origin !== loadedSite.origin || !hasConnected) {
+    return Promise.resolve({ ok: false, error: '请先保存并加载此网站，确认已登录，再点选发送按钮。' });
+  }
+  pendingSendPicker?.cancel();
+  return new Promise(resolve => {
+    const channel = new MessageChannel();
+    let timer;
+    const pending = {
+      cancel() {
+        try { channel.port1.postMessage({ type: 'SIDER_AI_SEND_PICK_CANCEL' }); } catch {}
+        finish({ ok: false, cancelled: true });
+      },
+    };
+    pendingSendPicker = pending;
+    function finish(result) {
+      if (pendingSendPicker !== pending) return;
+      clearTimeout(timer);
+      pendingSendPicker = null;
+      channel.port1.close();
+      resolve(result);
+    }
+    channel.port1.onmessage = event => {
+      const result = event.data;
+      if (result?.ok === true && typeof result.selector === 'string' && result.selector.length > 0 && result.selector.length <= 1000) finish({ ok: true, selector: result.selector });
+      else finish({ ok: false, cancelled: Boolean(result?.cancelled), error: typeof result?.error === 'string' ? result.error.slice(0, 1000) : '未能点选发送按钮，请重试。' });
+    };
+    channel.port1.onmessageerror = () => pending.cancel();
+    timer = setTimeout(() => { pending.cancel(); }, 65000);
+    try {
+      $('#chatgpt-frame').contentWindow.postMessage({ type: 'SIDER_AI_SEND_PICK_REQUEST', bridgeId, siteId: loadedSite.id }, loadedSite.origin, [channel.port2]);
+    } catch { channel.port2.close(); finish({ ok: false, error: 'AI 网站尚未完成加载，请重新连接后重试。' }); }
+  });
 }
 
 function status(text, kind = '', detail = text) {
@@ -46,9 +87,9 @@ function failed(error) {
   }
   diagnostics.stage = '连接失败'; diagnostics.error = error;
   const navigationStarted = $('#chatgpt-frame').hasAttribute('src');
-  status(navigationStarted ? 'ChatGPT 连接尚未确认' : 'ChatGPT 连接失败', 'failed');
+  status(navigationStarted ? `${activeSite.name} 连接尚未确认` : `${activeSite.name} 连接失败`, 'failed');
   $('#loading-screen').toggleAttribute('data-inline', navigationStarted);
-  $('#loading-title').textContent = navigationStarted ? '尚未确认 ChatGPT 连接' : 'ChatGPT 没有完成加载';
+  $('#loading-title').textContent = navigationStarted ? `尚未确认 ${activeSite.name} 连接` : `${activeSite.name} 没有完成加载`;
   $('#loading-detail').textContent = error;
   $('#loading-symbol').hidden = true;
   $('#recovery-actions').hidden = false;
@@ -57,10 +98,10 @@ function failed(error) {
 }
 
 function enhancementUnavailable(detail) {
-  diagnostics.stage = 'ChatGPT 已连接，网页引用尚未就绪';
+  diagnostics.stage = `${activeSite.name} 已连接，网页引用尚未就绪`;
   diagnostics.enhancementReady = false;
-  diagnostics.warning = `${detail} 可继续使用 ChatGPT；需要网页引用时，请点击右上角 ↻ 重新连接。`;
-  status('ChatGPT · 网页引用未就绪', 'warning', diagnostics.warning);
+  diagnostics.warning = `${detail} 可点击右上角 ↻ 重新连接或使用原站入口。`;
+  status(`${activeSite.name} · 网页引用未就绪`, 'warning', diagnostics.warning);
   renderDiagnostics();
 }
 
@@ -71,6 +112,13 @@ function connectLifecycle() {
     const port = chrome.runtime.connect({ name: 'sider-panel-lifecycle' });
     lifecycle = port;
     port.postMessage({ type: 'SIDER_PANEL_ATTACH', bridgeId });
+    port.onMessage.addListener(message => {
+      if (lifecycle !== port || disposed || message?.type !== 'SIDER_ENHANCEMENT_READY' || message.bridgeId !== bridgeId) return;
+      // Read the bound registration again rather than rendering a possibly
+      // outdated frame report. A later state change supersedes a pending poll.
+      clearTimeout(timer);
+      void poll(++generation, Date.now());
+    });
     heartbeat = setInterval(() => {
       try { port.postMessage({ type: 'SIDER_PANEL_PING', bridgeId }); } catch {}
     }, 25000);
@@ -81,7 +129,7 @@ function connectLifecycle() {
       clearInterval(heartbeat);
       timer = setTimeout(async () => {
         try {
-          await request({ type: 'SIDER_EMBED_REGISTER', bridgeId, windowId, tabId: sourceTabId });
+          await request({ type: 'SIDER_EMBED_REGISTER', bridgeId, windowId, tabId: sourceTabId, siteId: activeSite.id, reuseSite: true });
           connectLifecycle();
         } catch (error) { failed(error.message); }
       }, 500);
@@ -103,8 +151,9 @@ async function poll(run, startedAt) {
       delete diagnostics.error;
       $('#loading-screen').hidden = true;
       $('#loading-screen').removeAttribute('data-inline');
-      diagnostics.stage = result.enhancementReady ? 'ChatGPT 与增强层就绪' : 'ChatGPT 已连接';
-      status(result.enhancementReady ? 'ChatGPT · 网页引用已就绪' : 'ChatGPT · 正在准备网页引用', 'connected');
+      diagnostics.stage = result.enhancementReady ? `${activeSite.name} 与增强层就绪` : `${activeSite.name} 已连接`;
+      status(result.enhancementReady ? `${activeSite.name} · 网页引用已就绪` : `${activeSite.name} · 正在准备网页引用`, 'connected');
+      if (!result.enhancementReady && result.enhancementDetail) enhancementUnavailable(result.enhancementDetail);
     }
     if (result.enhancementReady) {
       delete diagnostics.warning;
@@ -114,7 +163,7 @@ async function poll(run, startedAt) {
     const elapsed = Date.now() - startedAt;
     if (elapsed > 35000) {
       if (!hasConnected) {
-        failed('35 秒内没有收到 ChatGPT 网页的连接回执。请检查网络、ChatGPT 登录状态及扩展的 chatgpt.com 访问权限。可在右上角“⋯”复制连接信息。');
+        failed(`35 秒内没有收到 ${activeSite.name} 网页的连接回执。请检查网络、登录状态及扩展的 ${new URL(activeSite.origin).host} 访问权限。可在右上角“⋯”复制连接信息。`);
         return;
       }
       enhancementUnavailable('网页引用没有完成加载。');
@@ -130,12 +179,13 @@ async function poll(run, startedAt) {
 }
 
 async function start() {
+  pendingSendPicker?.cancel();
   if (!isExtension) {
     status('需要安装浏览器扩展');
     $('#loading-screen').hidden = false;
     $('#loading-symbol').hidden = true;
     $('#loading-title').textContent = '请在浏览器侧栏打开 Sider';
-    $('#loading-detail').textContent = '在浏览器的扩展管理页加载构建生成的 dist 文件夹，再点击扩展图标。原版 ChatGPT 在已安装的扩展侧栏中加载。';
+    $('#loading-detail').textContent = '在浏览器的扩展管理页加载构建生成的 dist 文件夹，再点击扩展图标。原版 AI 网站在已安装的扩展侧栏中加载。';
     return;
   }
   const run = ++generation;
@@ -145,31 +195,46 @@ async function start() {
   hasConnected = false;
   diagnostics.connected = false; diagnostics.enhancementReady = false;
   diagnostics.stage = '安装内嵌兼容规则';
-  status('正在打开 ChatGPT');
+  status(`正在打开 ${activeSite.name}`);
   $('#loading-screen').hidden = true;
   $('#loading-screen').removeAttribute('data-inline');
   $('#loading-symbol').hidden = false;
   $('#recovery-actions').hidden = true;
-  $('#loading-title').textContent = '正在打开 ChatGPT';
+  $('#loading-title').textContent = `正在打开 ${activeSite.name}`;
   $('#loading-detail').textContent = '正在准备侧栏连接…';
   try {
+    const stored = await chrome.storage?.local?.get(AI_WEB_SETTINGS_KEY);
+    if (run !== generation) return;
+    activeSite = selectedAISite(normalizeAIWebSettings(stored?.[AI_WEB_SETTINGS_KEY]));
+    diagnostics.site = activeSite.name; diagnostics.url = activeSite.url;
+    status(`正在打开 ${activeSite.name}`);
+    $('#loading-title').textContent = `正在打开 ${activeSite.name}`;
+    $('#reload-chatgpt').title = `重新加载 ${activeSite.name}`;
+    $('#open-chatgpt').title = `在标签页登录或打开 ${activeSite.name}`;
+    $('#chatgpt-frame').title = `原版 ${activeSite.name}`;
     if (!Number.isSafeInteger(sourceTabId) || sourceTabId < 0) throw new Error('此侧栏没有绑定来源标签页。请关闭它，再在要提问的网页上点击 Sider 图标。');
     windowId = (await chrome.tabs.get(sourceTabId)).windowId;
-    const registered = await request({ type: 'SIDER_EMBED_REGISTER', bridgeId, windowId, tabId: sourceTabId });
+    const registered = await request({ type: 'SIDER_EMBED_REGISTER', bridgeId, windowId, tabId: sourceTabId, siteId: activeSite.id });
     if (run !== generation) return;
     diagnostics.rule = registered.compatibility;
+    if (registered.site) activeSite = registered.site;
     const frame = $('#chatgpt-frame');
     frame.hidden = false;
     // Show the site's first paint without waiting for load or the document-idle bridge.
-    frame.src = `https://chatgpt.com/?sider_bridge=${encodeURIComponent(bridgeId)}`;
-    diagnostics.stage = '等待 ChatGPT 网页回执';
-    $('#loading-detail').textContent = '正在加载 chatgpt.com…';
+    const url = new URL(activeSite.url); url.searchParams.set('sider_bridge', bridgeId);
+    frame.src = url.href;
+    loadedSite = structuredClone(activeSite);
+    $('#ai-settings-updated').hidden = true;
+    diagnostics.stage = `等待 ${activeSite.name} 网页回执`;
+    $('#loading-detail').textContent = `正在加载 ${new URL(activeSite.origin).host}…`;
+    $('#ai-diagnostics-description').textContent = `网页主体由 ${new URL(activeSite.origin).host} 提供。当前标签页的划词和引用会显示在原版输入框旁，发送时按设置中的格式加入问题。`;
     connectLifecycle();
     void poll(run, Date.now());
   } catch (error) { if (run === generation) failed(error.message); }
 }
 
 $('#chatgpt-frame').addEventListener('load', () => {
+  pendingSendPicker?.cancel();
   const frame = $('#chatgpt-frame');
   if (!frame.hasAttribute('src') || frame.contentDocument?.URL === 'about:blank') return;
   clearTimeout(timer);
@@ -177,10 +242,11 @@ $('#chatgpt-frame').addEventListener('load', () => {
 });
 $('#retry-embed').addEventListener('click', start);
 $('#reload-chatgpt').addEventListener('click', start);
+$('#ai-settings-updated').addEventListener('click', start);
 for (const id of ['open-chatgpt', 'login-chatgpt']) $("#" + id).addEventListener('click', async () => {
   try {
-    if (isExtension) await request({ type: 'SIDER_CHAT_OPEN' });
-    else window.open('https://chatgpt.com/', '_blank', 'noopener');
+    if (isExtension) await request({ type: 'SIDER_CHAT_OPEN', siteId: activeSite.id });
+    else window.open(activeSite.url, '_blank', 'noopener');
   } catch (error) { showToast(error.message); }
 });
 $('#diagnostics-toggle').addEventListener('click', () => { renderDiagnostics(); $('#diagnostics-dialog').showModal(); });
@@ -190,13 +256,13 @@ $('#copy-diagnostics').addEventListener('click', async () => {
   catch { showToast('复制失败，请直接选中连接信息复制。'); }
 });
 window.addEventListener('message', async event => {
-  if (!isExtension || disposed || event.origin !== 'https://chatgpt.com' || event.source !== $('#chatgpt-frame').contentWindow) return;
+  if (!isExtension || disposed || event.origin !== (loadedSite || activeSite).origin || event.source !== $('#chatgpt-frame').contentWindow) return;
   if (event.data?.type === 'SIDER_EMBED_HELLO_REQUEST') {
     // The child starts this exchange only after a ChatGPT document exists.
     // Reply through its port: a WindowProxy can change origin during navigation.
     if (event.ports.length !== 1) return;
     const port = event.ports[0];
-    try { port.postMessage({ type: 'SIDER_EMBED_HELLO', bridgeId }); }
+    try { port.postMessage({ type: 'SIDER_EMBED_HELLO', bridgeId, site: loadedSite || activeSite }); }
     catch { /* A navigating child can close its own response port. */ }
     finally { port.close(); }
     return;
@@ -249,7 +315,17 @@ $('#grant-site').addEventListener('click', async () => {
 });
 window.addEventListener('pagehide', () => {
   disposed = true; generation++;
+  pendingSendPicker?.cancel();
   clearTimeout(timer); clearInterval(heartbeat);
   try { lifecycle?.disconnect(); } catch {}
 });
+function settingsUpdated(settings) {
+  const next = selectedAISite(settings);
+  $('#ai-settings-updated').hidden = !loadedSite || JSON.stringify(next) === JSON.stringify(loadedSite);
+  if (!$('#ai-settings-updated').hidden) $('#ai-settings-updated').textContent = `AI 网站设置已更新，点击加载 ${next.name}`;
+}
+installAIWebSettings({ document, chrome: globalThis.chrome, pickSendButton: pickNativeSendButton, onSaved(settings) { settingsUpdated(settings); showToast('AI 网站设置已保存，重新加载侧栏后生效。'); } });
+const settingsChanged = (changes, area) => { if (area === 'local' && changes[AI_WEB_SETTINGS_KEY]) settingsUpdated(normalizeAIWebSettings(changes[AI_WEB_SETTINGS_KEY].newValue)); };
+globalThis.chrome?.storage?.onChanged?.addListener(settingsChanged);
+window.addEventListener('pagehide', () => globalThis.chrome?.storage?.onChanged?.removeListener(settingsChanged));
 void start();

@@ -31,7 +31,11 @@ export function createReference(raw, options = {}) {
     context, includeContext: raw.includeContext !== false,
     capturedAt: new Date().toISOString(),
     locator: raw.locator ? { exact: String(raw.locator.exact || '').slice(0, 20000), prefix: String(raw.locator.prefix || '').slice(0, 200), suffix: String(raw.locator.suffix || '').slice(0, 200) } : null,
-    extraction: raw.extraction || null
+    extraction: raw.extraction || null,
+    ...(raw.metadata && typeof raw.metadata === 'object' ? { metadata: {
+      author: typeof raw.metadata.author === 'string' ? raw.metadata.author : '',
+      publishedAt: typeof raw.metadata.publishedAt === 'string' ? raw.metadata.publishedAt : '',
+    } } : {}),
   };
 }
 

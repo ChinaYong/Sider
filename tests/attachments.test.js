@@ -186,7 +186,7 @@ test('error words in a filename do not turn a successful upload into a failure',
 test('upload failures preserve the question and remove only the failed extension file', async t => {
   const f = fixture(t, { onUpload(file, addCard) { addCard(file.name, { error: true }); } });
   const user = f.addCard('mine.txt', { ready: true });
-  await assert.rejects(f.manager.prepare(pageSpec()), /未能上传正文附件/);
+  await assert.rejects(f.manager.prepare(pageSpec()), /正文附件上传失败：Upload failed/);
   assert.equal(f.editor.value, '原问题');
   assert.equal(user.card.isConnected, true);
   assert.deepEqual(f.removes, [f.uploads[0].name]);
@@ -333,4 +333,73 @@ test('clear verifies native removal and rejects when the original card remains',
   await f.manager.prepare(pageSpec());
   await assert.rejects(f.manager.clear(), /超时/);
   assert.equal(f.area.children.length, 1);
+});
+
+test('native failure details come from its error description and not the filename', async t => {
+  const f = fixture(t, { onUpload(file, addCard) {
+    const { card } = addCard(file.name, { error: true });
+    const detail = f.document.createElement('span');
+    detail.id = 'native-upload-error'; detail.textContent = 'Storage quota reached';
+    f.document.body.append(detail);
+    card.querySelector('[role="alert"]').setAttribute('aria-describedby', detail.id);
+  } });
+  await assert.rejects(f.manager.prepare(pageSpec('full content', 'NETWORK-BROKEN.txt')), error => {
+    assert.match(error.message, /Storage quota reached/);
+    assert.doesNotMatch(error.message, /NETWORK-BROKEN/);
+    assert.equal(error.attachmentCleanupHandled, true);
+    return true;
+  });
+  assert.equal(f.editor.value, '原问题');
+});
+
+test('uploading and cleanup expose progress without changing readiness', async t => {
+  let attachment;
+  const events = [];
+  const f = fixture(t, { onUpload(file, addCard) { attachment = addCard(file.name); } });
+  const preparation = f.manager.prepare(pageSpec(), { onProgress: event => events.push(event) });
+  assert.equal(events[0].phase, 'uploading');
+  assert.equal(f.manager.isReady(pageSpec()), false);
+  attachment.markReady(); await preparation;
+  await Promise.all([f.manager.clear(), f.manager.clear()]);
+  assert.deepEqual(events.map(event => event.phase), ['uploading', 'cleaning']);
+  assert.equal(f.removes.length, 1);
+});
+
+test('abort before file dispatch requires no native cleanup or timeout', async t => {
+  const f = fixture(t, { timeoutMs: 90000 });
+  const controller = new AbortController();
+  const started = Date.now();
+  await assert.rejects(f.manager.prepare(pageSpec(), {
+    signal: controller.signal, onProgress: ({ phase }) => { if (phase === 'uploading') controller.abort(); },
+  }), /取消/);
+  assert.equal(f.uploads.length, 0);
+  assert.equal(f.removes.length, 0);
+  assert.ok(Date.now() - started < 500);
+});
+
+test('failed cancellation shares one removal and blocks new uploads until native removal is confirmed', async t => {
+  let attachment, broken = true;
+  const f = fixture(t, { timeoutMs: 70, onUpload(file, addCard) { attachment = addCard(file.name, { ready: !broken, removeWorks: !broken }); } });
+  const controller = new AbortController();
+  const preparation = f.manager.prepare(pageSpec(), { signal: controller.signal });
+  const rejected = assert.rejects(preparation, error => {
+    assert.equal((error.message.match(/取消正文附件超时/g) || []).length, 1);
+    assert.equal(error.attachmentCleanupHandled, true);
+    return true;
+  });
+  controller.abort();
+  const first = f.manager.clear(), second = f.manager.clear();
+  assert.equal(first, second);
+  await assert.rejects(first, /无法确认已清理/);
+  await rejected;
+  await assert.rejects(f.manager.clear(), /无法确认已清理/);
+  await assert.rejects(f.manager.prepare(pageSpec('replacement')), /无法确认已清理/);
+  assert.equal(f.removes.length, 1);
+  assert.equal(f.uploads.length, 1);
+  attachment.card.remove();
+  await f.manager.clear();
+  broken = false;
+  await f.manager.prepare(pageSpec('replacement'));
+  assert.equal(f.uploads.length, 2);
+  assert.equal(f.manager.isReady(pageSpec('replacement')), true);
 });

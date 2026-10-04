@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>ChatGPT · Sider</title>
+  <title>AI Web · Sider</title>
   <link rel="icon" type="image/png" sizes="32x32" href="icons/icon-32.png">
   <link rel="stylesheet" href="styles.css">
   <script type="module" src="panel.js"></script>
@@ -12,9 +12,10 @@
 <body>
   <header class="utility-bar">
     <span id="connection-status" role="status"><i></i><span>正在打开 ChatGPT</span></span>
-    <div><button id="reload-chatgpt" title="重新加载 ChatGPT" aria-label="重新加载 ChatGPT">↻</button><button id="open-chatgpt" title="在标签页登录或打开 ChatGPT" aria-label="在标签页打开 ChatGPT">↗</button><button id="diagnostics-toggle" title="连接信息" aria-label="连接信息">⋯</button></div>
+    <div><button id="ai-settings-toggle" title="AI 网站设置" aria-label="AI 网站设置">⚙</button><button id="reload-chatgpt" title="重新加载 AI 网站" aria-label="重新加载 AI 网站">↻</button><button id="open-chatgpt" title="在标签页登录或打开 AI 网站" aria-label="在标签页打开 AI 网站">↗</button><button id="diagnostics-toggle" title="连接信息" aria-label="连接信息">⋯</button></div>
   </header>
   <main>
+    <button id="ai-settings-updated" class="settings-updated" hidden>AI 网站设置已更新，点击重新加载</button>
     <iframe id="chatgpt-frame" title="原版 ChatGPT" allow="microphone; clipboard-write" referrerpolicy="origin" hidden></iframe>
     <section id="loading-screen" class="loading-screen" aria-live="polite" hidden>
       <span id="loading-symbol" class="spinner" aria-hidden="true"></span>
@@ -25,10 +26,33 @@
   </main>
   <dialog id="diagnostics-dialog">
     <div class="dialog-title"><strong>连接信息</strong><button id="close-diagnostics" aria-label="关闭连接信息">×</button></div>
-    <p>网页主体由 chatgpt.com 提供。当前标签页的划词和引用会显示在原版输入框旁，发送时按设置中的格式加入问题。</p>
+    <p id="ai-diagnostics-description">网页主体由所选 AI 网站提供。当前标签页的划词和引用会显示在原版输入框旁，发送时按设置中的格式加入问题。</p>
     <pre id="diagnostics-text"></pre>
-    <p>无法登录时，先在同一浏览器的 ChatGPT 标签页完成登录，再刷新侧栏。</p>
+    <p>无法登录时，先在同一浏览器的原站标签页完成登录，再刷新侧栏。</p>
     <button id="copy-diagnostics">复制连接信息</button>
+  </dialog>
+  <dialog id="ai-settings-dialog" aria-labelledby="ai-settings-title">
+    <div class="dialog-title"><strong id="ai-settings-title">AI 网站设置</strong><button id="ai-close-settings" aria-label="关闭 AI 网站设置">×</button></div>
+    <p>网站选择全局共用，新开或重新加载侧栏时生效。当前会话和问题保持原样。</p>
+    <label for="ai-active-site">使用的 AI 网站</label><select id="ai-active-site"></select>
+    <div class="settings-actions"><button id="ai-add-site">添加网站</button><button id="ai-edit-site" hidden>编辑网站</button><button id="ai-remove-site" hidden>从列表移除</button></div>
+    <section id="ai-custom-fields" hidden>
+      <label for="ai-site-name">网站名称</label><input id="ai-site-name" maxlength="80" placeholder="我的 AI 网站">
+      <label for="ai-site-url">网站地址</label><input id="ai-site-url" type="url" placeholder="https://example.com/chat">
+      <p id="ai-site-help">默认自动识别输入框和发送控件。自定义网站支持文本引用；能否在侧栏加载取决于原站。</p>
+      <div class="settings-actions"><button id="ai-pick-send">在页面点选发送按钮</button><button id="ai-reset-send">恢复自动识别发送按钮</button></div>
+      <p>点选前先加载此网站，并在原站输入问题，使发送按钮出现。点选只记录按钮，不会发送消息。</p>
+      <p id="ai-pick-status" role="status" hidden></p>
+      <details><summary>高级配置</summary>
+        <label for="ai-selector-composer">输入框 CSS 选择器</label><input id="ai-selector-composer" placeholder="留空则自动识别">
+        <label for="ai-selector-send">发送控件 CSS 选择器</label><input id="ai-selector-send" maxlength="1000" placeholder="可点选按钮自动填写；留空则自动识别">
+        <label for="ai-selector-mount">引用栏挂载位置 CSS 选择器</label><input id="ai-selector-mount" placeholder="引用栏会放在此元素后面">
+        <label for="ai-send-shortcut">原站发送快捷键</label><select id="ai-send-shortcut"><option value="enter">Enter</option><option value="ctrl-enter">Ctrl / ⌘ + Enter</option><option value="button">仅发送按钮</option></select>
+      </details>
+      <div class="settings-actions"><button id="ai-cancel-edit">取消编辑</button><button id="ai-apply-site">保存网站</button></div>
+    </section>
+    <p id="ai-settings-error" role="alert" hidden></p>
+    <button id="ai-save-settings">保存全局设置</button>
   </dialog>
   <dialog id="site-dialog">
     <div class="dialog-title"><strong id="site-dialog-title">网页划词引用</strong><button id="close-site" aria-label="关闭网站授权">×</button></div>

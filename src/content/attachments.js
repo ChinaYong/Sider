@@ -73,20 +73,43 @@ function failed(card) {
   return Boolean(indicator || [...card.querySelectorAll('button')].some(button => /^(retry upload|retry attachment|重试上传|重试附件)$/i.test(button.getAttribute('aria-label') || '')));
 }
 
-/** Operate only ChatGPT's visible attachment UI; no private state or upload API. */
-export function createAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT } = {}) {
+/** Read only native error indicators, never the filename or whole card text. */
+export function attachmentFailureDetail(card, selector) {
+  const indicator = card.querySelector(selector) || (card.matches(selector) ? card : null);
+  if (!indicator) return '';
+  const descriptions = (indicator.getAttribute('aria-describedby') || '').split(/\s+/)
+    .map(id => card.ownerDocument.getElementById(id)?.textContent?.trim()).filter(Boolean);
+  return (descriptions.join(' ') || indicator.getAttribute('title') || indicator.getAttribute('aria-label')
+    || (indicator !== card || indicator.getAttribute('role') === 'alert' ? indicator.textContent?.trim() : '') || '').trim().slice(0, 1000);
+}
+
+/** Operate the site's native attachment UI; no private state or upload API. */
+export function createAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT, driver } = {}) {
   const view = document.defaultView;
+  const siteName = driver?.siteName || 'ChatGPT';
+  const locateComposer = driver?.findComposer || (() => findComposer(document));
+  const attachmentCards = scope => driver ? driver.cards(scope) : cards(scope);
+  const identifies = (card, name) => driver ? driver.namesCard(card, name) : namesCard(card, name);
+  const removeButton = (card, name) => driver ? driver.removeButton(card, name) : exactButton(card, removeLabels(name));
   const duration = Math.max(1, Number(timeoutMs) || DEFAULT_TIMEOUT);
   const listeners = new Set();
   const retired = new Set();
   let active = null;
   let epoch = 0;
   let disposed = false;
+  let clearing = null;
+  let preparing = null;
+
+  const progress = (record, phase) => {
+    record.phase = phase;
+    const message = phase === 'cleaning' ? '正在取消正文附件…' : '正在准备正文附件…';
+    try { record.onProgress?.({ phase, message }); } catch { /* Progress cannot change the upload outcome. */ }
+  };
 
   const notify = () => { for (const listener of [...listeners]) listener(); };
   const sameSession = record => {
     if (record.invalidSession) return false;
-    const current = record.href === view.location.href && record.editor === findComposer(document) && record.scope.isConnected;
+    const current = record.href === view.location.href && record.editor === locateComposer() && record.scope.isConnected && (!driver?.sessionKey || record.session === driver.sessionKey());
     // Once a navigation/replacement was observed, returning to the same URL
     // cannot make a new user attachment part of the retired upload again.
     if (!current) record.invalidSession = true;
@@ -94,13 +117,13 @@ export function createAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT 
   };
 
   function locate(record, allowClaim = true) {
-    const exact = record.card?.isConnected && record.scope.contains(record.card) && namesCard(record.card, record.spec.name) ? record.card : null;
+    const exact = record.card?.isConnected && record.scope.contains(record.card) && identifies(record.card, record.spec.name) ? record.card : null;
     if (exact) return exact;
     // A removed known card may be followed by a same-name user file. Ownership
     // follows the native node, never a later filename match.
     if (record.seen) return null;
     if (!allowClaim || !sameSession(record)) return null;
-    const matching = cards(record.scope).filter(card => namesCard(card, record.spec.name));
+    const matching = attachmentCards(record.scope).filter(card => identifies(card, record.spec.name));
     if (matching.length > 1) throw new Error('出现同名正文附件，无法安全识别扩展附件，请检查原版附件区域。');
     const candidate = matching[0];
     if (candidate && !record.baseline.has(candidate)) {
@@ -115,8 +138,8 @@ export function createAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT 
     if (!record || record.retiring || !sameSession(record)) return { ready: false, name: record?.spec.name || '', invalidated: Boolean(record), removed: Boolean(record?.seen && !record.card?.isConnected) };
     try {
       const card = locate(record);
-      const error = card && failed(card);
-      const ready = Boolean(card && !error && !card.querySelector('[role="progressbar"]') && exactButton(card, [record.spec.name]));
+      const error = card && (driver ? driver.failed(card) : failed(card));
+      const ready = Boolean(card && !error && (driver ? driver.ready(card, record.spec.name) : !card.querySelector('[role="progressbar"]') && exactButton(card, [record.spec.name])));
       return { ready, name: record.spec.name, invalidated: Boolean(error || record.seen && !card), removed: Boolean(record.seen && !card) };
     } catch { return { ready: false, name: record.spec.name, invalidated: true, removed: false }; }
   }
@@ -137,7 +160,7 @@ export function createAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT 
           if (signal?.aborted) throw new Error('正文附件准备已取消，问题已保留。');
           const value = check();
           if (value) finish(value);
-          else if (Date.now() >= deadline) throw new Error(timeoutMessage || '正文附件上传超时，问题已保留，请检查 ChatGPT 附件区域后重试。');
+          else if (Date.now() >= deadline) throw new Error(timeoutMessage || `正文附件上传超时，问题已保留，请检查 ${siteName} 附件区域后重试。`);
         } catch (error) { finish(null, error); }
       };
       const interval = view.setInterval(tick, 25);
@@ -148,9 +171,21 @@ export function createAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT 
   }
 
   async function cleanup(record) {
+    if (record.cleanupFailed) {
+      const card = locate(record, sameSession(record));
+      if (!card && record.seen) {
+        retired.delete(record);
+        if (active === record) active = null;
+        return;
+      }
+      // A dispatched upload may arrive after cancellation timed out. Only this
+      // newly observed owned card permits a fresh removal attempt.
+      if (card && !record.cleanupCard) { record.cleanup = null; record.cleanupFailed = false; }
+    }
     if (record.cleanup) return record.cleanup;
     record.retiring = true;
     retired.add(record);
+    progress(record, 'cleaning');
     notify();
     record.cleanup = (async () => {
       let removalAttempted = false;
@@ -163,13 +198,14 @@ export function createAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT 
           return false;
         }
         if (!removalAttempted) {
-          const remove = exactButton(card, removeLabels(record.spec.name));
-          if (!remove || remove.disabled) throw new Error('无法取消正文附件，请在 ChatGPT 附件区域手动移除后重试。');
+          record.cleanupCard = card;
+          const remove = removeButton(card, record.spec.name);
+          if (!remove || remove.disabled) throw new Error(`无法取消正文附件，请在 ${siteName} 附件区域手动移除后重试。`);
           removalAttempted = true;
           remove.click();
         }
         return !card.isConnected || !record.scope.contains(card);
-      }, deadline, { timeoutMessage: '取消正文附件超时，无法确认已清理，请检查 ChatGPT 附件区域后重试。' });
+      }, deadline, { timeoutMessage: `取消正文附件超时，无法确认已清理，请检查 ${siteName} 附件区域后重试。` });
       retired.delete(record);
       if (active === record) active = null;
     })();
@@ -177,7 +213,8 @@ export function createAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT 
     catch (error) {
       // Keep a tombstone until a late native card can be cancelled in its
       // original composer. Never identify a new conversation's file by name.
-      record.cleanup = null;
+      record.cleanupFailed = true;
+      error.code = 'ATTACHMENT_CLEANUP_FAILED';
       if (record.invalidSession && !record.card?.isConnected) {
         retired.delete(record);
         if (active === record) active = null;
@@ -188,9 +225,10 @@ export function createAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT 
 
   function reconcile() {
     for (const record of retired) {
-      if (record.cleanup) continue;
+      if (record.cleanup && !record.cleanupFailed) continue;
       try {
-        if (locate(record, sameSession(record))) void cleanup(record).catch(() => {});
+        const card = locate(record, sameSession(record));
+        if ((card && !record.cleanupCard) || (record.seen && !card)) void cleanup(record).catch(() => {});
       } catch { /* Ambiguous cards must be left for the user to inspect. */ }
     }
     notify();
@@ -200,15 +238,19 @@ export function createAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT 
   const observer = new view.MutationObserver(reconcile);
   observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
 
-  async function clear() {
+  function clear() {
+    if (clearing) return clearing;
     epoch++;
-    if (active) await cleanup(active);
-    for (const record of [...retired]) await cleanup(record);
+    const records = new Set([active, ...retired].filter(Boolean));
+    clearing = (async () => { for (const record of records) await cleanup(record); })()
+      .finally(() => { clearing = null; });
+    return clearing;
   }
 
-  async function prepare(raw, { signal, isCurrent = () => true } = {}) {
+  async function prepareOnce(raw, { signal, isCurrent = () => true, onProgress } = {}) {
     if (disposed) throw new Error('正文附件管理已关闭。');
     const spec = normalizeSpec(raw);
+    const deadline = Date.now() + duration;
     const assertCurrent = () => {
       if (signal?.aborted || !isCurrent()) throw new Error('问题或引用已修改，正文附件准备已取消，请重新发送。');
     };
@@ -224,40 +266,75 @@ export function createAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT 
     if (active) await cleanup(active);
     if (token !== epoch || disposed) throw new Error('正文附件准备已取消。');
     assertCurrent();
-    const editor = findComposer(document);
-    if (!editor) throw new Error('没有找到可用的 ChatGPT 输入框。');
-    const { scope, input } = composerScope(document, editor);
-    const baseline = new Set(cards(scope));
-    if ([...baseline].some(card => namesCard(card, spec.name))) throw new Error(`已有同名附件“${spec.name}”，请先移除或重命名该附件。`);
+    const editor = locateComposer();
+    if (!editor) throw new Error(`没有找到可用的 ${siteName} 输入框。`);
+    const href = view.location.href;
+    const session = driver?.sessionKey?.();
+    let target = driver ? driver.composerScope(document, editor, { signal, deadline, isCurrent: () => {
+      try { assertCurrent(); } catch { return false; }
+      return token === epoch && !disposed && editor === locateComposer() && href === view.location.href && (!driver.sessionKey || session === driver.sessionKey());
+    } }) : composerScope(document, editor);
+    // A native synchronous lookup must establish the active upload before a
+    // second prepare call; an unnecessary await invalidates that first call.
+    if (typeof target?.then === 'function') target = await target;
+    const { scope, input } = target;
+    assertCurrent();
+    if (token !== epoch || disposed || editor !== locateComposer() || href !== view.location.href || driver?.sessionKey && session !== driver.sessionKey()) throw new Error('会话已切换，正文附件准备已取消。');
+    const baseline = new Set(attachmentCards(scope));
+    if ([...baseline].some(card => identifies(card, spec.name))) throw new Error(`已有同名附件“${spec.name}”，请先移除或重命名该附件。`);
     if (typeof view.DataTransfer !== 'function' || typeof view.File !== 'function') throw new Error('当前浏览器不支持自动准备文件附件。');
     const actualSpec = { ...spec, name: uploadName(view, spec.name) };
-    if ([...baseline].some(card => namesCard(card, actualSpec.name))) throw new Error(`已有同名附件“${actualSpec.name}”，请先移除或重命名该附件。`);
-    const record = { spec: actualSpec, logicalSpec: spec, editor, scope, href: view.location.href, baseline, card: null, seen: false, retiring: false, dispatched: false, deadline: Date.now() + duration, promise: null, cleanup: null };
+    if ([...baseline].some(card => identifies(card, actualSpec.name))) throw new Error(`已有同名附件“${actualSpec.name}”，请先移除或重命名该附件。`);
+    const record = { spec: actualSpec, logicalSpec: spec, editor, scope, href, session, baseline, card: null, seen: false, retiring: false, dispatched: false, deadline, promise: null, cleanup: null, onProgress };
     active = record;
     record.promise = (async () => {
       try {
         const transfer = new view.DataTransfer();
         transfer.items.add(new view.File([actualSpec.content], actualSpec.name, { type: actualSpec.mimeType }));
-        input.files = transfer.files;
+        assertCurrent();
+        progress(record, 'uploading');
+        assertCurrent();
         record.dispatched = true;
-        input.dispatchEvent(new view.Event('change', { bubbles: true }));
+        if (driver?.upload) await driver.upload({ input, scope, transfer, editor });
+        else { input.files = transfer.files; input.dispatchEvent(new view.Event('change', { bubbles: true })); }
         await waitFor(() => {
           assertCurrent();
           if (disposed || record.retiring || active !== record) throw new Error('正文附件准备已取消。');
-          if (!sameSession(record)) throw new Error('ChatGPT 会话已切换，正文附件准备已取消。');
+          if (!sameSession(record)) throw new Error(`${siteName} 会话已切换，正文附件准备已取消。`);
           const card = locate(record);
-          if (card && failed(card)) throw new Error('ChatGPT 未能上传正文附件，问题已保留，请检查附件后重试。');
+          if (card && (driver ? driver.failed(card) : failed(card))) {
+            const detail = driver ? driver.failureDetail?.(card) : attachmentFailureDetail(card, '[role="alert"],[data-state="error"],[data-status="error"],[data-testid*="error"],[aria-invalid="true"]');
+            throw new Error(`${siteName} 正文附件上传失败${detail ? `：${detail}` : ''}。问题已保留，请重试或切换正文发送方式。`);
+          }
           if (record.seen && !card) throw new Error('正文附件已被移除，问题已保留。');
           return state(record).ready;
         }, record.deadline, { signal });
         return { name: actualSpec.name };
       } catch (error) {
         try { await cleanup(record); }
-        catch (cleanupError) { throw new Error(`${error.message} ${cleanupError.message}`); }
+        catch (cleanupError) { throw Object.assign(new Error(`${error.message}\n${cleanupError.message}`), { attachmentCleanupHandled: true, cleanupError }); }
+        error.attachmentCleanupHandled = true;
         throw error;
       }
     })();
     return record.promise;
+  }
+
+  async function prepare(raw, options = {}) {
+    const spec = normalizeSpec(raw), editor = locateComposer(), href = view.location.href, session = driver?.sessionKey?.();
+    if (preparing && preparing.epoch === epoch && sameSpec(preparing.spec, spec) && preparing.editor === editor && preparing.href === href && preparing.session === session) {
+      const result = await preparing.promise;
+      if (options.signal?.aborted || options.isCurrent && !options.isCurrent()) throw new Error('问题或引用已修改，正文附件准备已取消，请重新发送。');
+      if (!active || !sameSpec(active.logicalSpec, spec) || !state(active).ready) throw new Error('正文附件已被移除，请重新发送。');
+      return result;
+    }
+    // Lazy native upload menus must share their initialization as well as the
+    // upload. Otherwise two concurrent prepares invalidate each other's editor.
+    const pending = { spec, editor, href, session, epoch: null, promise: null };
+    pending.promise = prepareOnce(raw, options).finally(() => { if (preparing === pending) preparing = null; });
+    pending.epoch = epoch;
+    preparing = pending;
+    return pending.promise;
   }
 
   return {
@@ -268,7 +345,7 @@ export function createAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT 
       return Boolean(active && sameSpec(active.logicalSpec, spec) && state(active).ready);
     },
     isOwnedRemoveButton(element) {
-      return Boolean(active && !active.retiring && active.card?.isConnected && exactButton(active.card, removeLabels(active.spec.name)) === element);
+      return Boolean(active && !active.retiring && active.card?.isConnected && removeButton(active.card, active.spec.name) === element);
     },
     dispose() {
       disposed = true;

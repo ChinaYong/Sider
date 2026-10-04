@@ -2,11 +2,53 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { createTabContext, normalizeContextSettings } from '../src/context.js';
+import { normalizeCustomAISite } from '../src/ai-web.js';
 
 const extensionOrigin = 'chrome-extension://handshake-test';
 const bridgeId = 'bound-bridge-id-0001';
 const settle = () => new Promise(resolve => setImmediate(resolve));
+
+test('builtin enhancement waits for the bound configuration before using a manually selected send button', async t => {
+  const f = await fixture(t, { url: `https://chatgpt.com/?sider_bridge=${bridgeId}` });
+  const button = f.window.document.querySelector('button'); button.removeAttribute('data-testid'); button.id = 'selected-native-send';
+  assert.equal(f.window.document.querySelector('#sider-enhancement'), null);
+  await f.reply({ type: 'SIDER_EMBED_HELLO', bridgeId, site: { id: 'chatgpt', name: 'ChatGPT', origin: 'https://chatgpt.com', adapter: 'chatgpt', selectors: { send: '#selected-native-send' } } });
+  assert.ok(f.window.document.querySelector('#sider-enhancement'));
+  assert.ok(f.runtimePorts[0].messages.some(message => message.type === 'SIDER_ENHANCEMENT_READY' && message.ready));
+});
+
+test('send-button point selection accepts only its owning extension parent, bridge, site and response port', async t => {
+  const f = await fixture(t);
+  await f.reply({ type: 'SIDER_EMBED_HELLO', bridgeId });
+  const data = { type: 'SIDER_AI_SEND_PICK_REQUEST', bridgeId, siteId: 'chatgpt' };
+  const messages = [];
+  const port = { onmessage: null, start() {}, close() {}, postMessage(result) { messages.push(result); } };
+  const dispatch = patch => f.window.dispatchEvent(new f.window.MessageEvent('message', { data, origin: extensionOrigin, source: f.window.parent, ports: [port], ...patch }));
+  for (const patch of [{ origin: 'https://chatgpt.com' }, { source: f.window }, { data: { ...data, bridgeId: 'different-bridge-0001' } }, { data: { ...data, siteId: 'claude' } }, { ports: [] }, { ports: [port, port] }]) {
+    dispatch(patch); assert.equal(f.window.document.querySelector('[data-sider-send-picker]'), null);
+  }
+  dispatch({}); assert.ok(f.window.document.querySelector('[data-sider-send-picker]'));
+  port.onmessage({ data: { type: 'SIDER_AI_SEND_PICK_CANCEL' } }); await settle();
+  assert.deepEqual(messages, [{ ok: false, cancelled: true }]);
+  assert.equal(f.window.document.querySelector('[data-sider-send-picker]'), null);
+});
 let instance = 0;
+
+test('custom AI enhancement waits for its exact-origin website configuration from the parent', async t => {
+  const site = normalizeCustomAISite({ id: 'custom-handshake-0001', name: 'Custom AI', url: 'https://custom-ai.test/chat', selectors: { composer: '#prompt-textarea' } });
+  const f = await fixture(t, { url: site.url });
+  assert.equal(f.window.document.querySelector('#sider-enhancement'), null);
+  await f.reply({ type: 'SIDER_EMBED_HELLO', bridgeId, site });
+  assert.ok(f.window.document.querySelector('#sider-enhancement'));
+  assert.ok(f.runtimePorts[0].messages.some(message => message.type === 'SIDER_CHAT_READY' && message.siteId === site.id));
+});
+
+test('a custom AI configuration for another origin never enables enhancement', async t => {
+  const f = await fixture(t, { url: 'https://custom-ai.test/chat' });
+  const site = normalizeCustomAISite({ id: 'custom-handshake-0001', name: 'Other AI', url: 'https://other-ai.test/chat' });
+  await f.reply({ type: 'SIDER_EMBED_HELLO', bridgeId, site });
+  assert.equal(f.window.document.querySelector('#sider-enhancement'), null);
+});
 
 function event() {
   const listeners = new Set();

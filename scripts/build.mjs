@@ -8,7 +8,7 @@ const outdir = path.join(root, 'dist');
 await mkdir(outdir, { recursive: true });
 const common = { bundle: true, target: ['chrome116'], sourcemap: false, legalComments: 'eof', outdir, logLevel: 'info' };
 await build({ ...common, entryPoints: { background: path.join(root, 'src/background.js'), panel: path.join(root, 'src/panel.js') }, format: 'esm' });
-await build({ ...common, entryPoints: { 'page-content': path.join(root, 'src/content/page.js'), 'chatgpt-content': path.join(root, 'src/content/chatgpt.js') }, format: 'iife' });
+await build({ ...common, entryPoints: { 'page-content': path.join(root, 'src/content/page.js'), 'ai-content': path.join(root, 'src/content/chatgpt.js'), 'chatgpt-content': path.join(root, 'src/content/chatgpt.js') }, format: 'iife' });
 for (const [source, dest] of [['manifest.json', 'manifest.json'], ['src/panel.html', 'panel.html'], ['src/styles.css', 'styles.css']]) {
   await copyFile(path.join(root, source), path.join(outdir, dest));
 }

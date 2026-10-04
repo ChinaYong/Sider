@@ -1,20 +1,26 @@
 import { TAB_CONTEXT_PREFIX, CONTEXT_SETTINGS_KEY, normalizeContext, normalizeContextSettings, composeContextPrompt, validateContextTemplate } from '../context.js';
-import { fillComposer, findComposer, getComposerText } from './composer.js';
-import { createAttachmentManager } from './attachments.js';
+import { createWebAdapter } from './adapters.js';
+import { installTextDrop } from './text-drop.js';
+
+const SEND_CONTROL_GRACE_MS = 500;
 
 const CSS = `
 :host{all:initial;display:block;position:relative;font-family:system-ui,"Microsoft YaHei",sans-serif;font-size:12px;line-height:1.5;width:100%;min-width:0;z-index:30;--surface:#fff;--line:#e6e6e6;--muted:#888;--hover:#f4f4f4;--ink:#262626;color:var(--ink);color-scheme:light}
 *{box-sizing:border-box}[hidden]{display:none!important}button,input,select,textarea{font:inherit;color:inherit}button{cursor:pointer;border:0;background:transparent;padding:6px 8px;border-radius:7px;line-height:1.4;white-space:nowrap}button:hover{background:var(--hover)}button:disabled{opacity:.45;cursor:wait}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid #10a37f;outline-offset:1px}.bar{display:flex;gap:5px;align-items:center;min-height:32px;padding:4px 2px;border-top:1px solid var(--line);margin-top:5px;min-width:0}.bar>button{font-size:11px;padding:5px 7px;flex:none}.bar>button:last-child{margin-left:auto}.chips{display:flex;gap:5px;align-items:center;flex-wrap:wrap;min-width:0;flex:1}.chip{display:flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:7px;background:var(--hover);font-size:11px;padding-left:7px;max-width:100%;min-width:0}.chip button{font-size:15px;line-height:1;padding:4px 6px;flex:none;color:var(--muted)}.selection-chip{flex:0 1 auto;max-width:100%;color:var(--ink)}.selection-chip .excerpt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.selection-icon{color:#10a37f;flex:none}.popover{position:fixed;z-index:2147483646;width:380px;max-width:calc(100vw - 20px);max-height:min(600px,75dvh);background:var(--surface);border:1px solid var(--line);border-radius:13px;padding:14px;box-shadow:0 8px 36px #0002;overflow:auto;color:var(--ink);overscroll-behavior:contain}.heading{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:8px}.heading strong{font-size:13px;font-weight:600}.heading button{font-size:18px;padding:0 5px}.source{font-size:11px;color:var(--muted);line-height:1.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0 0 9px}.note{font-size:11px;line-height:1.75;color:var(--muted);margin:8px 0;white-space:pre-line;overflow-wrap:anywhere}.attachment-actions{display:flex;gap:7px}.attachment-actions button{flex:1;border:1px solid var(--line);padding:9px}.attachment-actions button[aria-pressed="true"]{color:#10a37f;border-color:#10a37f;background:var(--hover)}.form label{display:block;font-size:11px;margin:10px 0 5px}.form input,.form textarea,.form select{display:block;width:100%;border:1px solid var(--line);border-radius:7px;padding:7px 9px;background:var(--surface);font-size:12px;line-height:1.8;resize:vertical}.form textarea{max-height:200px}.format-heading{font-size:12px;font-weight:600;margin:14px 0 5px}.format-heading:first-child{margin-top:0}.position-field{display:flex;align-items:center;gap:9px;margin:6px 0}.position-field label{margin:0;white-space:nowrap}.position-field select{width:auto;flex:1}.footer{display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end;margin-top:12px}.footer button{border:1px solid var(--line);font-size:11px}.footer .primary{background:var(--ink);color:var(--surface);border-color:var(--ink)}.status{font-size:11px;line-height:1.7;margin:2px 2px 6px;color:var(--muted);overflow-wrap:anywhere}.status.error{color:#b45c3c}.access{font-size:11px;color:#10a37f;border:1px solid var(--line);margin-bottom:6px}:host([data-dark]){--surface:#2f2f2f;--line:#454545;--hover:#383838;--muted:#aaa;--ink:#ececec;color-scheme:dark}
+:host{flex:0 0 auto;align-self:stretch;box-sizing:border-box}
 .popover{inset:auto;margin:0}
 .chip button:disabled{cursor:pointer}
 .default-options{min-width:0;border:0;margin:0 0 14px;padding:0;display:flex;flex-wrap:wrap;gap:8px 14px}.default-options legend{font-size:12px;font-weight:600;margin-bottom:7px}.form label.default-option{display:flex;align-items:center;gap:6px;margin:0;font-size:12px;cursor:pointer}.form .default-option input{display:inline-block;width:auto;flex:none;margin:0;padding:0;accent-color:#10a37f}
 .form [aria-invalid="true"]{border-color:#b45c3c}.form .field-error{color:#b45c3c;margin:5px 0}
 `;
 
-/** The original ChatGPT editor stays the only question editor. */
-export function installEnhancement({ document, chrome, bridgeId, onReady = () => {}, attachmentManager }) {
+/** The original site's editor stays the only question editor. */
+export function installEnhancement({ document, chrome, bridgeId, onReady = () => {}, attachmentManager, adapter = createWebAdapter(document) }) {
   const view = document.defaultView;
-  const attachments = attachmentManager || createAttachmentManager(document);
+  const attachments = attachmentManager || adapter.createAttachmentManager();
+  const findComposer = () => adapter.findComposer();
+  const getComposerText = element => adapter.readDraft(element);
+  const supportsAttachments = () => Boolean(attachmentManager || adapter.supportsAttachments());
   let context = null;
   let settings = normalizeContextSettings();
   let composer;
@@ -22,6 +28,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   let disposed = false;
   let positioning = false;
   let ready = false;
+  let readinessDetail = '';
   let statusTimer;
   let replaying = false;
   let delivering = false;
@@ -34,20 +41,64 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   let needsAccess = false;
   let delivery = null;
   let ownedAttachment = null;
+  let clearingAttachment = null;
+  let cleanupIssue = null;
+  let sendGap = null;
   const host = document.createElement('div');
   host.id = 'sider-enhancement';
   host.dataset.siderEnhancement = 'true';
   const root = host.attachShadow({ mode: 'open' });
-  root.innerHTML = `<style>${CSS}</style><div class="status" role="status" hidden></div><button type="button" id="source-access" class="access" hidden>允许当前网站</button><button type="button" id="page-retry" class="access" hidden>重试正文</button><div class="bar" aria-label="网页引用工具"><button type="button" data-pane="references" title="选择当前网页的链接或正文">引用</button><div class="chips" aria-label="当前网页引用"></div><button type="button" data-pane="settings" aria-label="引用设置" title="引用设置">⋯</button></div><section class="popover" popover="manual" role="dialog" aria-label="网页引用" hidden><div class="heading"><strong id="pane-title"></strong><button type="button" id="close-pane" aria-label="关闭">×</button></div><div id="pane-body"></div></section>`;
+  // DOM construction also works on sites enforcing Trusted Types. No policy
+  // creation or HTML-string sink is needed to render our static controls.
+  const element = (tag, attributes = {}, text = '') => {
+    const node = document.createElement(tag);
+    for (const [name, value] of Object.entries(attributes)) node.setAttribute(name, value);
+    node.textContent = text;
+    return node;
+  };
+  const bar = element('div', { class: 'bar', 'aria-label': '网页引用工具' });
+  bar.append(
+    element('button', { type: 'button', 'data-pane': 'references', title: '选择当前网页的链接或正文' }, '引用'),
+    element('div', { class: 'chips', 'aria-label': '当前网页引用' }),
+    element('button', { type: 'button', 'data-pane': 'settings', 'aria-label': '引用设置', title: '引用设置' }, '⋯'),
+  );
+  const popup = element('section', { class: 'popover', popover: 'manual', role: 'dialog', 'aria-label': '网页引用', hidden: '' });
+  const heading = element('div', { class: 'heading' });
+  heading.append(element('strong', { id: 'pane-title' }), element('button', { type: 'button', id: 'close-pane', 'aria-label': '关闭' }, '×'));
+  popup.append(heading, element('div', { id: 'pane-body' }));
+  root.append(
+    element('style', {}, CSS),
+    element('div', { class: 'status', role: 'status', hidden: '' }),
+    element('button', { type: 'button', id: 'source-access', class: 'access', hidden: '' }, '允许当前网站'),
+    element('button', { type: 'button', id: 'page-retry', class: 'access', hidden: '' }, '重试正文'),
+    bar, popup,
+  );
   const $ = selector => root.querySelector(selector);
 
-  function report(message, error = false, accessRequired = needsAccess) {
+  function compile(question, options = {}) {
+    let result = composeContextPrompt(question, context, settings, options);
+    if (result.pageDelivery === 'file' && !supportsAttachments()) {
+      if (settings.pageMode === 'auto') {
+        result = composeContextPrompt(question, context, { ...settings, pageMode: 'text' }, options);
+        result.notice = `${adapter.site.name} 尚未支持自动上传正文附件，本次将附加完整正文文本。`;
+      } else result.errors.push(`${adapter.site.name} 尚未支持自动上传正文附件。请改用文本模式或选择支持附件的网站；问题已保留。`);
+    }
+    return result;
+  }
+
+  function report(message, error = false, accessRequired = needsAccess, { persistent = false } = {}) {
     view.clearTimeout(statusTimer);
-    $('.status').textContent = message;
+    if ($('.status').textContent !== message) $('.status').textContent = message;
     $('.status').classList.toggle('error', error);
     $('.status').hidden = !message;
     $('#source-access').hidden = !accessRequired;
-    if (message && !error) statusTimer = view.setTimeout(() => { $('.status').hidden = true; }, 6500);
+    if (message && !error && !persistent) statusTimer = view.setTimeout(() => { $('.status').hidden = true; }, 6500);
+  }
+
+  function reportProgress(message, transaction = delivery) {
+    if (disposed || transaction && transaction !== delivery) return;
+    if (transaction) transaction.progress = message;
+    report(message, false, needsAccess, { persistent: true });
   }
 
   function applyResponse(result, sequence, startedEpoch) {
@@ -67,11 +118,11 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     $('#page-retry').hidden = !context?.pageError || needsAccess;
     renderChips();
     if (context?.pageError && !delivering) report(context.pageError, true);
-    else if (previousPageError && !context?.pageError && $('.status').textContent.includes(previousPageError)) report('');
+    else if (!delivering && previousPageError && !context?.pageError && $('.status').textContent.includes(previousPageError)) report('');
     if (pane === 'references') renderReferences();
     if (delivery?.stamp && delivery.stamp !== contextStamp()) delivery.abort.abort();
-    if (ownedAttachment && !delivering) {
-      const next = composeContextPrompt('引用', context, settings).attachment;
+    if (ownedAttachment && !delivering && !cleanupIssue) {
+      const next = compile('引用').attachment;
       if (!sameAttachment(next, ownedAttachment)) void clearAttachment().catch(error => report(error.message, true));
     }
   }
@@ -85,11 +136,17 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     return result;
   }
 
-  async function run(element, action) {
+  async function run(element, action, transaction = null) {
     if (element?.disabled) return;
     if (element) element.disabled = true;
     try { await action(); }
-    catch (error) { report(error.message || '操作失败。', true, error.code === 'SOURCE_ACCESS_REQUIRED' || needsAccess); }
+    catch (error) {
+      // The sending transaction reports the upload and cleanup result together.
+      // A concurrent cancel action must not publish the same cleanup error again.
+      if (!disposed && !(delivering && !transaction && error.code === 'ATTACHMENT_CLEANUP_FAILED')) {
+        report(error.message || '操作失败。', true, error.code === 'SOURCE_ACCESS_REQUIRED' || needsAccess);
+      }
+    }
     finally { if (element) element.disabled = false; }
   }
 
@@ -120,8 +177,9 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     if (context?.selection && context.selectionIncluded !== false) chips.push(['selection', context.selection.content, '取消划词', () => request({ type: 'SIDER_TAB_SELECTION_CLEAR' })]);
     if (context?.attachments.url) chips.push(['url', 'URL', '取消 URL 引用', () => request({ type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'url', enabled: false })]);
     if (context?.pageRequested) {
-      const asFile = composeContextPrompt('引用', context, settings).pageDelivery === 'file';
-      const title = context.pageError ? '正文 · 未就绪' : !context.attachments.page ? '正文 · 准备中' : asFile ? '正文 · 附件' : '正文';
+      const compiled = compile('引用');
+      const asFile = compiled.pageDelivery === 'file';
+      const title = context.pageError ? '正文 · 未就绪' : !context.attachments.page ? '正文 · 准备中' : compiled.notice ? '正文 · 文本' : asFile ? '正文 · 附件' : '正文';
       chips.push(['page', title, '取消正文引用', async () => {
         delivery?.abort.abort();
         await request({ type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: false });
@@ -175,7 +233,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
         entry.dataset.attachment = kind; actions.append(entry);
       }
       const note = document.createElement('p'); note.className = 'note';
-      note.textContent = '引用仅用于当前标签页。写好问题后，按回车或点击 ChatGPT 发送按钮，自动附加已选内容。'; body.append(note);
+      note.textContent = `引用仅用于当前标签页。写好问题后，使用 ${adapter.site.name} 的发送快捷键或发送按钮，自动附加已选内容。`; body.append(note);
     }
     const title = context?.title || '当前网页';
     if (source.textContent !== title) source.textContent = title;
@@ -213,7 +271,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
       label.htmlFor = input.id; label.append(input, document.createTextNode(name)); defaults.append(label); fields[key] = input;
     }
     body.append(defaults);
-    const defaultNote = document.createElement('p'); defaultNote.className = 'note'; defaultNote.textContent = '修改后保存，立即应用到当前网页，后续网页沿用。引用标签可临时取消；默认正文在打开侧栏时采集。'; body.append(defaultNote);
+    const defaultNote = document.createElement('p'); defaultNote.className = 'note'; defaultNote.textContent = '修改后保存，立即应用到当前网页，后续网页沿用。引用标签可临时取消；正文在每次发送前更新。'; body.append(defaultNote);
     for (const [kind, name, hint] of [['selection', '划词', '{{selection}} 划词 · {{context}} 附近段落'], ['url', '网页链接', '{{url}} 当前网页 URL · {{title}} 网页标题'], ['page', '网页正文', '{{content}} 网页正文 · {{url}} 当前网页 URL']]) {
       const heading = document.createElement('div'); heading.className = 'format-heading'; heading.textContent = name; body.append(heading);
       fields[`${kind}Template`] = field(body, kind === 'page' ? '正文格式（作为附件时写入文件）' : '附加文本格式', 'textarea', settings[`${kind}Template`], `${kind}-template`);
@@ -274,22 +332,48 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     popup.style.top = `${Math.max(10, Math.min(rect.top - height - 8, view.innerHeight - height - 10))}px`;
   }
 
+  function clearSendGap() {
+    view.clearTimeout(sendGap?.timer);
+    sendGap = null;
+  }
+
+  function displayAvailability(current, availability) {
+    if (!['claude', 'generic'].includes(adapter.site.adapter) || availability.reason !== 'send-missing'
+      || !current || current !== composer || sendGap && (sendGap.editor !== current || sendGap.session !== adapter.sessionKey())) {
+      clearSendGap();
+      return availability;
+    }
+    if (!sendGap && ready) {
+      sendGap = { editor: current, session: adapter.sessionKey(), deadline: Date.now() + SEND_CONTROL_GRACE_MS };
+      sendGap.timer = view.setTimeout(scheduleMount, SEND_CONTROL_GRACE_MS);
+    }
+    // Keep the original deadline during repeated input and DOM mutations.
+    return sendGap && Date.now() < sendGap.deadline ? { ready: true, detail: '' } : availability;
+  }
+
   function mount() {
     positioning = false;
     if (disposed) return;
     const current = findComposer(document);
-    if (!current) { host.hidden = true; return; }
+    const availability = displayAvailability(current, adapter.availability());
+    if (ready !== availability.ready || readinessDetail !== availability.detail) {
+      if (availability.ready && readinessDetail && $('.status').textContent === readinessDetail) report('');
+      ready = availability.ready; readinessDetail = availability.detail;
+      onReady({ ready: availability.ready, detail: availability.detail });
+    }
+    if (!current) { host.hidden = true; delivery?.abort.abort(); return; }
+    if (delivery && (delivery.editor !== current || delivery.session !== adapter.sessionKey())) delivery.abort.abort();
     if (composer && composer !== current) prepared = null;
     composer = current;
     // Composer forms treat clicks on a shadow host as clicks on their own
     // background and can steal focus from extension inputs. Keep our controls
     // outside that form, while remaining next to the original editor.
-    const anchor = current.closest('form') || current.closest('[data-composer-body]') || current.parentElement;
-    if (!anchor || anchor === document.body || anchor === document.documentElement) return;
+    const anchor = adapter.findMountAnchor();
+    if (!anchor) { host.hidden = true; return; }
     if (!host.isConnected || host.previousElementSibling !== anchor) anchor.after(host);
     host.hidden = false;
     host.toggleAttribute('data-dark', document.documentElement.classList.contains('dark') || view.matchMedia?.('(prefers-color-scheme:dark)').matches);
-    if (!ready) { ready = true; onReady({ ready: true }); }
+    if (!availability.ready && !delivering) report(availability.detail, true);
     positionPopover();
   }
 
@@ -299,23 +383,42 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   }
 
   function findSendButton() {
-    const scope = findComposer(document)?.closest('form') || document;
-    return [...scope.querySelectorAll('button[data-testid="send-button"],button[aria-label="Send"],button[aria-label="Send prompt"],button[aria-label="Send message"],button[aria-label="发送提示"],button[aria-label="发送消息"],button[aria-label="发送"]')].find(element => !element.disabled && element.getAttribute('aria-disabled') !== 'true' && element.getClientRects().length);
+    return adapter.findSendButton();
   }
 
   function contextStamp() { return JSON.stringify({ context, settings, needsAccess }); }
 
   function sameAttachment(a, b) { return Boolean(a && b && a.name === b.name && a.content === b.content && a.mimeType === b.mimeType); }
 
-  async function clearAttachment() {
-    await attachments.clear();
-    ownedAttachment = null;
+  function clearAttachment() {
+    if (clearingAttachment) return clearingAttachment.promise;
+    const status = $('.status');
+    const previousStatus = { text: status.textContent, error: status.classList.contains('error'), hidden: status.hidden };
+    const task = { settled: false, promise: null };
+    clearingAttachment = task;
+    task.promise = Promise.resolve().then(() => {
+      if (ownedAttachment) reportProgress('正在取消正文附件…');
+      return attachments.clear();
+    }).then(() => {
+      ownedAttachment = null; cleanupIssue = null;
+      if (!disposed && !delivering && status.textContent === '正在取消正文附件…') {
+        report(previousStatus.error && !previousStatus.hidden ? previousStatus.text : '正文附件已取消。', previousStatus.error && !previousStatus.hidden);
+      }
+    }).catch(error => {
+      cleanupIssue = error;
+      error.code = 'ATTACHMENT_CLEANUP_FAILED';
+      throw error;
+    }).finally(() => {
+      task.settled = true;
+      if (!delivering && clearingAttachment === task) clearingAttachment = null;
+    });
+    return task.promise;
   }
 
   async function writeDraft(text, expectedPrevious) {
     writing = true;
     try {
-      const result = await fillComposer(document, text, 'replace', { expectedPrevious });
+      const result = await adapter.writeDraft(text, { expectedPrevious });
       if (!result.ok) throw new Error(result.error);
     } finally { writing = false; }
   }
@@ -326,41 +429,76 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     }
   }
 
+  function waitForSendControl(transaction, expected, deadline) {
+    return new Promise((resolve, reject) => {
+      const signal = transaction.abort.signal;
+      const stamp = contextStamp();
+      const finish = (target, error) => {
+        view.clearInterval(timer);
+        signal.removeEventListener('abort', tick);
+        if (error) reject(error); else resolve(target);
+      };
+      const tick = () => {
+        try {
+          if (disposed || signal.aborted || contextStamp() !== stamp || adapter.sessionKey() !== transaction.session
+            || findComposer() !== transaction.editor || getComposerText(transaction.editor) !== expected) {
+            throw new Error('问题、引用或会话已修改，请重新发送。');
+          }
+          const availability = adapter.availability();
+          const target = findSendButton();
+          if (target && availability.ready) return finish(target);
+          if (availability.reason !== 'send-missing' || Date.now() >= deadline) {
+            throw new Error(availability.detail || `${adapter.site.name} 发送按钮尚未就绪，请稍后重新发送。`);
+          }
+        } catch (error) { finish(null, error); }
+      };
+      const timer = view.setInterval(tick, 25);
+      signal.addEventListener('abort', tick, { once: true });
+      tick();
+    });
+  }
+
   function nativeSend(event) {
     if (replaying || !event.isTrusted) return;
     const current = findComposer(document); if (!current) return;
-    let sendButton;
-    if (event.type === 'keydown') {
-      if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.isComposing || event.keyCode === 229 || !current.contains(event.target)) return;
-      sendButton = findSendButton();
-    } else {
-      sendButton = event.target.closest?.('button'); if (!sendButton || sendButton !== findSendButton()) return;
-    }
+    if (!adapter.isSendIntent(event, current)) return;
     const draft = getComposerText(current);
     if (!draft.trim()) return;
+    const rawAvailability = adapter.availability();
+    const availability = displayAvailability(current, rawAvailability);
+    if (!delivering && !availability.ready) {
+      if (sendGap || availability.reason === 'site-connection-error') { event.preventDefault(); event.stopImmediatePropagation(); report(availability.detail, true); }
+      return;
+    }
     event.preventDefault(); event.stopImmediatePropagation();
-    if (delivering) return;
+    if (delivering) { reportProgress(delivery?.progress || '正在准备发送，请等待或取消正文引用…'); return; }
     delivering = true;
     const question = prepared?.editor === current && prepared.text === draft ? prepared.question : draft;
-    const transaction = { editor: current, question, draft, url: view.location.href, stamp: null, abort: new view.AbortController(), written: null };
+    const transaction = { editor: current, question, draft, url: view.location.href, session: adapter.sessionKey(), stamp: null, abort: new view.AbortController(), written: null, progress: '' };
     delivery = transaction;
     void run(null, async () => {
-      const unchanged = expected => !disposed && view.location.href === transaction.url && findComposer(document) === current && getComposerText(current) === expected;
+      const unchanged = expected => !disposed && adapter.sessionKey() === transaction.session && findComposer(document) === current && getComposerText(current) === expected;
       try {
-        await request({ type: 'SIDER_TAB_CONTEXT_GET' });
+        if (!rawAvailability.ready) {
+          reportProgress('正在等待发送控件…', transaction);
+          await waitForSendControl(transaction, draft, sendGap.deadline);
+        }
+        reportProgress('正在准备发送…', transaction);
+        await request({ type: 'SIDER_TAB_CONTEXT_GET', refreshPage: true });
         if (!unchanged(draft)) throw new Error('问题或会话已修改，请重新发送。');
         transaction.stamp = contextStamp();
-        let compiled = composeContextPrompt(question, context, settings);
+        let compiled = compile(question);
         const uploadSpec = compiled.attachment;
         if (compiled.errors.length) throw new Error(compiled.errors[0]);
         if (compiled.attachment) {
-          report('正在准备正文附件…');
+          reportProgress('正在准备正文附件…', transaction);
           ownedAttachment = uploadSpec;
           const uploaded = await attachments.prepare(uploadSpec, {
             signal: transaction.abort.signal,
             isCurrent: () => unchanged(draft) && transaction.stamp === contextStamp(),
+            onProgress: ({ message }) => reportProgress(message, transaction),
           });
-          if (uploaded?.name) compiled = composeContextPrompt(question, context, settings, { attachmentName: uploaded.name });
+          if (uploaded?.name) compiled = compile(question, { attachmentName: uploaded.name });
           if (compiled.errors.length) throw new Error(compiled.errors[0]);
         } else await clearAttachment();
         await request({ type: 'SIDER_TAB_CONTEXT_GET' });
@@ -374,21 +512,39 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
         if (transaction.stamp !== contextStamp()) throw new Error('网页引用或设置已变化，请重新发送。');
         if (transaction.abort.signal.aborted || !unchanged(compiled.text)) throw new Error('问题或会话已修改，请重新发送。');
         if (uploadSpec && !attachments.isReady(uploadSpec)) throw new Error('正文附件已取消，请重新发送。');
-        const target = sendButton?.isConnected && !sendButton.disabled && sendButton.getAttribute('aria-disabled') !== 'true' ? sendButton : findSendButton();
-        if (!target) throw new Error('ChatGPT 发送按钮尚未就绪，请稍后重新发送。');
-        report('');
+        const finalAvailability = adapter.availability();
+        if (finalAvailability.reason === 'site-connection-error') throw new Error(finalAvailability.detail);
+        let target = findSendButton();
+        if (!target) {
+          const raw = adapter.availability();
+          if (raw.reason === 'send-missing' && displayAvailability(current, raw).ready) {
+            reportProgress('正在等待发送控件…', transaction);
+            target = await waitForSendControl(transaction, compiled.text, sendGap.deadline);
+          }
+        }
+        if (!target) throw new Error(`${adapter.site.name} 发送按钮尚未就绪，请稍后重新发送。`);
+        report(compiled.notice || '');
+        transaction.replayed = true;
         replaying = true;
-        try { target.click(); } finally { replaying = false; }
+        try { adapter.send(target); } finally { replaying = false; }
       } catch (error) {
         // Restore only text that this transaction wrote; never overwrite edits
         // made while a file was uploading or a new conversation's draft.
-        if (view.location.href === transaction.url) await restoreQuestion(transaction.written || draft, question, current);
-        if (transaction.abort.signal.aborted || transaction.stamp !== contextStamp() || !unchanged(question)) {
-          await clearAttachment();
+        if (adapter.sessionKey() === transaction.session) await restoreQuestion(transaction.written || draft, question, current);
+        if (error.cleanupError) cleanupIssue = error.cleanupError;
+        if (!error.attachmentCleanupHandled && (transaction.abort.signal.aborted || transaction.stamp !== contextStamp() || !unchanged(question) || (context?.pageRequested && !context.attachments.page))) {
+          try { await clearAttachment(); }
+          catch (cleanupError) {
+            if (cleanupError !== error) throw new Error(`${error.message}\n${cleanupError.message}`);
+          }
         }
         throw error;
       }
-    }).finally(() => { if (delivery === transaction) delivery = null; delivering = false; });
+    }, transaction).finally(() => {
+      if (delivery === transaction) delivery = null;
+      delivering = false;
+      if (clearingAttachment?.settled) clearingAttachment = null;
+    });
   }
 
   // Native editing/selecting must retain its default behavior, but these UI
@@ -409,9 +565,9 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   document.addEventListener('pointerdown', outside, true); document.addEventListener('keydown', keyboard, true);
   document.addEventListener('keydown', nativeSend, true); document.addEventListener('click', nativeSend, true);
   const nativeAttachmentRemoved = event => {
-    if (replaying || !event.isTrusted || !attachments.isOwnedRemoveButton?.(event.target.closest?.('button'))) return;
+    if (replaying || !event.isTrusted || !event.composedPath().some(node => attachments.isOwnedRemoveButton?.(node))) return;
     delivery?.abort.abort();
-    // Let ChatGPT remove its card before synchronizing our current-page chip.
+    // Let the site remove its card before synchronizing our current-page chip.
     void run(null, async () => {
       await request({ type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: false });
       await clearAttachment();
@@ -422,8 +578,11 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   const inputChanged = event => {
     const current = findComposer(document);
     if (!current?.contains(event.target) || writing) return;
+    if (replaying || delivery?.replayed) { prepared = null; return; }
     delivery?.abort.abort();
-    $('.status').hidden = true;
+    if (delivering) reportProgress('正在取消本次发送…');
+    else $('.status').hidden = true;
+    scheduleMount();
     if (prepared?.editor !== current) { prepared = null; return; }
     const draft = getComposerText(current);
     if (draft === prepared.text) return;
@@ -436,6 +595,12 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     } else prepared = null;
   };
   document.addEventListener('input', inputChanged, true);
+  const disposeTextDrop = adapter.site.adapter === 'generic' ? installTextDrop({ document, adapter,
+    isBusy: () => writing,
+    beforeWrite() { delivery?.abort.abort(); prepared = null; writing = true; },
+    afterWrite() { writing = false; scheduleMount(); },
+    onError: detail => report(detail, true),
+  }) : () => {};
   const refresh = () => request({ type: 'SIDER_TAB_CONTEXT_GET' });
   const storageChanged = (changes, area) => {
     if (area === 'local' && changes[CONTEXT_SETTINGS_KEY]) {
@@ -445,7 +610,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   };
   chrome.storage.onChanged.addListener(storageChanged);
   const observer = new view.MutationObserver(scheduleMount);
-  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'hidden', 'contenteditable'] });
+  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'hidden', 'contenteditable', 'style', 'id', 'role', 'aria-label', 'aria-disabled', 'disabled', 'data-testid', 'data-test-id', 'title'] });
   view.addEventListener('resize', scheduleMount); view.addEventListener('scroll', positionPopover, true);
   const interval = view.setInterval(() => {
     scheduleMount();
@@ -455,8 +620,9 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   }, 1000);
   mount(); void refresh().catch(error => report(error.message, true, error.code === 'SOURCE_ACCESS_REQUIRED'));
   return { host, root, refresh, dispose() {
-    delivery?.abort.abort(); attachments.dispose();
-    disposed = true; observer.disconnect(); view.clearInterval(interval); view.clearTimeout(statusTimer);
+    if (disposed) return;
+    delivery?.abort.abort(); attachments.dispose(); disposeTextDrop();
+    disposed = true; clearSendGap(); observer.disconnect(); view.clearInterval(interval); view.clearTimeout(statusTimer);
     showPane(null);
     for (const type of uiEvents) root.removeEventListener(type, containUIEvent);
     chrome.storage.onChanged.removeListener(storageChanged); document.removeEventListener('pointerdown', outside, true); document.removeEventListener('keydown', keyboard, true);

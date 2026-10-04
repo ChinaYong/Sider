@@ -4,10 +4,146 @@ import { JSDOM } from 'jsdom';
 import { createReference } from '../src/core.js';
 import { createTabContext, normalizeContext, normalizeContextSettings, CONTEXT_SETTINGS_KEY } from '../src/context.js';
 import { installEnhancement } from '../src/content/enhancement.js';
+import { BUILTIN_AI_SITES, normalizeCustomAISite } from '../src/ai-web.js';
+import { createWebAdapter } from '../src/content/adapters.js';
 
 const pause = () => new Promise(resolve => setTimeout(resolve, 130));
+const waitUntil = async predicate => {
+  const deadline = Date.now() + 2000;
+  while (!predicate()) {
+    assert.ok(Date.now() < deadline, 'enhancement did not reach the expected completion state');
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+};
 const selection = (text = '当前选中的词汇') => createReference({ kind: 'selection', title: '当前网页', url: 'https://example.com/article', content: text, context: '附近的原文段落' }, { alias: 'r1' });
 const page = (text = '完整的网页正文') => createReference({ kind: 'page', title: '当前网页', url: 'https://example.com/article', content: text }, { alias: 'r2' });
+const customSite = normalizeCustomAISite({ id: 'custom-test-ai-0001', name: 'Custom AI', url: 'https://custom-ai.test/chat' });
+
+function grokBanner(f) {
+  const banner = f.window.document.createElement('span'); banner.setAttribute('role', 'status'); banner.setAttribute('aria-live', 'polite');
+  banner.textContent = 'Your network or security software is blocking Grok’s real-time connection. Try another network.';
+  f.window.document.body.append(banner); return banner;
+}
+
+test('a known Grok connection failure blocks repeated native sends without capturing references or losing the draft', async t => {
+  const f = fixture(t, { site: normalizeCustomAISite({ id: 'custom-grok-fixture', name: 'Grok', url: 'https://grok.com/' }) }); await pause();
+  const banner = grokBanner(f); f.editor.value = '保留问题'; await pause();
+  const count = f.calls.length;
+  assert.equal(f.send('keydown'), true); assert.equal(f.send('click'), true); await pause();
+  assert.equal(f.calls.length, count); assert.deepEqual(f.submitted, []); assert.equal(f.editor.value, '保留问题');
+  assert.match(f.root.querySelector('.status').textContent, /实时连接失败/);
+  banner.remove(); await pause(); f.send(); await pause(); assert.equal(f.submitted.length, 1);
+});
+
+test('Grok failing during reference preparation stops the final replay and retains the original question', async t => {
+  const f = fixture(t, { site: normalizeCustomAISite({ id: 'custom-grok-fixture', name: 'Grok', url: 'https://grok.com/' }) }); await pause();
+  await f.seed({ attachments: { url: true } }); f.editor.value = '原问题';
+  let release; const original = f.chrome.runtime.sendMessage;
+  f.chrome.runtime.sendMessage = async message => { if (message.request?.refreshPage) await new Promise(resolve => { release = resolve; }); return original(message); };
+  f.send(); await waitUntil(() => Boolean(release)); grokBanner(f); release();
+  await waitUntil(() => /实时连接失败/.test(f.root.querySelector('.status').textContent));
+  assert.deepEqual(f.submitted, []); assert.equal(f.editor.value, '原问题'); assert.match(f.root.querySelector('.status').textContent, /实时连接失败/);
+});
+
+test('a custom-site text drop cancels in-flight reference preparation and preserves the updated draft', async t => {
+  const f = fixture(t, { site: customSite }); await pause(); await f.seed({ attachments: { url: true } }); f.editor.value = '问题';
+  let release; const original = f.chrome.runtime.sendMessage;
+  f.chrome.runtime.sendMessage = async message => { if (message.request?.refreshPage) await new Promise(resolve => { release = resolve; }); return original(message); };
+  f.send(); await pause(); assert.equal(f.drop('拖入文字'), true); await pause(); release(); await pause();
+  assert.deepEqual(f.submitted, []); assert.equal(f.editor.value, '问题拖入文字');
+  f.chrome.runtime.sendMessage = original;
+  f.send(); await pause(); assert.equal(f.submitted.length, 1); assert.match(f.submitted[0], /问题拖入文字/);
+});
+
+test('any custom website tolerates a brief sender replacement and Enter waits once for its real control', async t => {
+  const f = fixture(t, { site: customSite }); await pause(); await f.seed({ attachments: { url: true } });
+  f.editor.value = '通用控件等待';
+  const button = f.window.document.querySelector('button'); button.remove(); await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(f.root.querySelector('.status').hidden, true);
+  assert.equal(f.send('keydown'), true);
+  f.window.document.querySelector('form').append(button);
+  await pause(); await pause();
+  assert.equal(f.submitted.length, 1); assert.match(f.submitted[0], /通用控件等待/); assert.match(f.submitted[0], /example.com/);
+});
+
+test('a prolonged custom-site sender gap blocks sending and keeps the original draft', async t => {
+  const f = fixture(t, { site: customSite }); await pause(); f.editor.value = '保留草稿';
+  f.window.document.querySelector('button').remove(); await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(f.send('keydown'), true); await new Promise(resolve => setTimeout(resolve, 540));
+  assert.deepEqual(f.submitted, []); assert.equal(f.editor.value, '保留草稿'); assert.match(f.root.querySelector('.status').textContent, /发送控件/);
+});
+
+test('custom AI auto mode sends the complete body as text and clearly reports the attachment fallback', async t => {
+  const f = fixture(t, { site: customSite }); await pause();
+  const text = '完整正文'.repeat(4000) + '正文尾部必须完整';
+  await f.seed({ pageRequested: true, attachments: { page: page(text) } }, { pageMode: 'auto', pageThreshold: 100 });
+  f.editor.value = '请概括';
+  assert.equal(f.root.querySelector('[data-chip="page"] .excerpt').textContent, '正文 · 文本');
+  assert.equal(f.send(), true); await pause();
+  assert.equal(f.submitted.length, 1); assert.ok(f.submitted[0].includes(text));
+  assert.match(f.root.querySelector('.status').textContent, /完整正文文本/);
+  f.send(); await pause();
+  assert.equal(f.submitted[1], f.submitted[0], 'retry cannot duplicate references');
+});
+
+test('custom AI forced attachment mode blocks send and retains the question and selected body', async t => {
+  const f = fixture(t, { site: customSite }); await pause();
+  await f.seed({ pageRequested: true, attachments: { page: page() } }, { pageMode: 'file' });
+  f.editor.value = '原问题'; f.send(); await pause();
+  assert.deepEqual(f.submitted, []); assert.equal(f.editor.value, '原问题');
+  assert.equal(f.context.pageRequested, true); assert.match(f.root.querySelector('.status').textContent, /尚未支持自动上传/);
+});
+
+test('changing a session identifier in a reused native editor cancels an in-flight send', async t => {
+  const f = fixture(t); await pause(); f.editor.value = '旧会话问题';
+  let release; const original = f.chrome.runtime.sendMessage;
+  f.chrome.runtime.sendMessage = async message => { if (message.request?.refreshPage) await new Promise(resolve => { release = resolve; }); return original(message); };
+  f.send(); await pause();
+  f.editor.dataset.conversationId = 'new-conversation'; f.editor.value = '新会话草稿';
+  release(); await pause();
+  assert.deepEqual(f.submitted, []); assert.equal(f.editor.value, '新会话草稿');
+});
+
+test('native generation clicks and Enter do not start reference preparation or alter the next draft', async t => {
+  const f = fixture(t); await pause();
+  await f.seed({ attachments: { url: true } });
+  f.editor.value = '下一条草稿';
+  const button = f.window.document.querySelector('button');
+  button.setAttribute('aria-label', 'Stop response');
+  await pause();
+  assert.equal(f.root.querySelector('.status').hidden, true);
+  const freshRequests = () => f.calls.filter(message => message.request?.refreshPage).length;
+  const before = freshRequests();
+  assert.equal(f.send('click'), false);
+  assert.equal(f.send('keydown'), false);
+  await pause();
+  assert.equal(freshRequests(), before);
+  assert.equal(f.editor.value, '下一条草稿');
+  assert.deepEqual(f.submitted, []);
+});
+
+test('a sender becoming Stop during reference preparation is never replayed and restores only its own draft write', async t => {
+  const f = fixture(t); await pause();
+  await f.seed({ attachments: { url: true } });
+  f.editor.value = '保留原问题';
+  let release;
+  const original = f.chrome.runtime.sendMessage;
+  f.chrome.runtime.sendMessage = async message => {
+    if (message.request?.refreshPage) await new Promise(resolve => { release = resolve; });
+    return original(message);
+  };
+  assert.equal(f.send(), true);
+  await pause();
+  let clicks = 0;
+  const button = f.window.document.querySelector('button');
+  button.setAttribute('aria-label', 'Stop generating');
+  button.addEventListener('click', () => { clicks++; });
+  release(); await pause();
+  assert.equal(clicks, 0);
+  assert.deepEqual(f.submitted, []);
+  assert.equal(f.editor.value, '保留原问题');
+  assert.match(f.root.querySelector('.status').textContent, /发送按钮尚未就绪/);
+});
 
 function fixture(t, options = {}) {
   const { window } = new JSDOM('<main><form><div data-composer-body><textarea id="prompt-textarea"></textarea></div><button data-testid="send-button">Send</button></form></main>', { url: 'https://chatgpt.com/', pretendToBeVisual: true });
@@ -19,9 +155,11 @@ function fixture(t, options = {}) {
   const calls = [];
   const listeners = new Set();
   const sendListeners = new Map();
+  let textDrop;
   const addListener = window.document.addEventListener.bind(window.document);
   window.document.addEventListener = (type, callback, options) => {
     if ((type === 'click' || type === 'keydown') && callback.name === 'nativeSend') sendListeners.set(type, callback);
+    if (type === 'drop' && callback.name === 'drop') textDrop = callback;
     addListener(type, callback, options);
   };
   const result = () => ({ ok: true, context: structuredClone(context), settings: structuredClone(settings), needsAccess });
@@ -49,7 +187,7 @@ function fixture(t, options = {}) {
   const editor = window.document.querySelector('textarea');
   const sendButton = window.document.querySelector('[data-testid="send-button"]');
   window.document.querySelector('form').addEventListener('submit', event => { event.preventDefault(); submitted.push(editor.value); });
-  const api = installEnhancement({ document: window.document, chrome, bridgeId: 'test-bridge-0001', ...options });
+  const api = installEnhancement({ document: window.document, chrome, bridgeId: 'test-bridge-0001', ...options, ...(options.site ? { adapter: createWebAdapter(window.document, options.site) } : {}) });
   t.after(() => { api.dispose(); window.close(); });
   return {
     window, chrome, api, root: api.root, calls, editor, submitted,
@@ -62,6 +200,11 @@ function fixture(t, options = {}) {
     localSettings(next) { settings = normalizeContextSettings({ ...settings, ...next }); for (const listener of listeners) listener({ [CONTEXT_SETTINGS_KEY]: { newValue: structuredClone(settings) } }, 'local'); },
     async setNeedsAccess(value) { needsAccess = value; await api.refresh(); },
     click(selector) { api.root.querySelector(selector).click(); },
+    drop(text) {
+      let prevented = false;
+      textDrop?.({ type: 'drop', isTrusted: true, target: editor, dataTransfer: { types: ['text/plain'], getData: type => type === 'text/plain' ? text : '' }, preventDefault() { prevented = true; }, stopImmediatePropagation() {} });
+      return prevented;
+    },
     // jsdom cannot manufacture trusted browser input. Call the registered
     // capture handler with the same browser-event fields; native replay still
     // goes through the real DOM button and form. Browser integration tests
@@ -208,7 +351,10 @@ test('settings alone contain variables and control prefix, suffix, and exact nat
   f.click('#save-settings'); await pause();
   f.editor.value = '这个词是什么意思？';
   assert.equal(f.send('click'), true); await pause();
-  assert.deepEqual(f.submitted, ['请结合划词「当前选中的词汇」回答\n\n这个词是什么意思？\n\n网页url为：https://example.com/article\n\n网页正文：\n完整的网页正文']);
+  assert.equal(f.submitted.length, 1);
+  assert.ok(f.submitted[0].startsWith('请结合划词「当前选中的词汇」回答\n\n这个词是什么意思？\n\n网页url为：https://example.com/article\n\n【网页引用资料】'));
+  assert.ok(f.submitted[0].includes('标题：当前网页\n来源 URL：https://example.com/article'));
+  assert.ok(f.submitted[0].endsWith('网页正文：\n完整的网页正文\n\n【网页引用资料结束】'));
   assert.equal(f.root.querySelector('.popover').hidden, true);
 });
 
@@ -268,6 +414,79 @@ test('source changes during preparation restore the question and prevent a stale
   assert.match(f.root.querySelector('.status').textContent, /已变化/);
   f.send(); await pause();
   assert.ok(f.submitted[0].includes('新词汇')); assert.equal(f.submitted[0].includes('旧词汇'), false);
+});
+
+test('native send waits for the latest body and repeated input starts only one capture', async t => {
+  const f = fixture(t); await f.seed({ attachments: { page: page('开启引用时的旧正文') } });
+  const original = f.chrome.runtime.sendMessage;
+  let release, captures = 0, latest = '发送前动态加载的新正文';
+  const gate = new Promise(resolve => { release = resolve; });
+  f.chrome.runtime.sendMessage = async message => {
+    if (message.request.type === 'SIDER_TAB_CONTEXT_GET' && message.request.refreshPage) {
+      captures++;
+      await gate;
+      f.changeSource({ attachments: { ...f.context.attachments, page: page(latest) } });
+    }
+    return original(message);
+  };
+  f.editor.value = '总结一下'; assert.equal(f.send(), true); await pause();
+  assert.equal(captures, 1); assert.equal(f.submitted.length, 0); assert.equal(f.editor.value, '总结一下');
+  assert.equal(f.send('keydown'), true); assert.equal(f.send(), true); await pause();
+  assert.equal(captures, 1); assert.equal(f.submitted.length, 0);
+  release(); await pause();
+  assert.equal(f.submitted.length, 1);
+  assert.ok(f.submitted[0].includes(latest)); assert.equal(f.submitted[0].includes('开启引用时的旧正文'), false);
+  assert.equal(captures, 1);
+  latest = '下一次发送时的新正文'; f.edit('第二个问题'); f.send('keydown'); await pause();
+  assert.equal(captures, 2); assert.equal(f.submitted.length, 2);
+  assert.ok(f.submitted[1].includes(latest)); assert.equal(f.submitted[1].includes('发送前动态加载的新正文'), false);
+});
+
+test('failed fresh extraction blocks native send without falling back to the cached body', async t => {
+  const f = fixture(t); await f.seed({ attachments: { page: page('不能退回使用的旧正文') } });
+  const original = f.chrome.runtime.sendMessage;
+  let failed = true;
+  f.chrome.runtime.sendMessage = async message => {
+    if (message.request.type === 'SIDER_TAB_CONTEXT_GET' && message.request.refreshPage) {
+      f.changeSource({ pageRequested: true, pageError: failed ? '最新网页正文提取失败。' : '', attachments: { ...f.context.attachments, page: failed ? null : page('恢复后的最新正文') } });
+    }
+    return original(message);
+  };
+  f.editor.value = '原来的问题'; f.send(); await pause();
+  assert.equal(f.submitted.length, 0); assert.equal(f.editor.value, '原来的问题');
+  assert.match(f.root.querySelector('.status').textContent, /提取失败/);
+  failed = false; f.send(); await pause();
+  assert.equal(f.submitted.length, 1); assert.ok(f.submitted[0].includes('恢复后的最新正文'));
+  assert.equal(f.submitted[0].includes('不能退回使用的旧正文'), false);
+});
+
+test('editing the question during fresh extraction stops sending and preserves the new draft', async t => {
+  const f = fixture(t); await f.seed({ attachments: { page: page() } });
+  const original = f.chrome.runtime.sendMessage;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  f.chrome.runtime.sendMessage = async message => {
+    if (message.request.refreshPage) await gate;
+    return original(message);
+  };
+  f.editor.value = '旧问题'; f.send(); await pause();
+  f.edit('采集期间修改的新问题'); release(); await pause();
+  assert.equal(f.editor.value, '采集期间修改的新问题'); assert.equal(f.submitted.length, 0);
+});
+
+test('changing conversations during fresh extraction leaves the new conversation draft untouched', async t => {
+  const f = fixture(t); await f.seed({ attachments: { page: page() } });
+  const original = f.chrome.runtime.sendMessage;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  f.chrome.runtime.sendMessage = async message => {
+    if (message.request.refreshPage) await gate;
+    return original(message);
+  };
+  f.editor.value = '旧会话的问题'; f.send(); await pause();
+  f.window.history.pushState({}, '', '/c/new-conversation'); f.edit('新会话的草稿');
+  release(); await pause();
+  assert.equal(f.editor.value, '新会话的草稿'); assert.equal(f.submitted.length, 0);
 });
 
 test('native draft edits while current context is loading are preserved', async t => {
@@ -350,6 +569,227 @@ function attachmentFixture({ pending = false, failure = null, nativeName = null 
   };
 }
 
+test('attachment operation status persists and repeated sends show progress without arming notice expiry', async t => {
+  const manager = attachmentFixture({ pending: true });
+  const f = fixture(t, { attachmentManager: manager });
+  await f.seed({ attachments: { page: page('完整正文'.repeat(4000)) } });
+  const originalTimeout = f.window.setTimeout.bind(f.window);
+  let noticeTimers = 0;
+  f.window.setTimeout = (callback, delay, ...args) => {
+    if (delay === 6500) noticeTimers++;
+    return originalTimeout(callback, delay === 6500 ? 30 : delay, ...args);
+  };
+  f.editor.value = '请分析'; f.send(); await pause();
+  const status = f.root.querySelector('.status');
+  assert.match(status.textContent, /正在准备正文附件/);
+  assert.equal(status.hidden, false);
+  f.send('keydown'); await pause();
+  assert.equal(status.hidden, false);
+  assert.equal(noticeTimers, 0);
+  assert.equal(manager.calls.length, 1);
+  assert.equal(f.calls.filter(call => call.request?.refreshPage).length, 1);
+  manager.release(); await pause();
+  assert.equal(f.submitted.length, 1);
+  assert.equal(status.hidden, true);
+});
+
+test('native asynchronous draft clearing after replay cannot leave a cancellation progress message', async t => {
+  const f = fixture(t); await f.seed({ attachments: { url: true } });
+  f.window.document.querySelector('form').addEventListener('submit', () => queueMicrotask(() => f.edit('')));
+  f.editor.value = '原生发送后清空'; f.send(); await pause();
+  assert.equal(f.submitted.length, 1);
+  assert.match(f.submitted[0], /原生发送后清空/);
+  assert.equal(f.editor.value, '');
+  assert.equal(f.root.querySelector('.status').hidden, true);
+  assert.doesNotMatch(f.root.querySelector('.status').textContent, /正在取消/);
+});
+
+test('an attempted Gemini attachment failure in auto mode blocks sending without a text fallback', async t => {
+  const manager = attachmentFixture({ failure: 'Gemini 正文附件上传失败：Native error.' });
+  const f = fixture(t, { site: BUILTIN_AI_SITES[1], attachmentManager: manager });
+  await f.seed({ attachments: { page: page('完整正文'.repeat(4000)) } }, { pageMode: 'auto' });
+  f.editor.value = '原问题'; f.send(); await pause();
+  assert.deepEqual(f.submitted, []);
+  assert.equal(f.editor.value, '原问题');
+  assert.equal(f.context.pageRequested, true);
+  assert.match(f.root.querySelector('.status').textContent, /Native error/);
+  assert.doesNotMatch(f.root.querySelector('.status').textContent, /改用完整/);
+});
+
+test('concurrent body cancellation and upload rejection report cleanup once and allow text only after cleanup', async t => {
+  const manager = attachmentFixture({ pending: true });
+  let clearCount = 0, blocked = true;
+  manager.clear = async () => {
+    clearCount++;
+    await pause();
+    if (blocked) throw new Error('取消正文附件超时，无法确认已清理。');
+  };
+  const f = fixture(t, { attachmentManager: manager });
+  await f.seed({ attachments: { page: page('完整正文'.repeat(4000)) } });
+  f.editor.value = '保留草稿'; f.send(); await pause();
+  f.click('[aria-label="取消正文引用"]'); await pause(); await pause();
+  assert.equal(clearCount, 1);
+  assert.equal((f.root.querySelector('.status').textContent.match(/取消正文附件超时/g) || []).length, 1);
+  assert.equal(f.editor.value, '保留草稿');
+  assert.deepEqual(f.submitted, []);
+  f.send('keydown'); await pause(); await pause();
+  assert.equal(clearCount, 2);
+  assert.deepEqual(f.submitted, []);
+  blocked = false;
+  f.send('keydown'); await pause(); await pause();
+  assert.equal(clearCount, 3);
+  assert.deepEqual(f.submitted, ['保留草稿']);
+});
+
+function claudeFixture(t, options = {}) {
+  const states = [];
+  const f = fixture(t, { site: BUILTIN_AI_SITES[2], ...options, onReady: state => states.push(state) });
+  const send = f.window.document.querySelector('[data-testid="send-button"]');
+  const voice = f.window.document.createElement('button');
+  voice.type = 'button'; voice.setAttribute('aria-label', 'Dictate'); voice.hidden = true;
+  send.after(voice);
+  return { ...f, states, sendButton: send, voice };
+}
+
+test('Claude typing and clearing tolerate brief native control gaps without status or readiness flicker', async t => {
+  const f = claudeFixture(t); await pause();
+  f.sendButton.hidden = true; f.edit('新的问题'); await pause();
+  assert.equal(f.root.querySelector('.status').hidden, true);
+  assert.equal(f.states.at(-1).ready, true);
+  f.sendButton.hidden = false; await pause();
+  f.sendButton.hidden = true; f.edit(''); await pause();
+  assert.equal(f.root.querySelector('.status').hidden, true);
+  f.voice.hidden = false; await pause();
+  assert.ok(f.states.every(state => state.ready));
+  assert.equal(f.root.querySelector('.status').hidden, true);
+});
+
+test('Claude persistent missing controls expire the original grace even with repeated input', async t => {
+  const f = claudeFixture(t); await pause();
+  f.sendButton.hidden = true; f.edit('问题一'); await pause();
+  f.edit('问题二'); await pause(); f.edit('问题三'); await pause(); await pause(); await pause();
+  assert.equal(f.states.at(-1).ready, false);
+  assert.equal(f.root.querySelector('.status').hidden, false);
+  assert.match(f.root.querySelector('.status').textContent, /没有找到可用的发送控件/);
+  assert.equal(f.send('keydown'), true);
+  assert.equal(f.editor.value, '问题三');
+  assert.deepEqual(f.submitted, []);
+});
+
+test('Claude Enter during a gap waits for a real target and sends references once', async t => {
+  const f = claudeFixture(t); await f.api.refresh();
+  await f.seed({ attachments: { url: true } });
+  f.sendButton.hidden = true; f.edit('带引用的问题');
+  assert.equal(f.send('keydown'), true);
+  assert.equal(f.send('keydown'), true);
+  await pause();
+  assert.equal(f.calls.filter(call => call.request?.refreshPage).length, 0);
+  assert.deepEqual(f.submitted, []);
+  f.sendButton.hidden = false; await pause();
+  assert.equal(f.calls.filter(call => call.request?.refreshPage).length, 1);
+  assert.equal(f.submitted.length, 1);
+  assert.match(f.submitted[0], /带引用的问题/);
+  assert.match(f.submitted[0], /https:\/\/example.com\/article/);
+});
+
+test('Claude Enter grace times out without capture or sending and can be retried when the target returns', async t => {
+  const f = claudeFixture(t); await pause();
+  f.sendButton.hidden = true; f.edit('等待失败的草稿'); f.send('keydown');
+  await pause(); await pause(); await pause(); await pause(); await pause();
+  assert.deepEqual(f.submitted, []);
+  assert.equal(f.editor.value, '等待失败的草稿');
+  assert.equal(f.calls.filter(call => call.request?.refreshPage).length, 0);
+  assert.match(f.root.querySelector('.status').textContent, /发送控件/);
+  f.sendButton.hidden = false; f.send('keydown'); await pause();
+  assert.deepEqual(f.submitted, ['等待失败的草稿']);
+});
+
+test('Claude grace preserves Shift Enter, modifiers and IME instead of capturing newline input', async t => {
+  const f = claudeFixture(t); await pause();
+  f.sendButton.hidden = true; f.edit('输入法草稿');
+  for (const overrides of [{ shiftKey: true }, { altKey: true }, { ctrlKey: true }, { metaKey: true }, { isComposing: true }, { keyCode: 229 }]) {
+    assert.equal(f.send('keydown', overrides), false);
+  }
+  assert.equal(f.calls.filter(call => call.request?.refreshPage).length, 0);
+  assert.equal(f.editor.value, '输入法草稿');
+});
+
+for (const change of ['question', 'reference', 'session', 'editor']) test(`Claude waiting for Send cancels on ${change} change and protects the current draft`, async t => {
+  const f = claudeFixture(t); await f.api.refresh();
+  f.sendButton.hidden = true; f.edit('原问题'); f.send('keydown');
+  let current = f.editor;
+  if (change === 'question') f.edit('用户新草稿');
+  if (change === 'reference') await f.seed({ attachments: { url: true } });
+  if (change === 'session') { f.editor.dataset.conversationId = 'new'; f.editor.value = '新会话草稿'; }
+  if (change === 'editor') { current = f.editor.cloneNode(); current.value = '新输入框草稿'; f.editor.replaceWith(current); }
+  await pause();
+  f.sendButton.hidden = false; await pause();
+  assert.deepEqual(f.submitted, []);
+  assert.equal(f.calls.filter(call => call.request?.refreshPage).length, 0);
+  assert.equal(current.value, change === 'question' ? '用户新草稿' : change === 'session' ? '新会话草稿' : change === 'editor' ? '新输入框草稿' : '原问题');
+});
+
+test('Claude ambiguity and explicit selector errors bypass the grace immediately', async t => {
+  const f = claudeFixture(t); await pause();
+  const second = f.sendButton.cloneNode(true); f.sendButton.after(second); await pause();
+  assert.equal(f.states.at(-1).ready, false);
+  assert.match(f.root.querySelector('.status').textContent, /多个匹配/);
+  for (const selector of ['[', '#missing']) {
+    const configured = claudeFixture(t, { site: { ...BUILTIN_AI_SITES[2], selectors: { send: selector } } });
+    assert.equal(configured.states.at(-1).ready, false);
+    assert.equal(configured.root.querySelector('.status').hidden, false);
+  }
+});
+
+test('disposing a Claude grace removes pending readiness timers', async t => {
+  const f = claudeFixture(t); await pause();
+  f.sendButton.hidden = true; f.edit('草稿'); await pause();
+  const count = f.states.length;
+  f.api.dispose(); await pause(); await pause(); await pause(); await pause();
+  assert.equal(f.states.length, count);
+  assert.equal(f.api.host.isConnected, false);
+});
+
+test('fresh body determines attachment delivery and stays unchanged throughout upload checks', async t => {
+  const manager = attachmentFixture({ pending: true });
+  const f = fixture(t, { attachmentManager: manager });
+  await f.seed({ attachments: { page: page('开启时的短正文') } });
+  const original = f.chrome.runtime.sendMessage;
+  const latest = '发送时展开的新正文。'.repeat(1600) + 'FRESH-END';
+  let captures = 0;
+  f.chrome.runtime.sendMessage = async message => {
+    if (message.request.refreshPage) {
+      captures++;
+      f.changeSource({ attachments: { ...f.context.attachments, page: { ...page(latest), capturedAt: '2026-10-03T12:00:00Z' } } });
+    }
+    return original(message);
+  };
+  f.editor.value = '总结最新内容'; f.send(); await pause();
+  assert.equal(captures, 1); assert.equal(manager.calls.length, 1); assert.equal(f.submitted.length, 0);
+  assert.ok(manager.calls[0].content.includes(latest)); assert.equal(manager.calls[0].content.includes('开启时的短正文'), false);
+  await f.api.refresh(); f.send('keydown'); await pause();
+  assert.equal(captures, 1); assert.equal(manager.calls.length, 1);
+  manager.release(); await pause();
+  assert.equal(f.submitted.length, 1); assert.equal(captures, 1);
+  assert.ok(f.submitted[0].includes('网页正文.txt')); assert.equal(f.submitted[0].includes(latest), false);
+});
+
+test('fresh extraction failure clears a previously prepared owned attachment', async t => {
+  const manager = attachmentFixture();
+  const f = fixture(t, { attachmentManager: manager });
+  await f.seed({ attachments: { page: page('旧正文'.repeat(6000)) } });
+  f.editor.value = '第一个问题'; f.send(); await pause();
+  assert.equal(f.submitted.length, 1); assert.equal(manager.calls.length, 1);
+  const cleared = manager.cleared, original = f.chrome.runtime.sendMessage;
+  f.chrome.runtime.sendMessage = async message => {
+    if (message.request.refreshPage) f.changeSource({ pageRequested: true, pageError: '新正文提取失败。', attachments: { ...f.context.attachments, page: null } });
+    return original(message);
+  };
+  f.edit('第二个问题'); f.send(); await pause();
+  assert.equal(f.submitted.length, 1); assert.equal(f.editor.value, '第二个问题');
+  assert.equal(manager.cleared, cleared + 1);
+});
+
 test('long body uploads separately while question, selection and URL use the native message', async t => {
   const manager = attachmentFixture();
   const f = fixture(t, { attachmentManager: manager });
@@ -358,7 +798,7 @@ test('long body uploads separately while question, selection and URL use the nat
   assert.equal(f.root.querySelector('[data-chip="page"] .excerpt').textContent, '正文 · 附件');
   f.editor.value = '分析这个词与网页的关系'; f.send('keydown'); await pause();
   assert.equal(manager.calls.length, 1);
-  assert.ok(manager.calls[0].content.endsWith(body));
+  assert.ok(manager.calls[0].content.endsWith(`${body}\n\n【网页引用资料结束】`));
   assert.equal(manager.calls[0].content.includes('分析这个词与网页的关系'), false);
   assert.equal(f.submitted.length, 1);
   assert.ok(f.submitted[0].includes('网页划词：\nTabbit'));
@@ -445,7 +885,8 @@ test('manual text mode sends full body beyond the removed legacy character limit
   await f.seed({ attachments: { page: page(body) } }, { pageMode: 'text', maxChars: 1000 });
   f.editor.value = '保留全文'; f.send(); await pause();
   assert.equal(f.submitted.length, 1);
-  assert.equal(f.submitted[0], `保留全文\n\n网页正文：\n${body}`);
+  assert.ok(f.submitted[0].startsWith('保留全文\n\n【网页引用资料】'));
+  assert.ok(f.submitted[0].endsWith(`网页正文：\n${body}\n\n【网页引用资料结束】`));
 });
 
 test('references only offer URL and body while default selection remains configurable', async t => {
@@ -497,7 +938,9 @@ test('failed default body shows retry and cancellation while blocking a partial 
   assert.equal(f.root.querySelector('#page-retry').hidden, true);
   assert.equal(f.root.querySelector('[data-chip="page"] .excerpt').textContent, '正文');
   f.send(); await pause();
-  assert.deepEqual(f.submitted, ['需要正文才能回答\n\n网页正文：\n完整的网页正文']);
+  assert.equal(f.submitted.length, 1);
+  assert.ok(f.submitted[0].startsWith('需要正文才能回答\n\n【网页引用资料】'));
+  assert.ok(f.submitted[0].endsWith('网页正文：\n完整的网页正文\n\n【网页引用资料结束】'));
   await f.seed({ attachments: { page: null }, pageRequested: true, pageError: '提取失败。' });
   f.editor.value = '取消后直接提问';
   f.click('[aria-label="取消正文引用"]'); await pause();

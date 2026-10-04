@@ -90,6 +90,20 @@ function browserModel() {
 }
 
 let sequence = 0;
+
+test('builtin button overrides persist across worker restart without changing an already loaded sidebar configuration', async () => {
+  const f = await fixture();
+  const initial = { activeSiteId: 'chatgpt', customSites: [], builtinOverrides: { chatgpt: { selectors: { send: '#first-button' } } } };
+  assert.equal((await f.send({ type: 'SIDER_AI_WEB_SETTINGS_SAVE', settings: initial })).ok, true);
+  await f.register(1);
+  const changed = { ...initial, builtinOverrides: { chatgpt: { selectors: { send: '#new-button' } } } };
+  assert.equal((await f.send({ type: 'SIDER_AI_WEB_SETTINGS_SAVE', settings: changed })).ok, true);
+  await f.restart();
+  const old = await f.send({ type: 'SIDER_EMBED_REGISTER', bridgeId: f.bridge(1), windowId: 9, tabId: 1, siteId: 'chatgpt', reuseSite: true });
+  assert.equal(old.site.selectors.send, '#first-button');
+  const next = await f.send({ type: 'SIDER_EMBED_REGISTER', bridgeId: f.bridge(1), windowId: 9, tabId: 1, siteId: 'chatgpt' });
+  assert.equal(next.site.selectors.send, '#new-button');
+});
 async function fixture() {
   const model = browserModel(); globalThis.chrome = model.api;
   const extension = { id: model.api.runtime.id, url: model.api.runtime.getURL('panel.html') };
@@ -116,13 +130,44 @@ async function fixture() {
     await port.onMessage.emit({ type: 'SIDER_CHAT_READY', bridgeId: bridge(tabId), embedded: true });
     return { port, messages };
   }
+  async function connectPanel(tabId) {
+    const messages = [];
+    const port = { name: 'sider-panel-lifecycle', sender: extension, onMessage: event(), onDisconnect: event(), disconnect() {}, postMessage(message) { messages.push(message); } };
+    await model.api.runtime.onConnect.emit(port);
+    await port.onMessage.emit({ type: 'SIDER_PANEL_ATTACH', bridgeId: bridge(tabId) });
+    return { port, messages };
+  }
   async function restart() {
     for (const surface of [model.api.runtime.onMessage, model.api.runtime.onConnect, model.api.runtime.onInstalled, model.api.runtime.onStartup, model.api.storage.onChanged, model.api.tabs.onCreated, model.api.tabs.onActivated, model.api.tabs.onUpdated, model.api.tabs.onRemoved, model.api.windows.onRemoved, model.api.permissions.onRemoved, model.api.action.onClicked, model.api.commands.onCommand, model.api.contextMenus.onClicked]) surface.listeners.clear();
     await loadWorker();
   }
   await loadWorker();
-  return { ...model, send, bridge, frame, wrapped, register, select, connect, restart };
+  return { ...model, send, bridge, frame, wrapped, register, select, connect, connectPanel, restart };
 }
+
+test('changing enhancement readiness notifies only the bound panel and disconnecting the frame reports loss', async () => {
+  const f = await fixture(); await f.register(1); await f.register(2);
+  const first = await f.connectPanel(1), second = await f.connectPanel(2);
+  const chat = await f.connect(1);
+  await chat.port.onMessage.emit({ type: 'SIDER_ENHANCEMENT_READY', bridgeId: f.bridge(2), ready: true });
+  assert.deepEqual(first.messages, []); assert.deepEqual(second.messages, []);
+  await chat.port.onMessage.emit({ type: 'SIDER_ENHANCEMENT_READY', bridgeId: f.bridge(1), ready: true });
+  assert.equal(first.messages.at(-1).ready, true); assert.deepEqual(second.messages, []);
+  await chat.port.onMessage.emit({ type: 'SIDER_ENHANCEMENT_READY', bridgeId: f.bridge(1), ready: false, detail: 'Native WebSocket connection failed.' });
+  assert.equal(first.messages.at(-1).ready, false); assert.match(first.messages.at(-1).detail, /WebSocket/);
+  await chat.port.onDisconnect.emit();
+  assert.equal(first.messages.at(-1).ready, false); assert.deepEqual(second.messages, []);
+  assert.equal((await f.send({ type: 'SIDER_EMBED_STATUS_GET', bridgeId: f.bridge(1) })).connected, false);
+});
+
+test('a previous website cannot publish readiness after the same panel changes its origin', async () => {
+  const f = await fixture(); await f.register(1); const panel = await f.connectPanel(1), chat = await f.connect(1);
+  const switched = await f.send({ type: 'SIDER_EMBED_REGISTER', bridgeId: f.bridge(1), tabId: 1, windowId: 9, siteId: 'claude' });
+  assert.equal(switched.ok, true);
+  await chat.port.onMessage.emit({ type: 'SIDER_ENHANCEMENT_READY', bridgeId: f.bridge(1), ready: true });
+  assert.deepEqual(panel.messages, []);
+  assert.equal((await f.send({ type: 'SIDER_EMBED_STATUS_GET', bridgeId: f.bridge(1) })).enhancementReady, false);
+});
 
 test('three source tabs in one window expose only their current selection through their own panel', async () => {
   const f = await fixture();
@@ -361,6 +406,110 @@ test('defaults capture only on entering the sidebar and polling preserves a snap
   await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: true });
   assert.equal(f.session[`${TAB_CONTEXT_PREFIX}1`].attachments.page.content, '不应自动替换的后续正文');
   assert.equal(captures(), 2);
+});
+
+test('send preparation refreshes a cached body once while ordinary reads retain that snapshot', async () => {
+  const f = await fixture(); await f.register(1); await f.register(2);
+  await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: true });
+  await f.wrapped(2, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: true });
+  f.pages.set(1, '发送时已加载的最新正文');
+  const fresh = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET', refreshPage: true });
+  assert.equal(fresh.ok, true, fresh.error);
+  assert.equal(fresh.context.attachments.page.content, '发送时已加载的最新正文');
+  f.pages.set(1, '本次发送之后才出现的内容');
+  for (let count = 0; count < 3; count++) {
+    const read = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+    assert.equal(read.context.attachments.page.content, '发送时已加载的最新正文');
+  }
+  assert.equal(f.sent.filter(item => item.tabId === 1 && item.message.type === 'SIDER_PAGE_CAPTURE').length, 2);
+  assert.equal(f.session[`${TAB_CONTEXT_PREFIX}2`].attachments.page.content, 'B 的完整正文');
+  const nextSend = await f.send({ type: 'SIDER_TAB_CONTEXT_GET', tabId: 1, refreshPage: true });
+  assert.equal(nextSend.context.attachments.page.content, '本次发送之后才出现的内容');
+  assert.equal(f.sent.filter(item => item.tabId === 1 && item.message.type === 'SIDER_PAGE_CAPTURE').length, 3);
+});
+
+test('send preparation never enables an unselected or temporarily cancelled body', async () => {
+  const f = await fixture(); await f.register(1);
+  await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET', refreshPage: true });
+  assert.equal(f.sent.some(item => item.message.type === 'SIDER_PAGE_CAPTURE'), false);
+  f.local[CONTEXT_SETTINGS_KEY] = { defaultPage: true };
+  await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: true });
+  await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: false });
+  const cancelled = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET', refreshPage: true });
+  assert.equal(cancelled.context.pageRequested, false);
+  assert.equal(cancelled.context.attachments.page, null);
+  assert.equal(f.sent.filter(item => item.message.type === 'SIDER_PAGE_CAPTURE').length, 1);
+});
+
+test('send preparation waits for fresh capture and queued polls do not capture again', async () => {
+  const f = await fixture(); await f.register(1);
+  await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: true });
+  f.pages.set(1, '延迟取得的新正文');
+  const gate = f.gateNextPage(1);
+  let completed = false;
+  const preparing = f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET', refreshPage: true }).then(result => { completed = true; return result; });
+  await gate.reached.promise;
+  assert.equal(completed, false);
+  const polling = f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+  gate.release.resolve();
+  for (const result of await Promise.all([preparing, polling])) {
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.context.attachments.page.content, '延迟取得的新正文');
+  }
+  assert.equal(f.sent.filter(item => item.message.type === 'SIDER_PAGE_CAPTURE').length, 2);
+});
+
+test('failed send-time extraction clears the old body and the next send can recover', async () => {
+  const f = await fixture(); await f.register(1);
+  await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: true });
+  f.pages.set(1, '');
+  const failed = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET', refreshPage: true });
+  assert.equal(failed.context.pageRequested, true);
+  assert.equal(failed.context.attachments.page, null);
+  assert.ok(composeContextPrompt('保留的问题', failed.context, failed.settings).errors.length);
+  await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+  assert.equal(f.sent.filter(item => item.message.type === 'SIDER_PAGE_CAPTURE').length, 2);
+  f.pages.set(1, '重新加载完成的正文');
+  const recovered = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET', refreshPage: true });
+  assert.equal(recovered.context.pageError, '');
+  assert.equal(recovered.context.attachments.page.content, '重新加载完成的正文');
+  assert.deepEqual(composeContextPrompt('保留的问题', recovered.context, recovered.settings).errors, []);
+});
+
+test('navigation during send-time extraction rejects the old body', async () => {
+  const f = await fixture(); await f.register(1);
+  await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: true });
+  const gate = f.gateNextPage(1);
+  const preparing = f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET', refreshPage: true });
+  await gate.reached.promise;
+  Object.assign(f.tabs.get(1), { url: 'https://example.test/new', status: 'loading' });
+  const cleared = f.waitForSession(data => data[`${TAB_CONTEXT_PREFIX}1`]?.url === 'https://example.test/new' && data[`${TAB_CONTEXT_PREFIX}1`]?.attachments.page === null);
+  await f.api.tabs.onUpdated.emit(1, { status: 'loading', url: 'https://example.test/new' }, structuredClone(f.tabs.get(1)));
+  gate.release.resolve();
+  const result = await preparing;
+  assert.equal(result.ok, false);
+  assert.match(result.error, /跳转/);
+  await cleared;
+  assert.equal(f.session[`${TAB_CONTEXT_PREFIX}1`].attachments.page, null);
+});
+
+test('navigation to an unsupported source during fresh capture cannot become a partial send', async () => {
+  for (const url of ['chrome://settings/', 'https://chatgpt.com/']) {
+    const f = await fixture(); await f.register(1);
+    await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: true });
+    const gate = f.gateNextPage(1);
+    const preparing = f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET', refreshPage: true });
+    await gate.reached.promise;
+    Object.assign(f.tabs.get(1), { url, status: 'loading' });
+    await f.api.tabs.onUpdated.emit(1, { status: 'loading', url }, structuredClone(f.tabs.get(1)));
+    gate.release.resolve();
+    const result = await preparing;
+    assert.equal(result.ok, false);
+    assert.match(result.error, /不支持/);
+    const current = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+    assert.equal(current.context.attachments.page, null);
+    assert.equal(composeContextPrompt('之后的普通问题', current.context, current.settings).text, '之后的普通问题');
+  }
 });
 
 test('saving changed defaults updates only the owning current tab and future pages', async () => {

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { fillComposer, findComposer, getComposerText } from '../src/content/composer.js';
+import { AI_WEB_SETTINGS_KEY, BUILTIN_AI_SITES, normalizeCustomAISite } from '../src/ai-web.js';
 
 function page(html) {
   const dom = new JSDOM(html, { url: 'https://chatgpt.com/', pretendToBeVisual: true });
@@ -187,7 +188,8 @@ function chromeMock({ dnrGranted = true } = {}) {
   const panelOptions = [];
   const ruleUpdates = [];
   const sessionRules = new Map();
-  const control = { dnrGranted, chatGranted: true, originGranted: true, injectError: null, failRuleUpdates: false, cleanupGate: null };
+  const control = { dnrGranted, chatGranted: true, originGranted: true, injectError: null, failRuleUpdates: false, cleanupGate: null, scriptError: false };
+  const scripts = new Map();
   const source = { id: 1, windowId: 9, url: 'https://article.test/story', title: '来源', active: true, status: 'complete' };
   const chat = { id: 2, windowId: 9, url: 'https://chatgpt.com/', active: false, status: 'complete' };
   const tabs = new Map([[1, source], [2, chat]]);
@@ -229,7 +231,7 @@ function chromeMock({ dnrGranted = true } = {}) {
     sidePanel: { async setOptions(options) { panelOptions.push(options); }, async setPanelBehavior(options) { behaviors.push(options); }, open(properties) { opened.push(properties); return Promise.resolve(); } },
     contextMenus: { onClicked: event(), async removeAll() {}, create() {} },
     commands: { onCommand: event() },
-    scripting: { async executeScript(options) { injections.push(options); if (control.injectError) throw new Error(control.injectError); return []; }, async getRegisteredContentScripts() { return []; }, async registerContentScripts() {}, async unregisterContentScripts() {} },
+    scripting: { async executeScript(options) { injections.push(options); if (control.injectError) throw new Error(control.injectError); return []; }, async getRegisteredContentScripts() { return [...scripts.values()].map(script => structuredClone(script)); }, async registerContentScripts(entries) { if (control.scriptError) throw new Error('Script registration failed'); for (const entry of entries) scripts.set(entry.id, structuredClone(entry)); }, async unregisterContentScripts({ ids }) { for (const id of ids) scripts.delete(id); } },
     permissions: {
       onRemoved: event(),
       async contains(request) {
@@ -254,8 +256,112 @@ function chromeMock({ dnrGranted = true } = {}) {
       },
     },
   };
-  return { api, values, sessionValues, sent, opened, behaviors, injections, accessRequests, panelOptions, source, chat, tabs, selections, ruleUpdates, sessionRules, control };
+  return { api, values, sessionValues, sent, opened, behaviors, injections, accessRequests, panelOptions, source, chat, tabs, selections, ruleUpdates, sessionRules, control, scripts };
 }
+
+let aiWorkerSequence = 0;
+async function aiWorker(t) {
+  const mock = chromeMock(); globalThis.chrome = mock.api;
+  await import(`../src/background.js?ai-web=${++aiWorkerSequence}`);
+  const listener = [...mock.api.runtime.onMessage.listeners][0];
+  const sender = { id: mock.api.runtime.id, url: mock.api.runtime.getURL('panel.html') };
+  const send = (message, source = sender) => new Promise(resolve => listener(message, source, resolve));
+  await send({ type: 'SIDER_EMBED_STATUS_GET', bridgeId: 'no-owner-yet-0001' });
+  t.after(() => { delete globalThis.chrome; });
+  return { ...mock, send };
+}
+
+test('AI settings are privileged, require the selected origin, and preserve existing reference settings', async t => {
+  const f = await aiWorker(t);
+  const source = { id: f.api.runtime.id, url: f.source.url, tab: f.source, frameId: 0 };
+  assert.equal((await f.send({ type: 'SIDER_AI_WEB_SETTINGS_GET' }, source)).ok, false);
+  f.values['sider.contextSettings.v1'] = { selectionTemplate: 'Keep me' };
+  f.control.originGranted = false;
+  const settings = { activeSiteId: 'gemini', customSites: [] };
+  assert.equal((await f.send({ type: 'SIDER_AI_WEB_SETTINGS_SAVE', settings })).ok, false);
+  assert.equal(f.values[AI_WEB_SETTINGS_KEY], undefined);
+  f.control.originGranted = true;
+  assert.equal((await f.send({ type: 'SIDER_AI_WEB_SETTINGS_SAVE', settings })).ok, true);
+  assert.equal(f.values[AI_WEB_SETTINGS_KEY].activeSiteId, 'gemini');
+  assert.equal(f.values['sider.contextSettings.v1'].selectionTemplate, 'Keep me');
+  assert.ok([...f.scripts.values()].some(script => script.matches[0] === 'https://gemini.google.com/*'));
+});
+
+test('different AI sites keep distinct compatibility rules and cannot use another site bridge', async t => {
+  const f = await aiWorker(t);
+  const chatBridge = 'ai-chat-owner-abcdef0123456789'; const geminiBridge = 'ai-gemini-owner-abcdef0123456789';
+  await f.send({ type: 'SIDER_EMBED_REGISTER', bridgeId: chatBridge, siteId: 'chatgpt', tabId: 1, windowId: 9 });
+  await f.send({ type: 'SIDER_AI_WEB_SETTINGS_SAVE', settings: { activeSiteId: 'gemini', customSites: [] } });
+  await f.send({ type: 'SIDER_EMBED_REGISTER', bridgeId: geminiBridge, siteId: 'gemini', tabId: 1, windowId: 9 });
+  assert.equal(f.sessionRules.size, 2);
+  for (const rule of f.sessionRules.values()) {
+    assert.deepEqual(rule.condition.topDomains, [f.api.runtime.id]); assert.deepEqual(rule.condition.resourceTypes, ['sub_frame']);
+  }
+  const request = { type: 'SIDER_ENHANCEMENT_REQUEST', embedded: true, bridgeId: geminiBridge, request: { type: 'SIDER_TAB_CONTEXT_GET' } };
+  const wrong = await f.send(request, { id: f.api.runtime.id, url: `https://chatgpt.com/?sider_bridge=${geminiBridge}`, frameId: 1 });
+  assert.equal(wrong.ok, false);
+  const correct = await f.send(request, { id: f.api.runtime.id, url: `https://gemini.google.com/app?sider_bridge=${geminiBridge}`, documentId: 'gemini-current', frameId: 1 });
+  assert.equal(correct.ok, true); assert.equal(correct.context.tabId, 1);
+  await f.send({ type: 'SIDER_EMBED_UNREGISTER', bridgeId: geminiBridge });
+  assert.equal(f.sessionRules.size, 1); assert.equal([...f.sessionRules.values()][0].condition.requestDomains[0], 'chatgpt.com');
+});
+
+test('lifecycle reconnection retains readiness for an already connected AI document', async t => {
+  const f = await aiWorker(t); const bridgeId = 'existing-ai-document-abcdef0123456789';
+  await f.send({ type: 'SIDER_EMBED_REGISTER', bridgeId, siteId: 'chatgpt', tabId: 1, windowId: 9 });
+  const port = { name: 'sider-chat-bridge', sender: { id: f.api.runtime.id, url: `https://chatgpt.com/?sider_bridge=${bridgeId}`, documentId: 'existing-document', frameId: 1 }, onMessage: event(), onDisconnect: event(), postMessage() {}, disconnect() {} };
+  f.api.runtime.onConnect.emit(port); port.onMessage.emit({ type: 'SIDER_CHAT_READY', bridgeId, embedded: true });
+  await new Promise(resolve => setImmediate(resolve));
+  port.onMessage.emit({ type: 'SIDER_ENHANCEMENT_READY', bridgeId, ready: true }); await new Promise(resolve => setImmediate(resolve));
+  await f.send({ type: 'SIDER_EMBED_REGISTER', bridgeId, siteId: 'chatgpt', tabId: 1, windowId: 9, reuseSite: true });
+  const status = await f.send({ type: 'SIDER_EMBED_STATUS_GET', bridgeId });
+  assert.equal(status.connected, true); assert.equal(status.enhancementReady, true);
+});
+
+test('a custom AI port arriving during worker settings restoration waits for the registered origin', async t => {
+  const mock = chromeMock(); globalThis.chrome = mock.api;
+  const site = normalizeCustomAISite({ id: 'custom-startup-test-0001', name: 'Startup AI', url: 'https://startup-ai.test/chat' });
+  const bridgeId = 'startup-owner-abcdef0123456789';
+  mock.values[AI_WEB_SETTINGS_KEY] = { activeSiteId: site.id, customSites: [site] };
+  mock.sessionValues.siderEmbedRegistrations = { [bridgeId]: { windowId: 9, tabId: 1, site } };
+  const original = mock.api.storage.local.get; let release;
+  mock.api.storage.local.get = key => key === AI_WEB_SETTINGS_KEY ? new Promise(resolve => { release = () => resolve({ [key]: mock.values[key] }); }) : original(key);
+  await import(`../src/background.js?early-ai-web=${++aiWorkerSequence}`);
+  let disconnected = false;
+  const port = { name: 'sider-chat-bridge', sender: { id: mock.api.runtime.id, url: `${site.url}?sider_bridge=${bridgeId}`, documentId: 'early-custom-document', frameId: 1 }, onMessage: event(), onDisconnect: event(), postMessage() {}, disconnect() { disconnected = true; } };
+  mock.api.runtime.onConnect.emit(port); port.onMessage.emit({ type: 'SIDER_CHAT_READY', bridgeId, embedded: true });
+  release();
+  const listener = [...mock.api.runtime.onMessage.listeners][0];
+  const result = await new Promise(resolve => listener({ type: 'SIDER_EMBED_STATUS_GET', bridgeId }, { id: mock.api.runtime.id, url: mock.api.runtime.getURL('panel.html') }, resolve));
+  assert.equal(disconnected, false); assert.equal(result.connected, true);
+  t.after(() => { delete globalThis.chrome; });
+});
+
+test('failed custom script registration leaves saved AI settings intact', async t => {
+  const f = await aiWorker(t);
+  const site = normalizeCustomAISite({ id: 'custom-script-test-0001', name: 'My AI', url: 'https://my-ai.test/chat' });
+  f.control.scriptError = true;
+  const failed = await f.send({ type: 'SIDER_AI_WEB_SETTINGS_SAVE', settings: { activeSiteId: site.id, customSites: [site] } });
+  assert.equal(failed.ok, false); assert.equal(f.values[AI_WEB_SETTINGS_KEY], undefined);
+  assert.equal((await f.send({ type: 'SIDER_AI_WEB_SETTINGS_GET' })).settings.activeSiteId, 'chatgpt');
+});
+
+test('editing a custom website origin keeps an existing sidebars origin registered until it reloads', async t => {
+  const f = await aiWorker(t);
+  const site = normalizeCustomAISite({ id: 'custom-origin-test-0001', name: 'My AI', url: 'https://old-ai.test/chat' });
+  const settings = { activeSiteId: site.id, customSites: [site] };
+  await f.send({ type: 'SIDER_AI_WEB_SETTINGS_SAVE', settings });
+  const bridgeId = 'custom-site-owner-abcdef0123456789';
+  await f.send({ type: 'SIDER_EMBED_REGISTER', bridgeId, siteId: site.id, tabId: 1, windowId: 9 });
+  const next = normalizeCustomAISite({ ...site, url: 'https://new-ai.test/chat' });
+  await f.send({ type: 'SIDER_AI_WEB_SETTINGS_SAVE', settings: { activeSiteId: site.id, customSites: [next] } });
+  assert.ok([...f.scripts.values()].some(script => script.matches[0] === 'https://old-ai.test/*'));
+  assert.ok([...f.scripts.values()].some(script => script.matches[0] === 'https://new-ai.test/*'));
+  const reconnect = await f.send({ type: 'SIDER_EMBED_REGISTER', bridgeId, siteId: site.id, tabId: 1, windowId: 9, reuseSite: true });
+  assert.equal(reconnect.site.origin, 'https://old-ai.test');
+  const reload = await f.send({ type: 'SIDER_EMBED_REGISTER', bridgeId, siteId: site.id, tabId: 1, windowId: 9 });
+  assert.equal(reload.site.origin, 'https://new-ai.test');
+});
 
 test('background isolates page content scripts from state mutation and ChatGPT filling', async () => {
   const mock = chromeMock();
