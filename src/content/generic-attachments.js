@@ -1,6 +1,7 @@
 import { attachmentFailureDetail } from './attachments.js';
 import { isDisabledControl } from './generic-controls.js';
 import { dropFileAtEditor } from './file-drop.js';
+import { entryDropAvailable } from './file-drop-compat.js';
 import { createFileUploadResolver, acceptsTextFile as acceptsText } from './file-upload.js';
 
 const CONTROLS = 'button,[role="button"],[tabindex="0"]:not(a)';
@@ -17,6 +18,7 @@ const SIZE = /^\d+(?:[.,]\d+)?\s*(?:[KMGT]?i?B|bytes?|字节)$/i;
 const TYPE = /^(?:TXT|text(?:\/plain)?|plain text|文本)$/i;
 const TYPE_SIZE = /^(?:TXT|text(?:\/plain)?|plain text|文本)\s*[·•|—-]?\s*\d+(?:[.,]\d+)?\s*(?:[KMGT]?i?B|bytes?|字节)$/i;
 const closeCache = new WeakMap();
+const DROP_ZONE = '[data-dropzone],[data-drop-zone],[data-testid*="dropzone"],[ondrop]';
 
 function visible(element) {
   if (!element.getClientRects().length || element.closest('[hidden],[inert],[aria-hidden="true"]')) return false;
@@ -113,11 +115,11 @@ export function createGenericAttachmentDriver(document, adapter) {
     return scope;
   }
   function hasAttachmentUI(scope) {
-    const dropZone = '[data-dropzone],[data-drop-zone],[data-testid*="dropzone"],[ondrop]';
-    return [...scope.querySelectorAll('input[type="file"]')].some(acceptsText)
-      || Boolean(resolver.triggerFor(scope))
-      || scope.matches(dropZone) || Boolean(scope.querySelector(dropZone));
+    return scope.matches(DROP_ZONE) || Boolean(scope.querySelector(DROP_ZONE))
+      || [...scope.querySelectorAll('input[type="file"]')].some(acceptsText)
+      || Boolean(resolver.triggerFor(scope));
   }
+  const preferDrop = (scope, editor) => Boolean((scope.matches(DROP_ZONE) || scope.querySelector(DROP_ZONE)) && entryDropAvailable(document, editor));
   function cards(scope) {
     const found = new Set();
     const editor = adapter.findComposer();
@@ -152,6 +154,7 @@ export function createGenericAttachmentDriver(document, adapter) {
     removeButton: card => removeControl(card),
     composerScope(_document, editor, options) {
       const scope = scopeFor(editor);
+      if (preferDrop(scope, editor)) return { scope, input: null };
       const trigger = resolver.triggerFor(scope);
       if (trigger) return resolver.resolve(editor, scope, trigger, options);
       if (!hasAttachmentUI(scope)) throw new Error('未检测到原站的文本附件入口，请改用正文文本或检查附件区域。');
@@ -159,9 +162,9 @@ export function createGenericAttachmentDriver(document, adapter) {
     },
     available() {
       try {
-        const view = document.defaultView, editor = adapter.findComposer();
+        const view = document.defaultView, editor = adapter.findComposer(), scope = editor && scopeFor(editor);
         return Boolean(editor && ['File', 'DataTransfer'].every(key => typeof view[key] === 'function')
-          && (resolver.triggerFor(scopeFor(editor)) || typeof view.DragEvent === 'function' && hasAttachmentUI(scopeFor(editor))));
+          && (preferDrop(scope, editor) || resolver.triggerFor(scope) || typeof view.DragEvent === 'function' && hasAttachmentUI(scope)));
       } catch { return false; }
     },
     failed: card => Boolean(errorNode(card)),

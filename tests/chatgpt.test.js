@@ -285,6 +285,8 @@ test('AI settings are privileged, require the selected origin, and preserve exis
   assert.equal(f.values[AI_WEB_SETTINGS_KEY].activeSiteId, 'gemini');
   assert.equal(f.values['sider.contextSettings.v1'].selectionTemplate, 'Keep me');
   assert.ok([...f.scripts.values()].some(script => script.matches[0] === 'https://gemini.google.com/*'));
+  const drop = [...f.scripts.values()].find(script => script.matches[0] === 'https://gemini.google.com/*' && script.world === 'MAIN');
+  assert.deepEqual(drop.js, ['file-drop-main.js']); assert.equal(drop.runAt, 'document_start'); assert.equal(drop.allFrames, true);
 });
 
 test('different AI sites keep distinct compatibility rules and cannot use another site bridge', async t => {

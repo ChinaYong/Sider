@@ -4,10 +4,11 @@ import { JSDOM } from 'jsdom';
 import { createWebAdapter } from '../src/content/adapters.js';
 import { createNativeAttachmentDriver } from '../src/content/attachment-drivers.js';
 import { BUILTIN_AI_SITES } from '../src/ai-web.js';
+import { installFileDropCompat } from '../src/content/file-drop-compat.js';
 
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const spec = { name: '正文.txt', content: '完整 UTF-8 正文。\n'.repeat(2100) + '结束标记', mimeType: 'text/plain' };
-function fixture(t, { delay = 15, duplicate = false, onUpload, onMenu, timeoutMs = 400 } = {}) {
+function fixture(t, { delay = 15, duplicate = false, onUpload, onMenu, timeoutMs = 400, entryDrop = false } = {}) {
   const { window } = new JSDOM('<main><input-area-v2><div id="files"></div><div class="input-area"><rich-textarea><div class="ql-editor" role="textbox" contenteditable="true">原问题</div></rich-textarea><button type="button" aria-label="上传和工具" aria-expanded="false"></button><button class="send-button" aria-label="发送"></button></div></input-area-v2></main>', {url: BUILTIN_AI_SITES[1].url, pretendToBeVisual:true});
   window.HTMLElement.prototype.getClientRects = function() { return this.isConnected ? [{}] : []; };
   window.DataTransfer = class { constructor() { this.files = []; this.items = { add: file => this.files.push(file) }; } };
@@ -32,6 +33,18 @@ function fixture(t, { delay = 15, duplicate = false, onUpload, onMenu, timeoutMs
     input.onchange = () => { const file = input.files[0]; uploads.push(file); if(onUpload)onUpload(file,card); else card(file.name); };
     container.append(input); return input;
   }
+  if (entryDrop) {
+    window.DragEvent = class extends window.MouseEvent { constructor(type, options) { super(type, options); this.dataTransfer = options.dataTransfer; } };
+    window.DataTransfer = class {
+      constructor() { this.files = []; this.items = []; this.items.add = file => { this.files.push(file); this.items.push({ kind: 'file', type: file.type, getAsFile: () => file, webkitGetAsEntry: () => null }); }; }
+    };
+    installFileDropCompat(document);
+    editor.addEventListener('drop', event => {
+      const entry = event.dataTransfer.items[0].webkitGetAsEntry();
+      if (!entry?.isFile) return;
+      entry.file(file => { uploads.push(file); if (onUpload) onUpload(file, card); else card(file.name); });
+    });
+  }
   trigger.onclick = () => {
     if(trigger.getAttribute('aria-expanded') === 'true') { trigger.setAttribute('aria-expanded','false'); openMenu?.remove(); openMenu=null; return; }
     clicks++; trigger.setAttribute('aria-expanded','true');
@@ -53,6 +66,35 @@ test('Gemini lazily initializes its unique local uploader once and recognizes ba
   assert.equal(f.manager.isReady(spec),true);assert.equal(f.editor.textContent,'原问题');
   assert.match(uploaded.name,/-sider-[a-f0-9]{16}\.txt$/);assert.equal(f.driver.cards(f.area).length,2);
   await f.manager.prepare(spec);assert.equal(f.uploads.length,1);await f.manager.clear();assert.deepEqual(f.removes,[uploaded.name]);assert.equal(user.outer.isConnected,true);
+});
+
+test('Gemini prefers the shared entry drop ahead of multiple native inputs and menu actions', async t => {
+  const f = fixture(t, { entryDrop: true }), user = f.card('user.txt');
+  f.fileInput(f.area, '.txt'); f.fileInput(f.area, '.txt');
+  const first = f.manager.prepare(spec), repeated = f.manager.prepare(spec);
+  const [uploaded, again] = await Promise.all([first, repeated]);
+  assert.deepEqual(again, uploaded); assert.equal(f.clicks, 0); assert.equal(f.drops, 1);
+  assert.equal(f.uploads.length, 1); assert.equal(f.uploads[0].size, Buffer.byteLength(spec.content));
+  assert.equal(f.manager.isReady(spec), true); assert.equal(f.editor.textContent, '原问题');
+  await f.manager.clear(); assert.deepEqual(f.removes, [uploaded.name]); assert.equal(user.outer.isConnected, true);
+});
+
+test('Gemini entry-drop failures on the preview wrapper block send and do not open the menu for a duplicate upload', async t => {
+  const f = fixture(t, { entryDrop: true, onUpload(file, add) { const owned = add(file.name); owned.outer.dataset.state = 'failed'; const error = f.document.createElement('span'); error.setAttribute('role', 'alert'); error.textContent = '原站拒绝正文'; owned.outer.append(error); } });
+  await assert.rejects(f.manager.prepare(spec), /原站拒绝正文/);
+  assert.equal(f.uploads.length, 1); assert.equal(f.drops, 1); assert.equal(f.clicks, 0);
+  assert.equal(f.removes.length, 1); assert.equal(f.editor.textContent, '原问题');
+});
+
+test('Gemini entry drops wait for wrapper progress while ignoring another attachment progress', async t => {
+  let progress;
+  const f = fixture(t, { entryDrop: true, onUpload(file, add) { const owned = add(file.name); progress = f.document.createElement('span'); progress.setAttribute('role', 'progressbar'); owned.outer.append(progress); } });
+  const user = f.card('user.txt', { pending: true });
+  let finished = false;
+  const pending = f.manager.prepare(spec).then(value => { finished = true; return value; });
+  await pause(25); assert.equal(finished, false); assert.equal(f.manager.isReady(spec), false);
+  progress.remove(); await pending; assert.equal(f.manager.isReady(spec), true);
+  assert.equal(user.tile.querySelectorAll('mat-progress-spinner').length, 1);
 });
 
 test('Gemini current tiles wait for visible native progress and the actual enabled sender',async t=>{

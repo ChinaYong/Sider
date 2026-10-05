@@ -4,6 +4,7 @@ import { JSDOM } from 'jsdom';
 import { createWebAdapter } from '../src/content/adapters.js';
 import { createGenericAttachmentDriver } from '../src/content/generic-attachments.js';
 import { normalizeCustomAISite } from '../src/ai-web.js';
+import { installFileDropCompat } from '../src/content/file-drop-compat.js';
 
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const spec = { name: '网页正文.txt', content: '完整正文\nUTF-8中文尾部。', mimeType: 'text/plain' };
@@ -63,6 +64,19 @@ test('generic TXT upload drops once at the editor center and reaches nearby and 
   assert.equal(f.uploads[0].type,'text/plain');assert.equal(f.uploads[0].size,Buffer.byteLength(spec.content));assert.equal(f.inputChanges,0);
   assert.equal(f.events.length,9);for(const event of f.events){assert.equal(event.target,f.editor);assert.equal(event.x,120);assert.equal(event.y,80);}
   assert.equal(f.manager.isReady(spec),true);assert.equal(f.editor.value,'原问题');
+});
+
+test('an explicit generic dropzone uses shared entry delivery ahead of ambiguous file menu triggers', async t => {
+  const f = fixture(t, { dropzone: true });
+  installFileDropCompat(f.document);
+  let clicks = 0;
+  for (let index = 0; index < 2; index++) {
+    const button = f.document.createElement('button'); button.type = 'button'; button.setAttribute('aria-label', 'Upload files');
+    button.onclick = () => clicks++; f.document.querySelector('#shell').append(button);
+  }
+  assert.equal(f.adapter.supportsAttachments(), true);
+  await f.manager.prepare(spec);
+  assert.equal(f.uploads.length, 1); assert.equal(clicks, 0); assert.equal(f.inputChanges, 0);
 });
 
 test('manual reference-bar placement outside the composer does not disable native TXT uploads',async t=>{

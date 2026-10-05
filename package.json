@@ -1,6 +1,6 @@
 {
   "name": "sider-context",
-  "version": "0.5.11",
+  "version": "0.5.12",
   "private": true,
   "type": "module",
   "description": "A small browser context and prompt layer for original AI websites.",

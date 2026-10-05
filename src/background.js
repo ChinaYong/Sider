@@ -44,10 +44,12 @@ async function performAIScriptSync(settings) {
   const desired = [];
   for (const site of sites.values()) {
     if (site.id === 'chatgpt' || !await chrome.permissions.contains({ origins: [aiSitePattern(site)] })) continue;
+    desired.push({ id: `sider-ai-drop-${encodeURIComponent(site.origin)}`, matches: [aiSitePattern(site)], js: ['file-drop-main.js'], world: 'MAIN', runAt: 'document_start', allFrames: true, persistAcrossSessions: true });
     desired.push({ id: `sider-ai-${encodeURIComponent(site.origin)}`, matches: [aiSitePattern(site)], js: ['ai-content.js'], runAt: 'document_idle', allFrames: true, persistAcrossSessions: true });
   }
   const current = (await chrome.scripting.getRegisteredContentScripts()).filter(script => script.id.startsWith('sider-ai-'));
-  const removed = current.filter(script => !desired.some(next => next.id === script.id && JSON.stringify(next.matches) === JSON.stringify(script.matches) && JSON.stringify(next.js) === JSON.stringify(script.js)));
+  const removed = current.filter(script => !desired.some(next => next.id === script.id && JSON.stringify(next.matches) === JSON.stringify(script.matches) && JSON.stringify(next.js) === JSON.stringify(script.js)
+    && (next.world || 'ISOLATED') === (script.world || 'ISOLATED') && next.runAt === script.runAt));
   if (removed.length) await chrome.scripting.unregisterContentScripts({ ids: removed.map(script => script.id) });
   const added = desired.filter(script => !current.some(old => old.id === script.id && !removed.includes(old)));
   if (added.length) await chrome.scripting.registerContentScripts(added);
@@ -765,6 +767,7 @@ async function fillChat(message) {
   const loaded = await chrome.tabs.get(tab.id);
   if (parseURL(loaded.url)?.origin !== site.origin) throw new Error(`请在 ${site.name} 标签页完成登录后再填入。`);
   try {
+    await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, files: ['file-drop-main.js'], world: 'MAIN' });
     await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, files: ['ai-content.js'] });
     const result = await chrome.tabs.sendMessage(tab.id, { ...payload, site }, { frameId: 0 });
     if (!result?.ok || !result.filled) throw new Error(result?.error || `没有确认提示词已填入，请检查 ${site.name} 草稿。`);

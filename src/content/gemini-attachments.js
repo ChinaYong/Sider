@@ -1,6 +1,7 @@
 import { attachmentFailureDetail } from './attachments.js';
 import { isDisabledControl } from './generic-controls.js';
 import { dropFileAtEditor } from './file-drop.js';
+import { entryDropAvailable } from './file-drop-compat.js';
 import { createFileUploadResolver, activeUploadElement as active, acceptsTextFile as acceptsText } from './file-upload.js';
 
 const CARD = 'gem-attachment,file-preview,.file-preview,.file-preview-container,.file-preview-chip,[data-testid="file-attachment"]';
@@ -17,7 +18,7 @@ function visible(element) {
   return true;
 }
 
-/** Gemini's current uploader is initialized by its native upload/tools menu. */
+/** Native preview rules; delivery uses the shared drop or file-action route. */
 export function createGeminiAttachmentDriver(document, adapter) {
   const resolver = createFileUploadResolver(document, adapter, {
     menuSelector: '[role="menu"],[role="dialog"],[popover],.cdk-overlay-pane',
@@ -75,17 +76,25 @@ export function createGeminiAttachmentDriver(document, adapter) {
     }
     return [...found].filter(card => ![...found].some(other => other !== card && card.contains(other)));
   }
-  const hasVisible = (card, selector) => [card, ...card.querySelectorAll(selector)].some(node => node.matches(selector) && visible(node));
+  function statusScope(card) {
+    const wrapper = card.closest('.file-preview-container');
+    // Status can be a sibling of the tile. Only use a wrapper belonging to
+    // this one tile; another file's progress/error must not affect it.
+    return wrapper && wrapper.querySelectorAll('gem-attachment').length === 1 && wrapper.querySelector('gem-attachment') === card ? wrapper : card;
+  }
+  const hasVisible = (card, selector) => { const scope = statusScope(card); return [scope, ...scope.querySelectorAll(selector)].some(node => node.matches(selector) && visible(node)); };
   return {
     siteName: adapter.site.name, findComposer: () => adapter.findComposer(), sessionKey: () => adapter.sessionKey(), cards, namesCard, removeButton,
     composerScope(_document, editor, options) {
-      const scope = scopeFor(editor), trigger = resolver.triggerFor(scope);
+      const scope = scopeFor(editor);
+      if (entryDropAvailable(document, editor)) return { scope, input: null };
+      const trigger = resolver.triggerFor(scope);
       return trigger ? resolver.resolve(editor, scope, trigger, options) : { scope, input: oneInput(scope) };
     },
-    available() { try { const editor = adapter.findComposer(), scope = editor && scopeFor(editor); return Boolean(scope && (resolver.triggerFor(scope) || oneInput(scope) || scope.matches('.input-area,.input-area-container,form,input-area-v2,input-area'))); } catch { return false; } },
+    available() { try { const editor = adapter.findComposer(), scope = editor && scopeFor(editor); return Boolean(scope && (entryDropAvailable(document, editor) || resolver.triggerFor(scope) || oneInput(scope) || scope.matches('.input-area,.input-area-container,form,input-area-v2,input-area'))); } catch { return false; } },
     failed: card => hasVisible(card, FAILURE),
     failureDetail(card) {
-      const detail = attachmentFailureDetail(card, FAILURE);
+      const detail = attachmentFailureDetail(statusScope(card), FAILURE);
       if (detail && detail.toLowerCase() !== 'error') return detail;
       return (descriptions(card).find(text => !text.toLowerCase().endsWith('.txt') && /error|fail|不支持|失败|无法|出错/i.test(text)) || detail).slice(0, 1000);
     },
