@@ -1,6 +1,6 @@
 {
   "name": "sider-context",
-  "version": "0.5.12",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "description": "A small browser context and prompt layer for original AI websites.",
@@ -8,15 +8,18 @@
     "build": "node scripts/build.mjs",
     "test": "node --test tests/*.test.js",
     "dev": "node scripts/serve.mjs",
-    "check": "npm run test && npm run build"
+    "check": "npm run test && npm run build",
+    "test:browser": "npm run build && node scripts/test-browser.mjs"
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
+    "css-tree": "3.1.0",
     "turndown": "^7.2.0",
     "turndown-plugin-gfm": "^1.0.2"
   },
   "devDependencies": {
     "esbuild": "^0.25.0",
-    "jsdom": "^26.0.0"
+    "jsdom": "^26.0.0",
+    "playwright": "1.58.2"
   }
 }

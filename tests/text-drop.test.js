@@ -29,6 +29,13 @@ function fixture(t, html = '<main><form><textarea></textarea><button type="submi
   };
 }
 const settle = () => new Promise(resolve => setTimeout(resolve, 80));
+const completed = async f => {
+  const deadline = Date.now() + 2000;
+  while (f.writes.length && f.writes.at(-1) !== 'end') {
+    assert.ok(Date.now() < deadline, 'Text-drop preparation did not finish');
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+};
 
 test('custom text drops cancel the native file handler, insert full text once and never click Send', async t => {
   const f = fixture(t); let sends = 0;
@@ -36,7 +43,7 @@ test('custom text drops cancel the native file handler, insert full text once an
   f.editor.value = '草稿';
   const over = f.fire('dragover'); assert.equal(over.prevented, true); assert.equal(over.dataTransfer.dropEffect, 'copy');
   const drop = f.fire(); assert.equal(drop.prevented, true); assert.equal(drop.stopped, true);
-  f.fire(); await settle();
+  f.fire(); await completed(f);
   assert.equal(f.editor.value, '草稿拖入文字\n完整尾部'); assert.equal(sends, 0);
   assert.deepEqual(f.writes, ['start', 'end']); assert.match(f.errors[0], /正在写入/);
 });

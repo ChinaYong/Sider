@@ -1,9 +1,52 @@
 export const AI_WEB_SETTINGS_KEY = 'sider.aiWebSettings.v1';
+export const GEMINI_NORMAL_URL = 'https://gemini.google.com/app';
+export const GEMINI_SPARK_URL = 'https://gemini.google.com/spark';
+export const GEMINI_MODE_NORMAL = 'normal';
+export const GEMINI_MODE_SPARK = 'spark';
+export const GEMINI_MODEL_FLASH_LITE = 'flash-lite';
+export const GEMINI_MODEL_FLASH = 'flash';
+export const GEMINI_MODEL_PRO = 'pro';
+export const GEMINI_MODEL_OPTIONS = Object.freeze([
+  Object.freeze({ value: GEMINI_MODEL_FLASH_LITE, label: 'Flash-Lite（快速）' }),
+  Object.freeze({ value: GEMINI_MODEL_FLASH, label: 'Flash（均衡）' }),
+  Object.freeze({ value: GEMINI_MODEL_PRO, label: 'Pro（高级推理）' }),
+]);
 export const BUILTIN_AI_SITES = Object.freeze([
   { id: 'chatgpt', name: 'ChatGPT', url: 'https://chatgpt.com/', adapter: 'chatgpt' },
-  { id: 'gemini', name: 'Gemini', url: 'https://gemini.google.com/app', adapter: 'gemini' },
+  { id: 'gemini', name: 'Gemini', url: GEMINI_NORMAL_URL, adapter: 'gemini' },
   { id: 'claude', name: 'Claude', url: 'https://claude.ai/new', adapter: 'claude' },
 ].map(site => Object.freeze({ ...site, origin: new URL(site.url).origin, selectors: Object.freeze({ composer: '', send: '', mount: '' }), sendShortcut: 'enter', builtin: true })));
+
+function normalizeGeminiMode(value, strict = false) {
+  if (value == null || value === GEMINI_MODE_NORMAL) return GEMINI_MODE_NORMAL;
+  if (value === GEMINI_MODE_SPARK) return GEMINI_MODE_SPARK;
+  if (strict) throw new Error('Gemini 界面设置无效。');
+  return GEMINI_MODE_NORMAL;
+}
+
+function normalizeGeminiModel(value, strict = false) {
+  if (value == null || value === GEMINI_MODEL_FLASH_LITE || value === GEMINI_MODEL_FLASH || value === GEMINI_MODEL_PRO) return value || GEMINI_MODEL_FLASH_LITE;
+  if (strict) throw new Error('Gemini 默认模型设置无效。');
+  return GEMINI_MODEL_FLASH_LITE;
+}
+
+function normalizeGeminiExtendedThinking(value, strict = false) {
+  if (value == null || typeof value === 'boolean') return value === true;
+  if (strict) throw new Error('Gemini 扩展思考设置无效。');
+  return false;
+}
+
+export function normalizeGeminiDefaults(raw, strict = false) {
+  return {
+    model: normalizeGeminiModel(raw?.model ?? raw?.geminiModel, strict),
+    extendedThinking: normalizeGeminiExtendedThinking(raw?.extendedThinking ?? raw?.geminiExtendedThinking, strict),
+  };
+}
+
+export function aiSiteURL(site, settings) {
+  if (site?.id === 'gemini' && normalizeGeminiMode(settings?.geminiMode) === GEMINI_MODE_SPARK) return GEMINI_SPARK_URL;
+  return site?.url || '';
+}
 
 function normalizeControls(raw) {
   const selectors = {};
@@ -51,6 +94,7 @@ export function normalizeCustomAISite(raw) {
 
 export function validateAIWebSettings(raw) {
   if (!raw || !Array.isArray(raw.customSites)) throw new Error('AI 网站设置格式无效。');
+  const geminiDefaults = normalizeGeminiDefaults(raw, true);
   const customSites = raw.customSites.map(normalizeCustomAISite);
   const ids = new Set(); const origins = new Set();
   for (const site of customSites) {
@@ -58,10 +102,11 @@ export function validateAIWebSettings(raw) {
     ids.add(site.id); origins.add(site.origin);
   }
   if (![...BUILTIN_AI_SITES, ...customSites].some(site => site.id === raw.activeSiteId)) throw new Error('请选择一个有效的 AI 网站。');
-  return withOverrides({ activeSiteId: raw.activeSiteId, customSites }, builtinOverrides(raw.builtinOverrides, true));
+  return withOverrides({ activeSiteId: raw.activeSiteId, customSites, geminiMode: normalizeGeminiMode(raw.geminiMode, true), geminiModel: geminiDefaults.model, geminiExtendedThinking: geminiDefaults.extendedThinking }, builtinOverrides(raw.builtinOverrides, true));
 }
 
 export function normalizeAIWebSettings(raw) {
+  const geminiDefaults = normalizeGeminiDefaults(raw);
   const customSites = []; const origins = new Set(); const ids = new Set();
   for (const candidate of Array.isArray(raw?.customSites) ? raw.customSites : []) {
     try {
@@ -70,7 +115,7 @@ export function normalizeAIWebSettings(raw) {
     } catch { /* Invalid persisted entries cannot expand extension privileges. */ }
   }
   const activeSiteId = [...BUILTIN_AI_SITES, ...customSites].some(site => site.id === raw?.activeSiteId) ? raw.activeSiteId : 'chatgpt';
-  return withOverrides({ activeSiteId, customSites }, builtinOverrides(raw?.builtinOverrides));
+  return withOverrides({ activeSiteId, customSites, geminiMode: normalizeGeminiMode(raw?.geminiMode), geminiModel: geminiDefaults.model, geminiExtendedThinking: geminiDefaults.extendedThinking }, builtinOverrides(raw?.builtinOverrides));
 }
 
 export function listAISites(settings) {

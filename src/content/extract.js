@@ -3,12 +3,22 @@ import TurndownService from 'turndown';
 import { gfm } from 'turndown-plugin-gfm';
 
 const EXCLUDED_TAGS = new Set([
-  'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'INPUT', 'TEXTAREA', 'SELECT',
+  'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'INPUT', 'TEXTAREA', 'SELECT', 'BUTTON',
   'IFRAME', 'OBJECT', 'EMBED', 'CANVAS',
 ]);
 const BLOCK_SELECTOR = 'p,li,blockquote,pre,td,th,h1,h2,h3,h4,h5,h6,div,section,article,main';
 const MAIN_SELECTOR = 'main,[role="main"],article';
-const EVIDENCE_SELECTOR = 'p,li,h2,h3,h4,h5,h6,pre,table,details,aside,footer,blockquote,[role="note"]';
+const CONTENT_SELECTOR = '#content,#main-content,.entry-content,.post-content,.article-content,.article-body,.markdown-body,.markdown-doc,.ascii-doc,.vt-doc,.body';
+const EVIDENCE_SELECTOR = 'p,li,ul,ol,h1,h2,h3,h4,h5,h6,pre,table,details,aside,footer,blockquote,figure,[role="note"]';
+const SOURCE_ATTRIBUTE = 'data-sider-source-block';
+const FACTUAL_SELECTOR = 'details,pre,table,blockquote,[role="note"]';
+const NOISE_CONTAINERS = new Set(['DIV', 'SECTION', 'ASIDE', 'FOOTER', 'UL', 'OL', 'ARTICLE']);
+const NOISE_NAME = /(?:^|[\s_-])(?:comments?|share|sharing|social|advertisement|advertising|ads?|cookie-banner|cookie-consent|breadcrumbs?|pagination|sidebar)(?:$|[\s_-])/i;
+const AMBIGUOUS_NOISE_NAME = /(?:^|[\s_-])(?:related|recommendations?|recommended)(?:$|[\s_-])/i;
+const UI_SELECTOR = '[role="navigation"],[role="banner"],[role="contentinfo"],.translation-banner,.article-footer,.site-footer,.edit-link';
+const CODE_LINE_SELECTOR = '.line,.code-line,.doc-code-line,.ec-line,[data-line],[data-line-number]';
+const CODE_GUTTER_SELECTOR = '.line-number,.line-numbers,.doc-line-number,.lineno,.lnt,.rouge-gutter,.react-syntax-highlighter-line-number';
+const LOADING_TEXT = /^(?:正在加载(?:文章|正文|内容|页面|数据)?(?:中)?|加载中|请稍候|请稍等|loading(?:\s+(?:article|content|page|data))?|please\s+wait)(?:[，,\s]*(?:请稍候|请稍等|please\s+wait))?[\s.。…!！]*$/i;
 const LOADED_WARNING = '仅包含采集时已加载的网页正文；未加载的内容、其他框架及图片中的文字可能未包含。';
 
 export function isSupportedDocument(document) {
@@ -16,7 +26,20 @@ export function isSupportedDocument(document) {
 }
 
 function elementFor(node) {
-  return node?.nodeType === 1 ? node : node?.parentElement;
+  return node?.nodeType === 1 ? node : node?.parentElement || node?.getRootNode?.().host;
+}
+
+function composedParent(element) {
+  return element.parentElement || element.getRootNode?.().host || null;
+}
+
+function composedClosest(element, selector) {
+  while (element) {
+    const match = element.closest(selector);
+    if (match) return match;
+    element = element.getRootNode?.().host;
+  }
+  return null;
 }
 
 export function isEditable(node) {
@@ -25,7 +48,7 @@ export function isEditable(node) {
     if (['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName)) return true;
     const editable = element.getAttribute('contenteditable');
     if (editable !== null) return editable.toLowerCase() !== 'false';
-    element = element.parentElement;
+    element = composedParent(element);
   }
   return false;
 }
@@ -48,7 +71,7 @@ function isReadableTextNode(node) {
   let ancestor = node.parentElement;
   while (ancestor) {
     if (isExcluded(ancestor)) return false;
-    ancestor = ancestor.parentElement;
+    ancestor = composedParent(ancestor);
   }
   return true;
 }
@@ -57,7 +80,7 @@ function hasExcludedAncestor(node) {
   let element = elementFor(node);
   while (element) {
     if (isExcluded(element)) return true;
-    element = element.parentElement;
+    element = composedParent(element);
   }
   return false;
 }
@@ -66,19 +89,48 @@ function normaliseInline(text) {
   return String(text || '').replace(/\s+/g, ' ').trim();
 }
 
+function cleanAttributes(source, target) {
+  for (const attribute of [...target.attributes]) {
+    const name = attribute.name.toLowerCase();
+    if (name.startsWith('on') || name === 'srcdoc') target.removeAttribute(attribute.name);
+    if (['href', 'src', 'action', 'formaction'].includes(name)) {
+      try {
+        const url = new URL(attribute.value.trim(), source.ownerDocument.baseURI);
+        if (/^(?:javascript|vbscript|data):$/i.test(url.protocol)) target.removeAttribute(attribute.name);
+        else target.setAttribute(attribute.name, url.href);
+      } catch { target.removeAttribute(attribute.name); }
+    }
+  }
+}
+
+function isPeripheral(element) {
+  if (element.tagName === 'NAV' || element.matches(UI_SELECTOR)) return true;
+  if (!NOISE_CONTAINERS.has(element.tagName)) return false;
+  const peripheral = element.tagName === 'ASIDE' || element.tagName === 'FOOTER';
+  const name = `${element.id} ${element.className}`;
+  const namedNoise = NOISE_NAME.test(name);
+  const ambiguousNoise = AMBIGUOUS_NOISE_NAME.test(name);
+  if (!peripheral && !namedNoise && !ambiguousNoise) return false;
+  // Factual callouts and examples can legitimately use words such as "related"
+  // or "comments". Do not classify them by a class-name substring alone.
+  if (composedClosest(element, FACTUAL_SELECTOR) || element.querySelector(FACTUAL_SELECTOR)) return false;
+  if (peripheral && !composedClosest(element, MAIN_SELECTOR)) return true;
+  if (!namedNoise) {
+    if (!ambiguousNoise) return false;
+    // "Recommendations" may be a real prose chapter. Only treat these broad
+    // names as noise when they identify an aside or a list dominated by links.
+    const length = normaliseInline(element.textContent).length;
+    const links = [...element.querySelectorAll('a')].reduce((sum, link) => sum + normaliseInline(link.textContent).length, 0);
+    if (!peripheral && links <= length * 0.5) return false;
+  }
+  // A standalone article may itself be about comments or sharing. Only prune
+  // article containers when they are auxiliary sections within a main scope.
+  return element.tagName !== 'ARTICLE' || Boolean(composedClosest(composedParent(element), MAIN_SELECTOR));
+}
+
 function cleanClone(original, clone) {
   const clean = (source, target) => {
-    for (const attribute of [...target.attributes]) {
-      const name = attribute.name.toLowerCase();
-      if (name.startsWith('on') || name === 'srcdoc') target.removeAttribute(attribute.name);
-      if (['href', 'src', 'action', 'formaction'].includes(name)) {
-        try {
-          const url = new URL(attribute.value.trim(), source.ownerDocument.baseURI);
-          if (/^(?:javascript|vbscript|data):$/i.test(url.protocol)) target.removeAttribute(attribute.name);
-          else target.setAttribute(attribute.name, url.href);
-        } catch { target.removeAttribute(attribute.name); }
-      }
-    }
+    cleanAttributes(source, target);
     let sourceChild = source.firstElementChild;
     let targetChild = target.firstElementChild;
     while (sourceChild && targetChild) {
@@ -96,9 +148,47 @@ function cleanClone(original, clone) {
   return clone;
 }
 
+function filteredBody(source, document) {
+  if (!source || isExcluded(source)) return null;
+  const root = document.importNode(source, false);
+  cleanAttributes(source, root);
+  const pending = [[source, root]];
+  while (pending.length) {
+    const [original, clone] = pending.pop();
+    // Compose open shadow roots in the detached copy. Neutral elements cannot
+    // attach their own shadow roots; slot assignments are copied exactly once.
+    const assigned = original.tagName === 'SLOT' ? original.assignedNodes?.({ flatten: true }) : null;
+    const children = assigned?.length ? assigned : (original.shadowRoot || original).childNodes;
+    for (const child of children) {
+      if (child.nodeType === 3) {
+        clone.append(document.createTextNode(child.nodeValue));
+      } else if (child.nodeType === 1) {
+        // Excluded ancestors are never traversed, so editable state only needs
+        // checking on this element rather than walking its ancestors again.
+        const editable = child.getAttribute('contenteditable');
+        if (EXCLUDED_TAGS.has(child.tagName) || (editable !== null && editable.toLowerCase() !== 'false') || isPeripheral(child) || isHidden(child)) continue;
+        const target = child.shadowRoot || child.tagName === 'SLOT'
+          ? document.createElement(child.tagName === 'SLOT' ? 'span' : 'div')
+          : document.importNode(child, false);
+        if (child.shadowRoot || child.tagName === 'SLOT') {
+          for (const attribute of child.attributes) target.setAttribute(attribute.name, attribute.value);
+        }
+        cleanAttributes(child, target);
+        clone.append(target);
+        pending.push([child, target]);
+      }
+    }
+  }
+  return root;
+}
+
 function sanitizedDocument(document) {
-  const clone = document.cloneNode(true);
-  cleanClone(document.documentElement, clone.documentElement);
+  // Copy only accepted body nodes. Hidden/editor/script subtrees are not first
+  // allocated in a full-document clone just to be discarded afterwards.
+  const clone = document.cloneNode(false);
+  const html = clone.importNode(document.documentElement, false);
+  cleanAttributes(document.documentElement, html);
+  clone.append(html);
   // Head elements are visually hidden, but their metadata describes the source.
   const head = clone.createElement('head');
   const title = clone.createElement('title');
@@ -111,8 +201,9 @@ function sanitizedDocument(document) {
     }
     head.append(meta);
   }
-  clone.head?.remove();
-  clone.documentElement.prepend(head);
+  html.append(head);
+  const body = filteredBody(document.body, clone);
+  if (body) html.append(body);
   // Keep inert metadata in the detached head for Readability's JSON-LD parser.
   // It is never included in the fallback body or executed in the live document.
   for (const source of document.querySelectorAll('script[type="application/ld+json"]')) {
@@ -191,11 +282,12 @@ function createMarkdownConverter() {
     filter: node => node.nodeName === 'PRE' || (node.nodeName === 'DIV' && /highlight-(?:text|source)-[\w+.-]+/.test(node.className) && node.firstElementChild?.nodeName === 'PRE'),
     replacement: (_content, node) => {
       const pre = node.nodeName === 'PRE' ? node : node.firstElementChild;
-      const code = pre.textContent.replace(/\r\n?/g, '\n');
+      const code = codeText(pre).replace(/\r\n?/g, '\n');
       const element = pre.querySelector('code') || pre;
       const classes = `${element.className} ${pre.className} ${node.className}`;
-      const language = (classes.match(/(?:language-|lang-|highlight-(?:text|source)-)([\w+.-]+)/) || [])[1]
-        || (pre.getAttribute('data-language') || '').match(/^[\w+.-]+$/)?.[0] || '';
+      const language = (classes.match(/(?:language-|lang-|highlight-(?:text|source)-|brush:\s*)([\w+.-]+)/) || [])[1]
+        || [element.getAttribute('data-language'), element.getAttribute('data-lang'), pre.getAttribute('data-language'), pre.getAttribute('data-lang')]
+          .find(value => /^[\w+.-]+$/.test(value || '')) || '';
       let longest = 0;
       for (const [run] of code.matchAll(/`+/g)) longest = Math.max(longest, run.length);
       const fence = '`'.repeat(Math.max(3, longest + 1));
@@ -207,6 +299,28 @@ function createMarkdownConverter() {
     replacement: (_content, node) => tableMarkdown(node, converter),
   });
   return converter;
+}
+
+function codeText(root) {
+  // Syntax highlighters often express visual lines as spans with no text-node
+  // newline. Preserve their last line, blank lines and indentation as well.
+  const visit = node => {
+    if (node.nodeType === 3) return node.nodeValue || '';
+    if (node.nodeType !== 1 || node.matches(CODE_GUTTER_SELECTOR)) return '';
+    if (node.tagName === 'BR') return '\n';
+    const children = [...node.childNodes];
+    const hasLines = children.some(child => child.nodeType === 1 && child.matches(CODE_LINE_SELECTOR));
+    let text = '';
+    let previousLine = false;
+    for (const child of children) {
+      if (hasLines && child.nodeType === 3 && !child.nodeValue.trim()) continue;
+      if (previousLine && child.nodeName === 'BR') { previousLine = false; continue; }
+      text += visit(child);
+      previousLine = child.nodeType === 1 && child.matches(CODE_LINE_SELECTOR);
+    }
+    return node.matches(CODE_LINE_SELECTOR) && !text.endsWith('\n') ? `${text}\n` : text;
+  };
+  return visit(root);
 }
 
 function readableText(root) {
@@ -222,34 +336,141 @@ function readableText(root) {
 }
 
 function mainRegion(document) {
-  let best = null;
-  let length = 0;
-  for (const region of document.querySelectorAll(MAIN_SELECTOR)) {
-    if (region.parentElement?.closest(MAIN_SELECTOR)) continue;
-    const size = region.textContent.trim().length;
-    if (size > length) { best = region; length = size; }
+  let candidates = [...document.querySelectorAll(MAIN_SELECTOR)].filter(region => !region.parentElement?.closest(MAIN_SELECTOR));
+  if (!candidates.length) {
+    candidates = [...document.querySelectorAll(CONTENT_SELECTOR)].filter(region =>
+      region.querySelectorAll('p,pre,table,details,dl').length >= 2);
   }
-  return best;
+  if (candidates.length === 1) {
+    const region = candidates[0];
+    return region.textContent.trim() || region.matches('[aria-busy="true"]') ? contentRegion(region) : null;
+  }
+  let best = null;
+  let bestScore = -Infinity;
+  const title = normaliseInline(document.title).toLowerCase();
+  for (const region of candidates) {
+    const text = region.textContent.trim();
+    if (!text && !region.matches('[aria-busy="true"]')) continue;
+    const heading = normaliseInline(region.querySelector('h1')?.textContent).toLowerCase();
+    const titleMatch = heading.length >= 4 && title.length >= 4 && (title.includes(heading) || heading.includes(title));
+    const linkLength = [...region.querySelectorAll('a')].reduce((sum, link) => sum + normaliseInline(link.textContent).length, 0);
+    const linkDensity = Math.min(1, linkLength / Math.max(1, text.length));
+    const structured = Math.min(20, region.querySelectorAll('p,pre,table,details').length);
+    const score = (region.matches('main,[role="main"]') ? 100 : 0) + (heading ? 20 : 0)
+      + (titleMatch ? 80 : 0) + Math.min(60, Math.log2(text.length + 1) * 4)
+      + structured * 2 - linkDensity * 100;
+    if (score > bestScore) { best = region; bestScore = score; }
+  }
+  return best ? contentRegion(best) : null;
 }
 
-function missesMainContent(article, region) {
-  const text = normaliseInline(article.textContent);
-  if (text.length < normaliseInline(region.textContent).length * 0.85) return true;
-  const retained = new Set([...article.content.querySelectorAll(EVIDENCE_SELECTOR)].map(node => normaliseInline(node.textContent)));
-  for (const node of region.querySelectorAll(EVIDENCE_SELECTOR)) {
-    const original = normaliseInline(node.textContent);
-    if (original && !retained.has(original) && !text.includes(original)) return true;
+function contentRegion(region) {
+  // A layout's main can also contain promotions and tool panels. A named inner
+  // article body is a stronger recovery boundary when it owns the same title
+  // and most of the content. Requiring that title preserves separate intros.
+  const heading = region.querySelector('h1');
+  if (!heading) return region;
+  const length = normaliseInline(region.textContent).length;
+  const bodies = [...region.querySelectorAll(CONTENT_SELECTOR)].filter(body =>
+    body.contains(heading) && body.querySelectorAll('p,pre,table,details,dl').length >= 2
+    && normaliseInline(body.textContent).length >= length * 0.65);
+  return bodies.sort((left, right) => left.textContent.length - right.textContent.length)[0] || region;
+}
+
+function assertContentReady(region) {
+  const busy = region.closest('[aria-busy="true"]') || region.querySelector('main[aria-busy="true"],[role="main"][aria-busy="true"],article[aria-busy="true"]');
+  if (busy) throw new Error('来源网页正文正在加载，尚未就绪，请等待完成后重试正文。');
+  const rawText = region.textContent;
+  if (rawText.length > 200 || region.querySelector('pre,table,blockquote,details')) return;
+  const text = normaliseInline(rawText);
+  const blocks = recoveryBlocks(region).filter(node => node.tagName !== 'H1');
+  if (LOADING_TEXT.test(text) || (blocks.length && blocks.every(node => LOADING_TEXT.test(normaliseInline(node.textContent))))) {
+    throw new Error('来源网页正文正在加载，尚未就绪，请等待完成后重试正文。');
   }
-  return false;
+}
+
+function recoveryBlocks(root) {
+  const blocks = [];
+  const visit = node => {
+    if (node.matches(EVIDENCE_SELECTOR) || !node.querySelector(EVIDENCE_SELECTOR)) {
+      if (node.textContent.trim()) blocks.push(node);
+    } else {
+      for (const child of node.children) visit(child);
+    }
+  };
+  visit(root);
+  return blocks;
+}
+
+function supplementArticle(article, fallback) {
+  const text = normaliseInline(article.textContent);
+  const retained = new Set([...article.content.querySelectorAll(EVIDENCE_SELECTOR)].map(node => normaliseInline(node.textContent)));
+  const missing = recoveryBlocks(fallback).filter(node => {
+    // Readability normally removes the article's first H1; the title is already
+    // retained separately in the reference, so it does not need duplicating.
+    if (node.tagName === 'H1') return false;
+    const original = normaliseInline(node.textContent);
+    return !retained.has(original) && !text.includes(original);
+  });
+  if (!missing.length) return { region: article.content, supplemented: false };
+  // Bound merge work when recognition lost most of the selected region. This
+  // fallback has already excluded other regions and known peripheral sections.
+  if (missing.length > 32 || text.length < normaliseInline(fallback.textContent).length * 0.5) {
+    return { region: fallback, supplemented: false };
+  }
+  const outerBlock = node => {
+    let parent = node.parentElement;
+    while (parent && parent !== article.content) {
+      if (parent.matches(EVIDENCE_SELECTOR)) node = parent;
+      parent = parent.parentElement;
+    }
+    return node;
+  };
+  for (const block of missing) {
+    const id = Number(block.getAttribute(SOURCE_ATTRIBUTE));
+    const ids = new Set([block, ...block.querySelectorAll(`[${SOURCE_ATTRIBUTE}]`)].map(node => node.getAttribute(SOURCE_ATTRIBUTE)));
+    const nodes = [...article.content.querySelectorAll(`[${SOURCE_ATTRIBUTE}]`)];
+    const matches = new Set(nodes.filter(node => ids.has(node.getAttribute(SOURCE_ATTRIBUTE))));
+    const topMatches = [...matches].filter(node => {
+      let parent = node.parentElement;
+      while (parent && parent !== article.content) {
+        if (matches.has(parent)) return false;
+        parent = parent.parentElement;
+      }
+      return true;
+    });
+    const restored = block.cloneNode(true);
+    if (topMatches.length) {
+      // Replace a partially retained table/details/list as one unit. Appending
+      // its missing text would duplicate retained cells, summaries or items.
+      topMatches[0].replaceWith(restored);
+      for (const node of topMatches.slice(1)) node.remove();
+    } else {
+      const anchors = nodes.filter(node => node.matches(EVIDENCE_SELECTOR));
+      const next = anchors.find(node => Number(node.getAttribute(SOURCE_ATTRIBUTE)) > id);
+      const previous = anchors.findLast(node => Number(node.getAttribute(SOURCE_ATTRIBUTE)) < id);
+      if (next) outerBlock(next).before(restored);
+      else if (previous) outerBlock(previous).after(restored);
+      else article.content.append(restored);
+    }
+  }
+  return { region: article.content, supplemented: true };
 }
 
 export function extractPage(document) {
   const clone = sanitizedDocument(document);
   const main = mainRegion(clone);
+  const source = main || clone.body;
+  if (!source) throw new Error('当前页面没有可提取的正文。');
+  assertContentReady(source);
+  // Recognition and recovery operate on the same selected scope, so a larger
+  // article/card elsewhere cannot displace it during Readability's own scoring.
+  if (main) clone.body.replaceChildren(main);
+  let sourceId = 0;
+  for (const node of [source, ...source.querySelectorAll('*')]) node.setAttribute(SOURCE_ATTRIBUTE, String(++sourceId));
   // Readability mutates its input. Preserve just the fallback region, not a
   // second complete document, and pass its DOM output directly to Turndown.
-  const fallback = (main || clone.body)?.cloneNode(true);
-  if (!fallback) throw new Error('当前页面没有可提取的正文。');
+  const fallback = source.cloneNode(true);
   const warnings = [LOADED_WARNING];
   let article;
   try {
@@ -259,10 +480,18 @@ export function extractPage(document) {
   }
   let region = article?.textContent?.trim() ? article.content : fallback;
   let method = region === fallback ? (main ? 'main-region' : 'visible-text') : 'readability';
-  if (main && region !== fallback && missesMainContent(article, fallback)) {
-    region = fallback;
-    method = 'main-region';
-    warnings.push('正文识别结果遗漏了主区域内容，已保留主区域中的段落、代码、表格和说明。');
+  // Without a trusted content region, Readability's selected body is the only
+  // evidence of relevance. Re-merging the entire body would restore sidebars.
+  if (region !== fallback && main) {
+    const recovered = supplementArticle(article, fallback);
+    region = recovered.region;
+    if (region === fallback) {
+      method = main ? 'main-region' : 'visible-text';
+      warnings.push('正文识别结果遗漏了大部分内容，已使用过滤后的主区域或可见文本。');
+    } else if (recovered.supplemented) {
+      method = 'readability-supplemented';
+      warnings.push('正文识别遗漏了部分正文，已按原文顺序补回段落、代码、表格或说明。');
+    }
   } else if (region === fallback) {
     warnings.push('已使用主区域或可见文本作为降级结果，请检查引用预览。');
   }

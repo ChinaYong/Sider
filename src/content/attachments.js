@@ -84,7 +84,7 @@ export function attachmentFailureDetail(card, selector) {
 }
 
 /** Operate the site's native attachment UI; no private state or upload API. */
-export function createAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT, driver } = {}) {
+function createSingleAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT, driver } = {}) {
   const view = document.defaultView;
   const siteName = driver?.siteName || 'ChatGPT';
   const locateComposer = driver?.findComposer || (() => findComposer(document));
@@ -139,7 +139,7 @@ export function createAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT,
     try {
       const card = locate(record);
       const error = card && (driver ? driver.failed(card) : failed(card));
-      const ready = Boolean(card && !error && (driver ? driver.ready(card, record.spec.name) : !card.querySelector('[role="progressbar"]') && exactButton(card, [record.spec.name])));
+      const ready = Boolean(card && !error && (driver ? driver.ready(card, record.spec.name, { requireSendReady: record.requireSendReady }) : !card.querySelector('[role="progressbar"]') && exactButton(card, [record.spec.name])));
       return { ready, name: record.spec.name, invalidated: Boolean(error || record.seen && !card), removed: Boolean(record.seen && !card) };
     } catch { return { ready: false, name: record.spec.name, invalidated: true, removed: false }; }
   }
@@ -247,7 +247,7 @@ export function createAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT,
     return clearing;
   }
 
-  async function prepareOnce(raw, { signal, isCurrent = () => true, onProgress } = {}) {
+  async function prepareOnce(raw, { signal, isCurrent = () => true, onProgress, requireSendReady = true } = {}) {
     if (disposed) throw new Error('正文附件管理已关闭。');
     const spec = normalizeSpec(raw);
     const deadline = Date.now() + duration;
@@ -285,7 +285,7 @@ export function createAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT,
     if (typeof view.DataTransfer !== 'function' || typeof view.File !== 'function') throw new Error('当前浏览器不支持自动准备文件附件。');
     const actualSpec = { ...spec, name: uploadName(view, spec.name) };
     if ([...baseline].some(card => identifies(card, actualSpec.name))) throw new Error(`已有同名附件“${actualSpec.name}”，请先移除或重命名该附件。`);
-    const record = { spec: actualSpec, logicalSpec: spec, editor, scope, href, session, baseline, card: null, seen: false, retiring: false, dispatched: false, deadline, promise: null, cleanup: null, onProgress };
+    const record = { spec: actualSpec, logicalSpec: spec, editor, scope, href, session, baseline, card: null, seen: false, retiring: false, dispatched: false, deadline, promise: null, cleanup: null, onProgress, requireSendReady };
     active = record;
     record.promise = (async () => {
       try {
@@ -347,9 +347,76 @@ export function createAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT,
     isOwnedRemoveButton(element) {
       return Boolean(active && !active.retiring && active.card?.isConnected && removeButton(active.card, active.spec.name) === element);
     },
+    forget() {
+      disposed = true; epoch++; active = null; retired.clear(); observer.disconnect(); listeners.clear();
+    },
     dispose() {
       disposed = true;
       return clear().catch(() => {}).finally(() => { observer.disconnect(); listeners.clear(); });
     },
+  };
+}
+
+/** Each template keeps its own native-card ownership; uploads share one queue. */
+export function createAttachmentManager(document, options = {}) {
+  const entries = new Map();
+  let queue = Promise.resolve(), epoch = 0, disposed = false, lastId = 'default';
+  const key = spec => spec?.id || 'default';
+  const enqueue = action => {
+    const operation = queue.then(action); queue = operation.catch(() => {}); return operation;
+  };
+  async function removeIds(ids) {
+    const errors = [];
+    for (const id of ids) {
+      const entry = entries.get(id); if (!entry) continue;
+      if (entry.cleared) continue;
+      entry.removing = true;
+      try { await entry.manager.clear(); entry.cleared = true; }
+      catch (error) { errors.push(error); }
+    }
+    if (errors.length) throw Object.assign(new Error(errors.map(error => error.message).join('\n')), { cleanupError: errors[0] });
+  }
+  return {
+    prepare(spec, settings = {}) {
+      const id = key(spec), token = epoch;
+      lastId = id;
+      if (id === 'default') {
+        let entry = entries.get(id);
+        if (!entry) { entry = { manager: createSingleAttachmentManager(document, options), spec }; entries.set(id, entry); }
+        entry.cleared = false; entry.removing = false; entry.spec = spec;
+        return entry.manager.prepare(spec, settings);
+      }
+      return enqueue(async () => {
+        if (disposed || token !== epoch || settings.signal?.aborted) throw new Error('预设附件准备已取消。');
+        let entry = entries.get(id);
+        if (!entry) { entry = { manager: createSingleAttachmentManager(document, options), spec }; entries.set(id, entry); }
+        entry.spec = spec; entry.cleared = false; entry.removing = false;
+        return entry.manager.prepare(spec, { ...settings, isCurrent: () => token === epoch && !disposed && (settings.isCurrent?.() ?? true) });
+      });
+    },
+    isReady(spec) { return entries.get(key(spec))?.manager.isReady(spec) || false; },
+    reconcile() {
+      let last = { ready: false };
+      for (const [id, entry] of entries) { const state = entry.manager.reconcile(); if (id === lastId) last = state; }
+      return last;
+    },
+    ownedId(element) { for (const [id, entry] of entries) if (entry.manager.isOwnedRemoveButton(element)) return id; return null; },
+    missingIds() { return [...entries].filter(([, entry]) => !entry.cleared && !entry.removing && entry.manager.reconcile().invalidated).map(([id]) => id); },
+    isOwnedRemoveButton(element) { return this.ownedId(element) !== null; },
+    remove(id) { return removeIds([id]); },
+    adopt(stagingId, spec) {
+      const entry = entries.get(stagingId), previous = entries.get(key(spec));
+      if (!entry || !entry.manager.isReady(spec) || previous && !previous.cleared) throw new Error('预设附件尚未就绪或旧附件尚未清理。');
+      if (previous) void previous.manager.dispose().catch(() => {});
+      entries.delete(stagingId); entry.spec = spec; entries.set(key(spec), entry); lastId = key(spec);
+    },
+    retain(ids) { return removeIds([...entries.keys()].filter(id => !ids.includes(id))); },
+    clear() {
+      epoch++;
+      if (entries.size === 1 && entries.has('default')) return entries.get('default').manager.clear();
+      return removeIds([...entries.keys()]);
+    },
+    commit() { for (const entry of entries.values()) entry.manager.forget(); entries.clear(); },
+    dispose() { disposed = true; epoch++; return Promise.allSettled([...entries.values()].map(entry => entry.manager.dispose())).then(() => {}); },
   };
 }

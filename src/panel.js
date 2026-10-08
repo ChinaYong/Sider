@@ -1,7 +1,10 @@
-import { AI_WEB_SETTINGS_KEY, BUILTIN_AI_SITES, normalizeAIWebSettings, selectedAISite } from './ai-web.js';
+import { AI_WEB_SETTINGS_KEY, BUILTIN_AI_SITES, aiSiteURL, normalizeAIWebSettings, selectedAISite } from './ai-web.js';
 import { installAIWebSettings } from './ai-web-settings.js';
+import { installConfigurationUI } from './configuration-ui.js';
+import { createMotion, installDialogMotion } from './motion.js';
 
 const $ = selector => document.querySelector(selector);
+const motion = createMotion(window);
 const isExtension = Boolean(globalThis.chrome?.runtime?.id);
 const bridgeId = crypto.randomUUID();
 const sourceParameter = new URL(window.location.href).searchParams.get('sourceTab');
@@ -17,15 +20,19 @@ let siteSource;
 let sitePurpose;
 let hasConnected = false;
 let activeSite = BUILTIN_AI_SITES[0];
+let activeAISettings = normalizeAIWebSettings();
 let loadedSite = null;
+let loadedAISettings = null;
 let pendingSendPicker;
 const diagnostics = { version: globalThis.chrome?.runtime?.getManifest?.().version || '0.4.0', sourceTabId, browser: navigator.userAgent, stage: '启动', rule: false, connected: false, enhancementReady: false };
 
 function showToast(text) {
   clearTimeout(toastTimer);
-  $('#toast').textContent = text;
-  $('#toast').hidden = false;
-  toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 6000);
+  const toast = $('#toast'), changed = toast.textContent !== text, visible = !toast.hidden;
+  if (changed) toast.textContent = text;
+  motion.setVisible(toast, true, { fadeOnly: true });
+  if (changed && visible) motion.enter(toast, { fadeOnly: true, duration: 120 });
+  toastTimer = setTimeout(() => motion.setVisible(toast, false, { fadeOnly: true }), 6000);
 }
 
 async function request(message) {
@@ -70,9 +77,10 @@ function pickNativeSendButton(site) {
 }
 
 function status(text, kind = '', detail = text) {
-  $('#connection-status > span').textContent = text;
-  $('#connection-status').className = kind;
-  $('#connection-status').title = detail;
+  const label = $('#connection-status > span'), indicator = $('#connection-status');
+  if (label.textContent !== text) label.textContent = text;
+  if (indicator.className !== kind) indicator.className = kind;
+  if (indicator.title !== detail) indicator.title = detail;
 }
 
 function renderDiagnostics() {
@@ -205,8 +213,9 @@ async function start() {
   try {
     const stored = await chrome.storage?.local?.get(AI_WEB_SETTINGS_KEY);
     if (run !== generation) return;
-    activeSite = selectedAISite(normalizeAIWebSettings(stored?.[AI_WEB_SETTINGS_KEY]));
-    diagnostics.site = activeSite.name; diagnostics.url = activeSite.url;
+    activeAISettings = normalizeAIWebSettings(stored?.[AI_WEB_SETTINGS_KEY]);
+    activeSite = selectedAISite(activeAISettings);
+    diagnostics.site = activeSite.name; diagnostics.url = aiSiteURL(activeSite, activeAISettings);
     status(`正在打开 ${activeSite.name}`);
     $('#loading-title').textContent = `正在打开 ${activeSite.name}`;
     $('#reload-chatgpt').title = `重新加载 ${activeSite.name}`;
@@ -218,12 +227,14 @@ async function start() {
     if (run !== generation) return;
     diagnostics.rule = registered.compatibility;
     if (registered.site) activeSite = registered.site;
+    activeSite = { ...activeSite, url: aiSiteURL(activeSite, activeAISettings) };
     const frame = $('#chatgpt-frame');
     frame.hidden = false;
     // Show the site's first paint without waiting for load or the document-idle bridge.
     const url = new URL(activeSite.url); url.searchParams.set('sider_bridge', bridgeId);
     frame.src = url.href;
     loadedSite = structuredClone(activeSite);
+    loadedAISettings = structuredClone(activeAISettings);
     $('#ai-settings-updated').hidden = true;
     diagnostics.stage = `等待 ${activeSite.name} 网页回执`;
     $('#loading-detail').textContent = `正在加载 ${new URL(activeSite.origin).host}…`;
@@ -320,11 +331,18 @@ window.addEventListener('pagehide', () => {
   try { lifecycle?.disconnect(); } catch {}
 });
 function settingsUpdated(settings) {
-  const next = selectedAISite(settings);
-  $('#ai-settings-updated').hidden = !loadedSite || JSON.stringify(next) === JSON.stringify(loadedSite);
+  const normalized = normalizeAIWebSettings(settings);
+  const next = selectedAISite(normalized);
+  const nextWithURL = { ...next, url: aiSiteURL(next, normalized) };
+  const geminiDefaultsChanged = next.id === 'gemini' && loadedSite?.id === 'gemini' &&
+    (normalized.geminiModel !== loadedAISettings?.geminiModel || normalized.geminiExtendedThinking !== loadedAISettings?.geminiExtendedThinking);
+  $('#ai-settings-updated').hidden = !loadedSite || (!geminiDefaultsChanged && JSON.stringify(nextWithURL) === JSON.stringify(loadedSite));
   if (!$('#ai-settings-updated').hidden) $('#ai-settings-updated').textContent = `AI 网站设置已更新，点击加载 ${next.name}`;
 }
 installAIWebSettings({ document, chrome: globalThis.chrome, pickSendButton: pickNativeSendButton, onSaved(settings) { settingsUpdated(settings); showToast('AI 网站设置已保存，重新加载侧栏后生效。'); } });
+installConfigurationUI({ document, chrome: globalThis.chrome, onImported(settings) { $('#ai-settings-dialog').close(); settingsUpdated(settings); } });
+const disposeDialogs = installDialogMotion(document, motion);
+window.addEventListener('pagehide', () => { clearTimeout(toastTimer); motion.dispose(); disposeDialogs(); });
 const settingsChanged = (changes, area) => { if (area === 'local' && changes[AI_WEB_SETTINGS_KEY]) settingsUpdated(normalizeAIWebSettings(changes[AI_WEB_SETTINGS_KEY].newValue)); };
 globalThis.chrome?.storage?.onChanged?.addListener(settingsChanged);
 window.addEventListener('pagehide', () => globalThis.chrome?.storage?.onChanged?.removeListener(settingsChanged));

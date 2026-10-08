@@ -82,10 +82,10 @@ export function compilePrompt(draft, references = [], settings = {}) {
       if (!ref) return `{{${variable}}}`;
       return match[2] === 'content' ? add(ref) : String(ref[match[2]] || '');
     }
-    errors.push(`未知变量 {{${variable}}}，请修改模板。`);
+    errors.push(`未知变量 {{${variable}}}，请修改预设。`);
     return `{{${variable}}}`;
   }).trim();
-  if (!text) errors.push('请先填写问题或选择模板。');
+  if (!text) errors.push('请先填写问题或选择预设。');
   const blocks = [...used.values()].map(ref => {
     const metadata = `【${ref.alias.toUpperCase()}】\n标题：${ref.title}\n来源：${ref.url}\n采集时间：${ref.capturedAt}`;
     const content = ref.kind === 'url' ? '本引用仅包含链接，未提取网页正文。' : ref.content;

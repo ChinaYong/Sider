@@ -134,14 +134,21 @@ test('an empty page initially publishes no selection and later selections replac
   assert.equal(env.sent[0].reference, null);
   env.selectTarget();
   env.window.document.dispatchEvent(new env.window.Event('selectionchange'));
-  await new Promise(resolve => setTimeout(resolve, 110));
+  await waitForSelection('目标文字');
   assert.equal(env.sent.at(-1).reference.content, '目标文字');
   env.selectText('正文后缀');
   env.window.document.dispatchEvent(new env.window.Event('selectionchange'));
-  await new Promise(resolve => setTimeout(resolve, 110));
+  await waitForSelection('正文后缀');
   assert.equal(env.sent.at(-1).reference.content, '正文后缀');
   assert.equal(env.request({ type: 'SIDER_PAGE_SELECTION_GET' }).response.reference.content, '正文后缀');
   assert.equal(env.sent.filter(message => message.type === 'SIDER_SELECTION_CHANGED').length, 3);
+  async function waitForSelection(content) {
+    const deadline = Date.now() + 2000;
+    while (env.sent.at(-1)?.reference?.content !== content && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(env.sent.at(-1)?.reference?.content, content);
+  }
 });
 
 test('moving focus to the sidebar preserves a quote, but deselecting in the focused source page clears it', async t => {

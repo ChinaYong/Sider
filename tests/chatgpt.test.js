@@ -205,7 +205,7 @@ function chromeMock({ dnrGranted = true } = {}) {
       async set(data) { Object.assign(sessionValues, structuredClone(data)); api.storage.onChanged.emit(Object.fromEntries(Object.entries(data).map(([key,value]) => [key,{newValue:structuredClone(value)}])), 'session'); },
       async remove(key) { delete sessionValues[key]; api.storage.onChanged.emit({ [key]: {} }, 'session'); },
     }, local: {
-      async get(key) { return { [key]: values[key] }; },
+      async get(key) { return Object.fromEntries((Array.isArray(key) ? key : [key]).map(name => [name, values[name]])); },
       async set(data) { Object.assign(values, structuredClone(data)); api.storage.onChanged.emit(Object.fromEntries(Object.entries(data).map(([key,value]) => [key,{newValue:structuredClone(value)}])), 'local'); },
     } },
     tabs: {
@@ -287,6 +287,24 @@ test('AI settings are privileged, require the selected origin, and preserve exis
   assert.ok([...f.scripts.values()].some(script => script.matches[0] === 'https://gemini.google.com/*'));
   const drop = [...f.scripts.values()].find(script => script.matches[0] === 'https://gemini.google.com/*' && script.world === 'MAIN');
   assert.deepEqual(drop.js, ['file-drop-main.js']); assert.equal(drop.runAt, 'document_start'); assert.equal(drop.allFrames, true);
+});
+
+test('Gemini pages can read only the saved default model settings', async t => {
+  const f = await aiWorker(t);
+  const saved = await f.send({ type: 'SIDER_AI_WEB_SETTINGS_SAVE', settings: { activeSiteId: 'gemini', customSites: [], geminiModel: 'pro', geminiExtendedThinking: true } });
+  assert.equal(saved.ok, true);
+  const source = { id: f.api.runtime.id, url: 'https://gemini.google.com/app', frameId: 0 };
+  const result = await f.send({ type: 'SIDER_GEMINI_DEFAULTS_GET' }, source);
+  assert.deepEqual(result, { ok: true, settings: { geminiModel: 'pro', geminiExtendedThinking: true } });
+});
+
+test('opening Gemini uses the persisted Spark entry URL', async t => {
+  const f = await aiWorker(t);
+  const saved = await f.send({ type: 'SIDER_AI_WEB_SETTINGS_SAVE', settings: { activeSiteId: 'gemini', customSites: [], geminiMode: 'spark' } });
+  assert.equal(saved.ok, true);
+  const opened = await f.send({ type: 'SIDER_CHAT_OPEN', siteId: 'gemini' });
+  assert.equal(opened.ok, true);
+  assert.equal(new URL(f.tabs.get(opened.tabId).url).pathname, '/spark');
 });
 
 test('different AI sites keep distinct compatibility rules and cannot use another site bridge', async t => {

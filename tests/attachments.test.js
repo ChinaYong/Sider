@@ -60,6 +60,16 @@ test('waits for an explicit native attachment preview after upload progress ends
   assert.equal(f.editor.value, '原问题');
 });
 
+test('a failed template cleanup stays in cancellation until manually removed and can upload a fresh retry', async t => {
+ const f = fixture(t, { timeoutMs: 100 }); const spec = { ...pageSpec(), id: 'custom-cleanup-001' };
+ await f.manager.prepare(spec); const card = f.area.firstElementChild;
+ card.querySelector('button').replaceWith(card.querySelector('button').cloneNode(true));
+ await assert.rejects(f.manager.remove(spec.id), /取消正文附件超时/);
+ assert.deepEqual(f.manager.missingIds(), []); card.remove(); await f.manager.prepare(spec);
+ assert.equal(f.uploads.length, 2); assert.equal(f.manager.isReady(spec), true);
+ f.area.firstElementChild.remove(); assert.deepEqual(f.manager.missingIds(), [spec.id]);
+});
+
 test('reuses the same ready or pending file without duplicate uploads', async t => {
   let attachment;
   const f = fixture(t, { onUpload(file, addCard) { attachment = addCard(file.name); } });

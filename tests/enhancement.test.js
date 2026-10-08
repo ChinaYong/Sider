@@ -6,6 +6,7 @@ import { createTabContext, normalizeContext, normalizeContextSettings, CONTEXT_S
 import { installEnhancement } from '../src/content/enhancement.js';
 import { BUILTIN_AI_SITES, normalizeCustomAISite } from '../src/ai-web.js';
 import { createWebAdapter } from '../src/content/adapters.js';
+import { presetTemplates, templateSettings, PRESET_IDS, UNIFIED_TEMPLATES_KEY } from '../src/prompt-templates.js';
 
 const pause = () => new Promise(resolve => setTimeout(resolve, 130));
 const waitUntil = async predicate => {
@@ -18,6 +19,72 @@ const waitUntil = async predicate => {
 const selection = (text = '当前选中的词汇') => createReference({ kind: 'selection', title: '当前网页', url: 'https://example.com/article', content: text, context: '附近的原文段落' }, { alias: 'r1' });
 const page = (text = '完整的网页正文') => createReference({ kind: 'page', title: '当前网页', url: 'https://example.com/article', content: text }, { alias: 'r2' });
 const customSite = normalizeCustomAISite({ id: 'custom-test-ai-0001', name: 'Custom AI', url: 'https://custom-ai.test/chat' });
+
+function openTemplates(f, from = f.editor.value.length, to = from) {
+  f.editor.focus(); f.editor.setSelectionRange(from, to);
+  f.root.querySelector('[data-pane="templates"]').dispatchEvent(new f.window.Event('pointerdown', { bubbles: true }));
+  f.click('[data-pane="templates"]');
+}
+async function createTemplate(f, text, directSend = false) {
+  if (f.root.querySelector('.popover').hidden) openTemplates(f);
+  [...f.root.querySelectorAll('#pane-body button')].find(button => button.textContent === '新增预设').click();
+  f.root.querySelector('#template-name').value = '测试预设'; f.root.querySelector('#template-text').value = text;
+  f.root.querySelector('#template-action').value = directSend ? 'send' : 'append';
+  [...f.root.querySelectorAll('#pane-body button')].find(button => button.textContent === '保存预设').click(); await pause();
+  f.click('#close-pane');
+}
+
+test('page preview reads the cache, copies exact Markdown, and clears stale source content', async t => {
+  const f = fixture(t); await f.seed({ attachments: { page: page('# 标题\n\n中文\n  代码\n\n尾标记') } });
+  let copied; Object.defineProperty(f.window.navigator, 'clipboard', { value: { async writeText(text) { copied = text; } } });
+  const before = f.calls.length; f.click('[aria-label="查看网页正文"]'); [...f.root.querySelectorAll('#pane-body button')].find(button => button.textContent === '查看正文快照').click();
+  assert.equal(f.calls.length, before); assert.equal(f.root.querySelector('.page-body').textContent, f.context.attachments.page.content);
+  [...f.root.querySelectorAll('#pane-body button')].find(button => button.textContent === '复制正文').click(); await pause(); assert.equal(copied, f.context.attachments.page.content);
+  await f.seed({ url: 'https://other.test/', attachments: { page: null }, pageRequested: false });
+  assert.ok(!f.root.querySelector('.page-body')?.textContent.includes('尾标记')); assert.equal(f.submitted.length, 0);
+});
+
+test('a manual template replaces the saved selection and expands original values only once', async t => {
+  const f = fixture(t); await pause(); await createTemplate(f, '读 {{title}} {{url}}');
+  await f.seed({ title: '标题 {{filename}}' }); f.editor.value = '前缀旧词后缀';
+  openTemplates(f, 2, 4); f.click('#pane-body [data-template-id]:not([data-template-id^="preset-"])'); await pause();
+  assert.equal(f.editor.value, '前缀旧词后缀\n\n读 标题 {{filename}} https://example.com/article'); assert.deepEqual(f.submitted, []);
+});
+
+test('direct full-body templates share a capture, preserve the distinct preset file and clear temporary choices', async t => {
+  const manager = attachmentFixture(); const f = fixture(t, { attachmentManager: manager }); await pause();
+  await f.seed({ attachments: { page: page() } }, { pageMode: 'file' });
+  await createTemplate(f, '总结\n{{content}}', true); f.editor.value = '前缀后缀';
+  const before = f.calls.filter(call => call.request.refreshPage).length;
+  openTemplates(f, 2); f.click('#pane-body [data-template-id]:not([data-template-id^="preset-"])'); await waitUntil(() => f.submitted.length === 1);
+  assert.equal(f.submitted.length, 1); assert.ok(f.submitted[0].startsWith('前缀后缀')); assert.ok(f.submitted[0].includes('总结\n完整的网页正文')); assert.equal(manager.calls.length, 1);
+  await waitUntil(() => !f.context.pageRequested); assert.equal(f.settings.pageMode, 'file');
+  assert.ok(Object.values(f.context.templateSelections).every(value => value === false));
+  assert.equal(f.calls.filter(call => call.request.refreshPage).length - before, 1);
+});
+
+test('editing inline body or updating its source body restores the normal file reference behavior', async t => {
+  const manager = attachmentFixture(); const f = fixture(t, { attachmentManager: manager }); await pause();
+  await f.seed({ attachments: { page: page() } }, { pageMode: 'file' }); await createTemplate(f, '{{page.content}}');
+  openTemplates(f); f.click('#pane-body [data-template-id]:not([data-template-id^="preset-"])'); await pause();
+  await f.seed({ attachments: { page: page('来源更新后的正文') } }); f.send(); await pause();
+  assert.equal(manager.calls.length, 1); assert.ok(manager.calls[0].content.includes('来源更新后的正文')); assert.ok(f.submitted[0].includes('完整的网页正文'));
+});
+
+test('source or session changes during template expansion protect the new draft and prevent a direct send', async t => {
+  const f = fixture(t); await pause(); await createTemplate(f, '{{content}}', true); f.editor.value = '旧问题';
+  let release; const original = f.chrome.runtime.sendMessage;
+  f.chrome.runtime.sendMessage = async message => { if (message.request.type === 'SIDER_TEMPLATE_CONTEXT_GET') await new Promise(resolve => { release = resolve; }); return original(message); };
+  openTemplates(f); f.click('#pane-body [data-template-id]:not([data-template-id^="preset-"])'); await waitUntil(() => Boolean(release));
+  f.editor.dataset.conversationId = 'next'; f.edit('新会话草稿'); release(); await pause();
+  assert.equal(f.editor.value, '新会话草稿'); assert.equal(f.submitted.length, 0);
+});
+
+test('missing page metadata blocks direct templates before they modify or send the draft', async t => {
+  const f = fixture(t); await pause(); await createTemplate(f, '{{page.author}}', true); f.editor.value = '保留草稿';
+  openTemplates(f); f.click('#pane-body [data-template-id]:not([data-template-id^="preset-"])'); await pause();
+  assert.equal(f.editor.value, '保留草稿'); assert.equal(f.submitted.length, 0); assert.match(f.root.querySelector('.status').textContent, /page.author/);
+});
 
 function grokBanner(f) {
   const banner = f.window.document.createElement('span'); banner.setAttribute('role', 'status'); banner.setAttribute('aria-live', 'polite');
@@ -69,7 +136,7 @@ test('any custom website tolerates a brief sender replacement and Enter waits on
 test('a prolonged custom-site sender gap blocks sending and keeps the original draft', async t => {
   const f = fixture(t, { site: customSite }); await pause(); f.editor.value = '保留草稿';
   f.window.document.querySelector('button').remove(); await new Promise(resolve => setTimeout(resolve, 60));
-  assert.equal(f.send('keydown'), true); await new Promise(resolve => setTimeout(resolve, 540));
+  assert.equal(f.send('keydown'), true); await waitUntil(() => /发送控件/.test(f.root.querySelector('.status').textContent));
   assert.deepEqual(f.submitted, []); assert.equal(f.editor.value, '保留草稿'); assert.match(f.root.querySelector('.status').textContent, /发送控件/);
 });
 
@@ -78,12 +145,12 @@ test('custom AI auto mode sends the complete body as text and clearly reports th
   const text = '完整正文'.repeat(4000) + '正文尾部必须完整';
   await f.seed({ pageRequested: true, attachments: { page: page(text) } }, { pageMode: 'auto', pageThreshold: 100 });
   f.editor.value = '请概括';
-  assert.equal(f.root.querySelector('[data-chip="page"] .excerpt').textContent, '正文 · 文本');
+  assert.equal(f.root.querySelector('[data-chip="page"] .excerpt').textContent, '网页正文');
   assert.equal(f.send(), true); await pause();
   assert.equal(f.submitted.length, 1); assert.ok(f.submitted[0].includes(text));
-  assert.match(f.root.querySelector('.status').textContent, /完整正文文本/);
+  assert.match(f.root.querySelector('.status').textContent, /完整文本/);
   f.send(); await pause();
-  assert.equal(f.submitted[1], f.submitted[0], 'retry cannot duplicate references');
+  assert.equal(f.submitted[1], '请概括', 'later sends use cleared preset choices');
 });
 
 test('custom AI forced attachment mode blocks send and retains the question and selected body', async t => {
@@ -91,7 +158,7 @@ test('custom AI forced attachment mode blocks send and retains the question and 
   await f.seed({ pageRequested: true, attachments: { page: page() } }, { pageMode: 'file' });
   f.editor.value = '原问题'; f.send(); await pause();
   assert.deepEqual(f.submitted, []); assert.equal(f.editor.value, '原问题');
-  assert.equal(f.context.pageRequested, true); assert.match(f.root.querySelector('.status').textContent, /尚未支持自动上传/);
+  assert.equal(f.context.pageRequested, true); assert.match(f.root.querySelector('.status').textContent, /尚未支持附件/);
 });
 
 test('changing a session identifier in a reused native editor cancels an in-flight send', async t => {
@@ -162,12 +229,38 @@ function fixture(t, options = {}) {
     if (type === 'drop' && callback.name === 'drop') textDrop = callback;
     addListener(type, callback, options);
   };
-  const result = () => ({ ok: true, context: structuredClone(context), settings: structuredClone(settings), needsAccess });
+  let templates = presetTemplates(settings);
+  const result = () => ({ ok: true, context: structuredClone(context), templates: structuredClone(templates), settings: structuredClone(settings), needsAccess });
+  function mapChoices() {
+    context.templateSelections = { ...(context.templateSelections || {}), [PRESET_IDS.selection]: context.selectionIncluded, [PRESET_IDS.url]: context.attachments.url, [PRESET_IDS.page]: context.pageRequested };
+  }
   const chrome = {
     runtime: { getURL: () => 'chrome-extension://sider-test/', async sendMessage(message) {
       calls.push(structuredClone(message));
       const inner = message.request;
+      if (inner.type === 'SIDER_PROMPT_TEMPLATES_GET') return { ok: true, templates: structuredClone(templates) };
+      if (inner.type === 'SIDER_PROMPT_TEMPLATES_SAVE') { templates = structuredClone(inner.templates); settings = normalizeContextSettings(templateSettings(templates)); return result(); }
+      if (inner.type === 'SIDER_TEMPLATE_CONTEXT_GET') {
+        if (inner.needPage && (needsAccess || context.pageError)) return { ok: false, error: context.pageError || '当前网页尚未授权。' };
+        return { ...result(), ...(inner.needPage ? { variablePage: context.attachments.page || page() } : {}) };
+      }
       if (inner.type === 'SIDER_TAB_CONTEXT_GET') return result();
+      if (inner.type === 'SIDER_TAB_TEMPLATES_CLEAR') {
+        if (inner.expectedContext.tabId === context.tabId && inner.expectedContext.url === context.url && inner.expectedContext.revision === context.revision) {
+          for (const id of Object.keys(context.templateSelections)) context.templateSelections[id] = false;
+          context.explicitTemplates = []; context.selectionIncluded = false; context.attachments = { url: false, page: null }; context.pageRequested = false; context.pageError = ''; context.revision++;
+        }
+        return result();
+      }
+      if (inner.type === 'SIDER_TAB_TEMPLATE_SET') {
+        if (needsAccess && inner.enabled) return { ok: false, code: 'SOURCE_ACCESS_REQUIRED', error: '当前网页尚未授权。' };
+        const preset = Object.entries(PRESET_IDS).find(([, id]) => id === inner.id)?.[0];
+        context.templateSelections ||= {}; context.templateSelections[inner.id] = inner.enabled;
+        if (preset === 'selection') context.selectionIncluded = inner.enabled;
+        if (preset === 'url') context.attachments.url = inner.enabled;
+        if (preset === 'page') { context.pageRequested = inner.enabled; context.pageError = ''; context.attachments.page = inner.enabled ? page() : null; }
+        context.revision++; return result();
+      }
       if (inner.type === 'SIDER_TAB_SELECTION_CLEAR') {
         context = normalizeContext({ ...context, selection: null, selectionIncluded: true, revision: context.revision + 1 }, context.tabId); return result();
       }
@@ -176,7 +269,7 @@ function fixture(t, options = {}) {
         if (needsAccess && inner.enabled) return { ok: false, code: 'SOURCE_ACCESS_REQUIRED', error: '当前网页尚未授权。' };
         const update = inner.kind === 'url' ? { attachments: { ...context.attachments, url: inner.enabled } }
             : { attachments: { ...context.attachments, page: inner.enabled ? page() : null }, pageRequested: inner.enabled, pageError: '' };
-        context = normalizeContext({ ...context, ...update, revision: context.revision + 1 }, context.tabId);
+        context = normalizeContext({ ...context, ...update, revision: context.revision + 1 }, context.tabId); mapChoices();
         return result();
       }
       if (inner.type === 'SIDER_CONTEXT_SETTINGS_PATCH') { settings = normalizeContextSettings({ ...settings, ...inner.patch }); return result(); }
@@ -194,10 +287,11 @@ function fixture(t, options = {}) {
     get context() { return structuredClone(context); }, get settings() { return structuredClone(settings); },
     async seed(next = {}, nextSettings = {}) {
       context = normalizeContext({ ...context, ...next, attachments: { ...context.attachments, ...next.attachments }, revision: context.revision + 1 }, next.tabId || context.tabId);
-      settings = normalizeContextSettings({ ...settings, ...nextSettings }); await api.refresh();
+      settings = normalizeContextSettings({ ...settings, ...nextSettings });
+      templates = [...presetTemplates(settings), ...templates.filter(item => !item.preset)]; mapChoices(); await api.refresh();
     },
-    changeSource(next) { context = normalizeContext({ ...context, ...next, revision: context.revision + 1 }, next.tabId || context.tabId); },
-    localSettings(next) { settings = normalizeContextSettings({ ...settings, ...next }); for (const listener of listeners) listener({ [CONTEXT_SETTINGS_KEY]: { newValue: structuredClone(settings) } }, 'local'); },
+    changeSource(next) { context = normalizeContext({ ...context, ...next, revision: context.revision + 1 }, next.tabId || context.tabId); mapChoices(); },
+    localSettings(next) { settings = normalizeContextSettings({ ...settings, ...next }); templates = [...presetTemplates(settings), ...templates.filter(item => !item.preset)]; for (const listener of listeners) listener({ [UNIFIED_TEMPLATES_KEY]: { newValue: structuredClone(templates) } }, 'local'); },
     async setNeedsAccess(value) { needsAccess = value; await api.refresh(); },
     click(selector) { api.root.querySelector(selector).click(); },
     drop(text) {
@@ -230,8 +324,8 @@ test('live selection replaces the preview and remains outside the native questio
   assert.ok(f.root.querySelector('.chips').textContent.includes('<img'));
   f.click('[aria-label="取消划词"]'); await pause();
   assert.equal(f.root.querySelector('.selection-chip'), null);
-  assert.equal(f.context.selection, null);
-  assert.equal(f.calls.at(-1).request.type, 'SIDER_TAB_SELECTION_CLEAR');
+  assert.equal(f.context.selectionIncluded, false);
+  assert.equal(f.calls.at(-1).request.type, 'SIDER_TAB_TEMPLATE_SET');
   assert.equal(f.root.querySelector('.status.error'), null);
   assert.equal(f.editor.value, '这个词是什么意思？');
   assert.equal(f.root.querySelector('#expand'), null);
@@ -241,10 +335,10 @@ test('live selection replaces the preview and remains outside the native questio
 
 test('URL and body are removable current-page choices and never edit or send the question', async t => {
   const f = fixture(t); await pause(); f.editor.value = '我的问题';
-  f.click('[data-pane="references"]'); f.click('[data-attachment="url"]'); await pause();
-  assert.equal(f.root.querySelector('[data-chip="url"] .excerpt').textContent, 'URL');
-  f.click('[data-pane="references"]'); f.click('[data-attachment="page"]'); await pause();
-  assert.equal(f.root.querySelector('[data-chip="page"] .excerpt').textContent, '正文');
+  f.click('[data-pane="templates"]'); f.click('[aria-label="发送时引用 网页链接"]'); await pause();
+  assert.equal(f.root.querySelector('[data-chip="url"] .excerpt').textContent, '网页链接');
+  f.click('[aria-label="发送时引用 网页正文"]'); await pause();
+  assert.equal(f.root.querySelector('[data-chip="page"] .excerpt').textContent, '网页正文');
   assert.equal(f.editor.value, '我的问题');
   assert.equal(f.root.querySelectorAll('textarea').length, 0);
   f.click('[aria-label="取消 URL 引用"]'); f.click('[aria-label="取消正文引用"]'); await pause();
@@ -254,39 +348,16 @@ test('URL and body are removable current-page choices and never edit or send the
   assert.ok(f.calls.every(message => message.type === 'SIDER_ENHANCEMENT_REQUEST' && message.bridgeId === 'test-bridge-0001' && !Object.hasOwn(message.request, 'tabId')));
 });
 
-test('background refresh preserves focused reference controls while updating real context changes', async t => {
-  const f = fixture(t); await f.seed({ selection: selection(), attachments: { url: true, page: page() } });
-  const selectionChip = f.root.querySelector('[data-chip="selection"]');
-  const pageChip = f.root.querySelector('[data-chip="page"]');
-  for (const kind of ['selection', 'url', 'page']) {
-    const cancel = f.root.querySelector(`[data-chip="${kind}"] button`);
-    cancel.focus(); await f.api.refresh(); await f.api.refresh();
-    assert.equal(f.root.querySelector(`[data-chip="${kind}"] button`), cancel);
-    assert.equal(f.root.activeElement, cancel);
-  }
-  await f.seed({ selection: selection('新的划词'), attachments: { page: null }, pageRequested: true, pageError: '正文提取失败。' });
-  assert.equal(f.root.querySelector('[data-chip="selection"]'), selectionChip);
-  assert.equal(selectionChip.querySelector('.excerpt').textContent, '新的划词');
-  assert.equal(f.root.querySelector('[data-chip="page"]'), pageChip);
-  assert.equal(pageChip.querySelector('.excerpt').textContent, '正文 · 未就绪');
-  assert.equal(f.root.activeElement, pageChip.querySelector('button'));
-  f.click('[data-pane="references"]');
-  const url = f.root.querySelector('[data-attachment="url"]');
-  const body = f.root.querySelector('[data-attachment="page"]');
-  for (const entry of [url, body]) {
-    entry.focus(); await f.api.refresh(); await f.api.refresh();
-    assert.equal(f.root.querySelector(`[data-attachment="${entry.dataset.attachment}"]`), entry);
-    assert.equal(f.root.activeElement, entry);
-  }
-  await f.seed({ title: '新页面标题', attachments: { url: false, page: null }, pageRequested: false, pageError: '', selection: null });
-  assert.equal(f.root.querySelector('.source').textContent, '新页面标题');
-  assert.equal(url.getAttribute('aria-pressed'), 'false');
-  assert.equal(body.getAttribute('aria-pressed'), 'false');
-  assert.equal(f.root.activeElement, body);
-  assert.equal(f.root.querySelectorAll('[data-chip]').length, 0);
-  f.click('[data-attachment="url"]'); await pause();
-  assert.equal(f.context.attachments.url, true, 'retained control reads the latest attachment state');
-  assert.deepEqual(f.submitted, []);
+test('background refresh preserves template controls and focused cancellation buttons', async t => {
+ const f = fixture(t); await f.seed({ selection: selection(), attachments: { url: true, page: page() } });
+ const cancel = f.root.querySelector('[data-chip="page"] button'); cancel.focus(); await f.api.refresh();
+ assert.equal(f.root.activeElement, cancel);
+ f.click('[data-pane="templates"]');
+ const checkbox = f.root.querySelector('[aria-label="发送时引用 网页正文"]'); checkbox.focus();
+ await f.seed({ title: '新页面标题', attachments: { url: false, page: null }, pageRequested: false, selectionIncluded: false, selection: null });
+ assert.equal(f.root.querySelector('[aria-label="发送时引用 网页正文"]'), checkbox);
+ assert.equal(f.root.activeElement, checkbox); assert.equal(checkbox.checked, false);
+ assert.equal(f.root.querySelector('.source').textContent, '新页面标题'); assert.deepEqual(f.submitted, []);
 });
 
 test('refresh cannot enable another body request while its reference control is pending', async t => {
@@ -296,23 +367,23 @@ test('refresh cannot enable another body request while its reference control is 
   t.after(release);
   const original = f.chrome.runtime.sendMessage;
   f.chrome.runtime.sendMessage = async message => {
-    if (message.request.type === 'SIDER_TAB_ATTACHMENT_SET' && message.request.kind === 'page') { started++; await gate; }
+    if (message.request.type === 'SIDER_TAB_TEMPLATE_SET' && message.request.id === PRESET_IDS.page) { started++; await gate; }
     return original(message);
   };
-  f.click('[data-pane="references"]');
-  const entry = f.root.querySelector('[data-attachment="page"]');
-  f.click('[data-attachment="page"]');
+  f.click('[data-pane="templates"]');
+  const entry = f.root.querySelector('[aria-label="发送时引用 网页正文"]');
+  f.click('[aria-label="发送时引用 网页正文"]');
   assert.equal(entry.disabled, true);
   await f.seed({ title: '采集中仍可更新标题', selection: selection('新的划词'), pageRequested: true });
   await f.api.refresh();
-  assert.equal(f.root.querySelector('[data-attachment="page"]'), entry);
-  assert.equal(entry.getAttribute('aria-pressed'), 'true');
+  assert.equal(f.root.querySelector('[aria-label="发送时引用 网页正文"]'), entry);
+  assert.equal(entry.parentElement.querySelector('input').checked, true);
   assert.equal(entry.disabled, true);
-  f.click('[data-attachment="page"]');
+  f.click('[aria-label="发送时引用 网页正文"]');
   assert.equal(started, 1);
   release(); await pause();
   assert.ok(f.context.attachments.page);
-  assert.equal(f.root.querySelector('.popover').hidden, true);
+  assert.equal(f.root.querySelector('.popover').hidden, false);
   assert.deepEqual(f.submitted, []);
 });
 
@@ -323,7 +394,7 @@ test('body chip keeps its pending cancel action disabled across refresh and deli
   t.after(release);
   const original = f.chrome.runtime.sendMessage;
   f.chrome.runtime.sendMessage = async message => {
-    if (message.request.type === 'SIDER_TAB_ATTACHMENT_SET' && message.request.kind === 'page' && !message.request.enabled) { started++; await gate; }
+    if (message.request.type === 'SIDER_TAB_TEMPLATE_SET' && message.request.id === PRESET_IDS.page && !message.request.enabled) { started++; await gate; }
     return original(message);
   };
   const cancel = f.root.querySelector('[aria-label="取消正文引用"]');
@@ -331,7 +402,7 @@ test('body chip keeps its pending cancel action disabled across refresh and deli
   await f.seed({}, { pageMode: 'file' }); await f.api.refresh();
   assert.equal(f.root.querySelector('[aria-label="取消正文引用"]'), cancel);
   assert.equal(cancel.disabled, true);
-  assert.equal(f.root.querySelector('[data-chip="page"] .excerpt').textContent, '正文 · 附件');
+  assert.equal(f.root.querySelector('[data-chip="page"] .excerpt').textContent, '网页正文 · 附件');
   f.click('[aria-label="取消正文引用"]');
   assert.equal(started, 1);
   release(); await pause(); await f.api.refresh();
@@ -340,43 +411,49 @@ test('body chip keeps its pending cancel action disabled across refresh and deli
   assert.deepEqual(f.submitted, []);
 });
 
-test('settings alone contain variables and control prefix, suffix, and exact native send text', async t => {
-  const f = fixture(t); await f.seed({ selection: selection(), attachments: { url: true, page: page() } });
-  f.click('[data-pane="settings"]');
-  f.root.querySelector('#selection-template').value = '请结合划词「{{selection}}」回答';
-  f.root.querySelector('#selection-position').value = 'prepend';
-  f.root.querySelector('#url-template').value = '网页url为：{{url}}';
-  f.root.querySelector('#url-position').value = 'append';
-  f.root.querySelector('#page-template').value = '网页正文：\n{{content}}';
-  f.click('#save-settings'); await pause();
-  f.editor.value = '这个词是什么意思？';
-  assert.equal(f.send('click'), true); await pause();
-  assert.equal(f.submitted.length, 1);
-  assert.ok(f.submitted[0].startsWith('请结合划词「当前选中的词汇」回答\n\n这个词是什么意思？\n\n网页url为：https://example.com/article\n\n【网页引用资料】'));
-  assert.ok(f.submitted[0].includes('标题：当前网页\n来源 URL：https://example.com/article'));
-  assert.ok(f.submitted[0].endsWith('网页正文：\n完整的网页正文\n\n【网页引用资料结束】'));
-  assert.equal(f.root.querySelector('.popover').hidden, true);
+test('each template edits its own format and position without changing the question', async t => {
+ const f = fixture(t); await f.seed({ selection: selection(), attachments: { url: true, page: page() } });
+ f.click('[data-pane="templates"]'); f.click('[aria-label="编辑预设 划词"]');
+ f.root.querySelector('#template-text').value = '请结合划词「{{selection}}」回答';
+ f.root.querySelector('#template-position').value = 'prepend';
+ [...f.root.querySelectorAll('#pane-body button')].find(button => button.textContent === '保存预设').click(); await pause();
+ f.editor.value = '这个词是什么意思？'; f.send(); await pause();
+ assert.equal(f.submitted.length, 1); assert.ok(f.submitted[0].startsWith('请结合划词「当前选中的词汇」回答\n\n这个词是什么意思？'));
+ assert.ok(f.submitted[0].includes('完整的网页正文')); assert.equal(f.root.querySelector('[data-pane="settings"]'), null);
 });
 
-test('Enter adds current selection once; retries and plain question edits do not duplicate it', async t => {
+test('Enter and button sends clear preset choices and later questions use no previous selection', async t => {
   const f = fixture(t); await f.seed({ selection: selection('Tabbit') });
   f.editor.value = '是什么？'; f.send('keydown'); await pause();
   const first = f.submitted[0];
+  assert.match(first, /网页划词：\nTabbit/);
+  assert.ok(Object.values(f.context.templateSelections).every(value => value === false));
+  assert.equal(f.context.selection.content, 'Tabbit');
+  assert.equal(f.root.querySelector('.chip'), null);
   f.send('keydown'); await pause();
-  assert.equal(f.submitted[1], first);
-  f.edit(first.replace('是什么？', '如何使用？')); f.send('click'); await pause();
-  assert.equal(f.submitted[2], first.replace('是什么？', '如何使用？'));
-  assert.equal(f.submitted[2].split('网页划词：').length - 1, 1);
+  assert.equal(f.submitted[1], '是什么？');
+  f.edit('如何使用？'); f.send('click'); await pause();
+  assert.equal(f.submitted[2], '如何使用？');
   f.edit('全新的问题'); f.send('click'); await pause();
-  assert.equal(f.submitted[3], '网页划词：\nTabbit\n\n全新的问题');
+  assert.equal(f.submitted[3], '全新的问题');
 });
 
-test('cancelled references restore a plain question on retry instead of resending stale context', async t => {
+test('automatic deselection restores a plain question on retry instead of resending stale context', async t => {
   const f = fixture(t); await f.seed({ selection: selection() });
   f.editor.value = '解释一下'; f.send(); await pause();
-  f.click('[aria-label="取消划词"]'); await pause();
   f.send(); await pause();
   assert.equal(f.submitted[1], '解释一下');
+});
+
+test('preset reset failure after dispatch preserves the sent prompt and never resends', async t => {
+  const f = fixture(t); await f.seed({ selection: selection() });
+  const sendMessage = f.chrome.runtime.sendMessage;
+  f.chrome.runtime.sendMessage = message => message.request.type === 'SIDER_TAB_TEMPLATES_CLEAR'
+    ? Promise.resolve({ ok: false, error: '存储失败' }) : sendMessage(message);
+  f.editor.value = '解释一下'; f.send(); await pause();
+  assert.equal(f.submitted.length, 1); assert.equal(f.editor.value, f.submitted[0]);
+  assert.equal(f.context.templateSelections[PRESET_IDS.selection], true);
+  assert.match(f.root.querySelector('.status.error').textContent, /取消预设勾选失败.*存储失败/);
 });
 
 test('Shift Enter, IME, and synthetic sends are not intercepted; ordinary questions replay unchanged', async t => {
@@ -392,13 +469,10 @@ test('Shift Enter, IME, and synthetic sends are not intercepted; ordinary questi
   assert.equal(f.submitted.length, 1);
 });
 
-test('invalid format variables preserve the plain question and block send', async t => {
-  const f = fixture(t);
-  await f.seed({ selection: selection() }, { selectionTemplate: '{{不存在的变量}}' });
-  f.editor.value = '总结一下';
-  f.send(); await pause();
-  assert.equal(f.editor.value, '总结一下'); assert.equal(f.submitted.length, 0);
-  assert.ok(f.root.querySelector('.status').classList.contains('error'));
+test('invalid template variables stay in the edit form without touching the question', async t => {
+ const f=fixture(t); await pause(); f.editor.value='保留问题'; f.click('[data-pane="templates"]'); f.click('[aria-label="编辑预设 划词"]');
+ f.root.querySelector('#template-text').value='{{不存在的变量}}'; [...f.root.querySelectorAll('#pane-body button')].find(button=>button.textContent==='保存预设').click(); await pause();
+ assert.equal(f.editor.value,'保留问题'); assert.equal(f.submitted.length,0); assert.match(f.root.querySelector('#template-error').textContent,/未知变量/);
 });
 
 test('source changes during preparation restore the question and prevent a stale native send', async t => {
@@ -422,7 +496,7 @@ test('native send waits for the latest body and repeated input starts only one c
   let release, captures = 0, latest = '发送前动态加载的新正文';
   const gate = new Promise(resolve => { release = resolve; });
   f.chrome.runtime.sendMessage = async message => {
-    if (message.request.type === 'SIDER_TAB_CONTEXT_GET' && message.request.refreshPage) {
+    if (message.request.type === 'SIDER_TEMPLATE_CONTEXT_GET' && message.request.refreshPage) {
       captures++;
       await gate;
       f.changeSource({ attachments: { ...f.context.attachments, page: page(latest) } });
@@ -447,7 +521,7 @@ test('failed fresh extraction blocks native send without falling back to the cac
   const original = f.chrome.runtime.sendMessage;
   let failed = true;
   f.chrome.runtime.sendMessage = async message => {
-    if (message.request.type === 'SIDER_TAB_CONTEXT_GET' && message.request.refreshPage) {
+    if (message.request.type === 'SIDER_TEMPLATE_CONTEXT_GET' && message.request.refreshPage) {
       f.changeSource({ pageRequested: true, pageError: failed ? '最新网页正文提取失败。' : '', attachments: { ...f.context.attachments, page: failed ? null : page('恢复后的最新正文') } });
     }
     return original(message);
@@ -504,7 +578,7 @@ test('permission failure offers an owner-panel permission request without changi
   const f = fixture(t); await f.setNeedsAccess(true);
   f.editor.value = '我的问题';
   const messages = []; f.window.parent.postMessage = (...args) => messages.push(args);
-  f.click('[data-pane="references"]'); f.click('[data-attachment="page"]'); await pause();
+  f.click('[data-pane="templates"]'); f.click('#pane-body [data-template-id="preset-page"]'); await pause();
   assert.equal(f.editor.value, '我的问题'); assert.equal(f.submitted.length, 0);
   assert.equal(f.root.querySelector('#source-access').hidden, false);
   f.click('#source-access'); await pause();
@@ -581,7 +655,7 @@ test('attachment operation status persists and repeated sends show progress with
   };
   f.editor.value = '请分析'; f.send(); await pause();
   const status = f.root.querySelector('.status');
-  assert.match(status.textContent, /正在准备正文附件/);
+  assert.match(status.textContent, /正在准备预设附件/);
   assert.equal(status.hidden, false);
   f.send('keydown'); await pause();
   assert.equal(status.hidden, false);
@@ -771,7 +845,7 @@ test('fresh body determines attachment delivery and stays unchanged throughout u
   assert.equal(captures, 1); assert.equal(manager.calls.length, 1);
   manager.release(); await pause();
   assert.equal(f.submitted.length, 1); assert.equal(captures, 1);
-  assert.ok(f.submitted[0].includes('网页正文.txt')); assert.equal(f.submitted[0].includes(latest), false);
+  assert.ok(f.submitted[0].includes('-预设.txt')); assert.equal(f.submitted[0].includes(latest), false);
 });
 
 test('fresh extraction failure clears a previously prepared owned attachment', async t => {
@@ -795,7 +869,7 @@ test('long body uploads separately while question, selection and URL use the nat
   const f = fixture(t, { attachmentManager: manager });
   const body = '完整网页正文。'.repeat(2500) + 'END-OF-PAGE';
   await f.seed({ selection: selection('Tabbit'), attachments: { url: true, page: page(body) } });
-  assert.equal(f.root.querySelector('[data-chip="page"] .excerpt').textContent, '正文 · 附件');
+  assert.equal(f.root.querySelector('[data-chip="page"] .excerpt').textContent, '网页正文 · 附件');
   f.editor.value = '分析这个词与网页的关系'; f.send('keydown'); await pause();
   assert.equal(manager.calls.length, 1);
   assert.ok(manager.calls[0].content.endsWith(`${body}\n\n【网页引用资料结束】`));
@@ -805,9 +879,10 @@ test('long body uploads separately while question, selection and URL use the nat
   assert.ok(f.submitted[0].includes('网页 URL：https://example.com/article'));
   assert.ok(f.submitted[0].includes(manager.calls[0].name));
   assert.equal(f.submitted[0].includes('END-OF-PAGE'), false);
+  assert.ok(Object.values(f.context.templateSelections).every(value => value === false));
   f.send(); await pause();
-  assert.equal(manager.calls.length, 1, 'retry reuses the ready native attachment');
-  assert.equal(f.submitted[1], f.submitted[0]);
+  assert.equal(manager.calls.length, 1, 'later sends do not upload deselected presets');
+  assert.equal(f.submitted[1], '分析这个词与网页的关系');
 });
 
 test('send waits for upload completion and repeated Enter does not start another upload', async t => {
@@ -822,7 +897,7 @@ test('send waits for upload completion and repeated Enter does not start another
   assert.equal(f.submitted.length, 1);
 });
 
-test('the message names the unique actual attachment and retries still reuse its logical body', async t => {
+test('the message names the unique actual attachment and later sends omit its deselected body', async t => {
   const nativeName = '当前网页-sider-ef43bd890c173a2f-网页正文.txt';
   const manager = attachmentFixture({ nativeName });
   const f = fixture(t, { attachmentManager: manager });
@@ -833,7 +908,7 @@ test('the message names the unique actual attachment and retries still reuse its
   assert.equal(f.submitted[0].includes(`《${manager.calls[0].name}》`), false);
   f.send(); await pause();
   assert.equal(manager.calls.length, 1);
-  assert.equal(f.submitted[1], f.submitted[0]);
+  assert.equal(f.submitted[1], '请总结');
 });
 
 test('upload failure preserves both the question and selected body without a partial send', async t => {
@@ -843,6 +918,8 @@ test('upload failure preserves both the question and selected body without a par
   f.editor.value = '总结一下'; f.send(); await pause();
   assert.equal(f.editor.value, '总结一下'); assert.equal(f.submitted.length, 0);
   assert.ok(f.context.attachments.page);
+  assert.equal(f.context.templateSelections[PRESET_IDS.page], true);
+  assert.equal(f.calls.some(call => call.request.type === 'SIDER_TAB_TEMPLATES_CLEAR'), false);
   assert.match(f.root.querySelector('.status').textContent, /上传失败/);
 });
 
@@ -889,35 +966,27 @@ test('manual text mode sends full body beyond the removed legacy character limit
   assert.ok(f.submitted[0].endsWith(`网页正文：\n${body}\n\n【网页引用资料结束】`));
 });
 
-test('references only offer URL and body while default selection remains configurable', async t => {
-  const f = fixture(t); await f.seed({ selection: selection(), selectionIncluded: false }, { defaultSelection: false });
-  f.editor.value = '保留原问题';
-  f.click('[data-pane="references"]');
-  assert.deepEqual(Array.from(f.root.querySelectorAll('[data-attachment]'), entry => entry.dataset.attachment), ['url', 'page']);
-  assert.equal(f.root.querySelector('.selection-chip'), null);
-  f.click('[data-pane="settings"]');
-  assert.equal(f.root.querySelector('#default-selection').checked, false);
-  f.root.querySelector('#default-selection').checked = true;
-  f.click('#save-settings'); await pause();
-  assert.equal(f.settings.defaultSelection, true);
-  await f.seed({ selection: selection('新的划词'), selectionIncluded: true });
-  assert.equal(f.root.querySelector('.selection-chip .excerpt').textContent, '新的划词');
-  f.click('[data-pane="references"]');
-  assert.equal(f.root.querySelector('[data-attachment="selection"]'), null);
-  assert.equal(f.editor.value, '保留原问题');
-  assert.deepEqual(f.submitted, []);
+test('one template entrance contains three editable presets and no reference/settings buttons', async t => {
+ const f = fixture(t); await f.seed({ selection: selection(), selectionIncluded: false }, { defaultSelection: false });
+ f.editor.value = '保留原问题'; f.click('[data-pane="templates"]');
+ assert.equal(f.root.querySelector('[data-pane="references"]'), null); assert.equal(f.root.querySelector('[data-pane="settings"]'), null);
+ assert.equal(f.root.querySelectorAll('.template-row').length, 3);
+ f.click('[aria-label="编辑预设 划词"]'); assert.equal(f.root.querySelector('#template-default').checked, false);
+ f.root.querySelector('#template-default').checked = true;
+ [...f.root.querySelectorAll('#pane-body button')].find(button => button.textContent === '保存预设').click(); await pause();
+ assert.equal(f.settings.defaultSelection, true); assert.equal(f.editor.value, '保留原问题'); assert.deepEqual(f.submitted, []);
 });
 
 test('selection close uses the clear operation accepted by the previous background', async t => {
   const f = fixture(t); await f.seed({ selection: selection(), attachments: { url: true, page: page() } });
   f.editor.value = '取消后继续提问';
   f.click('[aria-label="取消划词"]'); await pause(); await f.api.refresh();
-  assert.equal(f.context.selection, null);
+  assert.equal(f.context.selectionIncluded, false);
   assert.equal(f.root.querySelector('.selection-chip'), null);
   assert.ok(f.root.querySelector('[data-chip="url"]'));
   assert.ok(f.root.querySelector('[data-chip="page"]'));
   assert.equal(f.root.querySelector('.status.error'), null);
-  assert.deepEqual(f.calls.filter(message => message.request.type !== 'SIDER_TAB_CONTEXT_GET').map(message => message.request), [{ type: 'SIDER_TAB_SELECTION_CLEAR' }]);
+  assert.deepEqual(f.calls.filter(message => !['SIDER_TAB_CONTEXT_GET', 'SIDER_PROMPT_TEMPLATES_GET'].includes(message.request.type)).map(message => message.request), [{ type: 'SIDER_TAB_TEMPLATE_SET', id: PRESET_IDS.selection, enabled: false }]);
   assert.equal(f.editor.value, '取消后继续提问');
   assert.deepEqual(f.submitted, []);
   f.send(); await pause();
@@ -930,13 +999,13 @@ test('selection close uses the clear operation accepted by the previous backgrou
 test('failed default body shows retry and cancellation while blocking a partial native send', async t => {
   const f = fixture(t); await f.seed({ pageRequested: true, pageError: '没有取得网页正文。' }, { defaultPage: true });
   f.editor.value = '需要正文才能回答';
-  assert.equal(f.root.querySelector('[data-chip="page"] .excerpt').textContent, '正文 · 未就绪');
+  assert.equal(f.root.querySelector('[data-chip="page"] .excerpt').textContent, '网页正文 · 未就绪');
   assert.equal(f.root.querySelector('#page-retry').hidden, false);
   f.send(); await pause();
   assert.deepEqual(f.submitted, []); assert.equal(f.editor.value, '需要正文才能回答');
   f.click('#page-retry'); await pause();
   assert.equal(f.root.querySelector('#page-retry').hidden, true);
-  assert.equal(f.root.querySelector('[data-chip="page"] .excerpt').textContent, '正文');
+  assert.equal(f.root.querySelector('[data-chip="page"] .excerpt').textContent, '网页正文');
   f.send(); await pause();
   assert.equal(f.submitted.length, 1);
   assert.ok(f.submitted[0].startsWith('需要正文才能回答\n\n【网页引用资料】'));

@@ -23,6 +23,51 @@ async function fixture(t, settings = normalizeAIWebSettings(), pickSendButton = 
   return { window, document, dialog, messages, picked, $: selector => document.querySelector(selector) };
 }
 
+test('Gemini Spark switch is persisted and defaults to the normal interface', async t => {
+  const f = await fixture(t);
+  const toggle = f.$('#ai-gemini-spark');
+  assert.equal(toggle.checked, false);
+  assert.equal(f.$('#ai-gemini-model').value, 'flash-lite');
+  assert.equal(f.$('#ai-gemini-thinking').checked, false);
+  toggle.click();
+  f.$('#ai-gemini-model').value = 'pro'; f.$('#ai-gemini-model').dispatchEvent(new f.window.Event('change'));
+  f.$('#ai-gemini-thinking').click();
+  f.$('#ai-save-settings').click(); await settle();
+  assert.equal(f.messages.at(-1).settings.geminiMode, 'spark');
+  assert.equal(f.messages.at(-1).settings.geminiModel, 'pro');
+  assert.equal(f.messages.at(-1).settings.geminiExtendedThinking, true);
+  assert.equal(toggle.checked, true);
+});
+
+test('per-site settings collapse independently and configuring another site preserves the active website', async t => {
+  const f = await fixture(t);
+  const menu = f.$('#ai-site-settings');
+  const gemini = f.$('[data-site-id="gemini"]');
+  const claude = f.$('[data-site-id="claude"]');
+  assert.equal(menu.open, false);
+  assert.equal(gemini.open, false);
+  assert.ok(gemini.contains(f.$('#ai-gemini-spark')));
+  menu.open = true; gemini.open = true; claude.open = true;
+  f.$('#ai-gemini-model').value = 'pro'; f.$('#ai-gemini-model').dispatchEvent(new f.window.Event('change'));
+  gemini.open = false;
+  claude.querySelector('button').click();
+  assert.ok(claude.contains(f.$('#ai-custom-fields')));
+  f.$('#ai-selector-send').value = '#claude-send';
+  claude.open = false; menu.open = false;
+  f.$('#ai-save-settings').click(); await settle();
+  assert.equal(menu.open, true); assert.equal(claude.open, true);
+  assert.equal(f.messages.some(message => message.type === 'SIDER_AI_WEB_SETTINGS_SAVE'), false);
+  f.$('#ai-apply-site').click();
+  assert.equal(f.$('#ai-active-site').value, 'chatgpt');
+  assert.equal(f.$('[data-site-id="gemini"]').open, false);
+  assert.equal(f.$('[data-site-id="claude"]').open, true);
+  f.$('#ai-save-settings').click(); await settle();
+  const saved = f.messages.at(-1).settings;
+  assert.equal(saved.activeSiteId, 'chatgpt');
+  assert.equal(saved.builtinOverrides.claude.selectors.send, '#claude-send');
+  assert.equal(saved.geminiModel, 'pro');
+});
+
 test('builtin send-button calibration saves selectors while site identity and the existing custom sites remain intact', async t => {
   const custom = { id: 'custom-fixture-0001', name: 'Custom', url: 'https://my-ai.test' };
   const f = await fixture(t, { activeSiteId: 'chatgpt', customSites: [custom] });

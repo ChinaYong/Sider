@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TAB_CONTEXT_PREFIX, CONTEXT_SETTINGS_KEY, DEFAULT_CONTEXT_SETTINGS } from '../src/context.js';
+import { UNIFIED_TEMPLATES_KEY, templateSettings } from '../src/prompt-templates.js';
 import { getTabContext, updateTabSelection, setTabAttachment, applyTabDefaults, requestTabPage, invalidateTabSource, clearTabSelection, resetTabContext, removeTabContext, getContextSettings, patchContextSettings } from '../src/context-store.js';
 
 let sessionData = {}, localData = {}, failSessionWrite = false, failLocalWrite = false;
@@ -13,7 +14,7 @@ globalThis.chrome = { storage: {
     remove: async key => { delete sessionData[key]; },
   },
   local: {
-    get: async key => structuredClone({ [key]: localData[key] }),
+    get: async key => structuredClone(Object.fromEntries((Array.isArray(key) ? key : [key]).map(name => [name, localData[name]]))),
     set: async update => { if (failLocalWrite) { failLocalWrite = false; throw new Error('QUOTA_BYTES exceeded'); } localData = structuredClone({ ...localData, ...update }); },
   },
 } };
@@ -152,7 +153,7 @@ test('settings changes merge atomically and settings write failure preserves the
   assert.deepEqual(await getContextSettings(), settings);
   await assert.rejects(patchContextSettings({ pageThreshold: 0 }), /附件阈值/);
   await assert.rejects(patchContextSettings({ urlPosition: 'unknown' }), /追加位置/);
-  assert.deepEqual(localData[CONTEXT_SETTINGS_KEY], settings);
+  assert.deepEqual(templateSettings(localData[UNIFIED_TEMPLATES_KEY]), settings);
 });
 
 test('old send budgets migrate to attachment defaults without changing saved formats or the raw record on read', async () => {
@@ -175,7 +176,7 @@ test('old send budgets migrate to attachment defaults without changing saved for
   assert.equal(updated.pageMode, 'file');
   assert.equal(updated.pageThreshold, 10000);
   assert.equal(updated.pageTemplate, legacy.pageTemplate);
-  assert.equal(Object.hasOwn(localData[CONTEXT_SETTINGS_KEY], 'maxChars'), false);
+  assert.equal(Object.hasOwn(templateSettings(localData[UNIFIED_TEMPLATES_KEY]), 'maxChars'), false);
 });
 
 test('concurrent attachment settings updates merge modes, integer thresholds and file templates', async () => {
@@ -204,7 +205,7 @@ test('invalid attachment settings reject atomically and do not poison later vali
   for (const mode of ['unknown', '', null, 1]) await assert.rejects(patchContextSettings({ pageMode: mode }), /发送方式/);
   for (const template of [null, 123, {}, []]) await assert.rejects(patchContextSettings({ pageAttachmentTemplate: template }), /附件格式/);
   for (const patch of [null, 123, []]) await assert.rejects(patchContextSettings(patch), /设置格式/);
-  assert.deepEqual(localData[CONTEXT_SETTINGS_KEY], initial);
+  assert.deepEqual(templateSettings(localData[UNIFIED_TEMPLATES_KEY]), initial);
   assert.equal((await patchContextSettings({ pageMode: 'auto', pageThreshold: 1 })).pageThreshold, 1);
   assert.equal((await patchContextSettings({ pageThreshold: 1000000 })).pageThreshold, 1000000);
 });
@@ -215,7 +216,7 @@ test('obsolete maxChars patches are ignored and never become an attachment thres
   for (const maxChars of [999, 64000, -1, 'invalid']) {
     const next = await patchContextSettings({ maxChars });
     assert.deepEqual(next, saved);
-    assert.equal(Object.hasOwn(localData[CONTEXT_SETTINGS_KEY], 'maxChars'), false);
+    assert.equal(Object.hasOwn(templateSettings(localData[UNIFIED_TEMPLATES_KEY]), 'maxChars'), false);
   }
 });
 
@@ -245,7 +246,7 @@ test('default patches validate booleans atomically and failed writes retain the 
   const before = await patchContextSettings({ defaultSelection: false, defaultUrl: true });
   for (const key of ['defaultSelection', 'defaultUrl', 'defaultPage']) {
     for (const value of ['false', 0, null, {}, []]) {
-      await assert.rejects(patchContextSettings({ [key]: value, pageTemplate: '不应保存' }), /默认附加/);
+      await assert.rejects(patchContextSettings({ [key]: value, pageTemplate: '不应保存' }), /默认勾选/);
       assert.deepEqual(await getContextSettings(), before);
     }
   }
@@ -277,7 +278,7 @@ test('initial defaults apply once and explicit cancellation survives polling and
   await updateTabSelection(1, source, selected('词'));
   assert.deepEqual(await applyTabDefaults(1, settings), cancelled);
   const newSelection = await updateTabSelection(1, source, selected('新词'));
-  assert.equal(newSelection.selectionIncluded, true);
+  assert.equal(newSelection.selectionIncluded, false);
   assert.equal(newSelection.attachments.url, false); assert.equal(newSelection.pageRequested, false);
 });
 
@@ -287,7 +288,7 @@ test('new selections honor a disabled default while explicit inclusion survives 
   await setTabAttachment(1, 'selection', true);
   const same = await updateTabSelection(1, { ...source, title: '新标题' }, { ...selected('词'), title: '新标题' });
   assert.equal(same.selectionIncluded, true);
-  assert.equal((await updateTabSelection(1, source, selected('新词'))).selectionIncluded, false);
+  assert.equal((await updateTabSelection(1, source, selected('新词'))).selectionIncluded, true);
   await assert.rejects(setTabAttachment(2, 'selection', true), /划词/);
   await assert.rejects(setTabAttachment(1, 'selection', 'true'), /划词/);
 });

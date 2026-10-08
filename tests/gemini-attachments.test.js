@@ -104,6 +104,12 @@ test('Gemini current tiles wait for visible native progress and the actual enabl
   send.disabled=false;await pending;assert.equal(f.manager.isReady(spec),true);assert.equal(f.uploads.length,1);
 });
 
+test('Gemini can finish a template upload before an empty draft enables its native sender',async t=>{
+ const f = fixture(t,{onUpload(file,add){add(file.name);}}); f.editor.textContent=''; f.document.querySelector('.send-button').disabled=true;
+ await f.manager.prepare(spec,{requireSendReady:false}); assert.equal(f.manager.isReady(spec),true);
+ assert.equal(f.document.querySelector('.send-button').disabled,true); assert.equal(f.uploads.length,1);
+});
+
 test('Gemini native error icons report tooltip reasons and clean only the owned close control',async t=>{
   const f=fixture(t,{onUpload(file,add){const owned=add(file.name);const error=f.document.createElement('mat-icon');error.setAttribute('fonticon','error');error.setAttribute('aria-hidden','true');owned.tile.append(error);owned.outer.setAttribute('aria-describedby','reason');const tooltip=f.document.createElement('div');tooltip.id='reason';tooltip.textContent='文件上传失败：不支持此文件';f.document.body.append(tooltip);}}),user=f.card('user.txt');
   await assert.rejects(f.manager.prepare(spec),/不支持此文件/);assert.equal(f.uploads.length,1);assert.equal(f.drops,0);assert.equal(f.removes.length,1);assert.equal(user.outer.isConnected,true);assert.equal(f.editor.textContent,'原问题');

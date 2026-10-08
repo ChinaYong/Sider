@@ -98,12 +98,14 @@ export function createGeminiAttachmentDriver(document, adapter) {
       if (detail && detail.toLowerCase() !== 'error') return detail;
       return (descriptions(card).find(text => !text.toLowerCase().endsWith('.txt') && /error|fail|不支持|失败|无法|出错/i.test(text)) || detail).slice(0, 1000);
     },
-    ready(card, name) {
+    ready(card, name, { requireSendReady = true } = {}) {
       const remove = removeButton(card);
       // Native tile close buttons use visibility:hidden until hover. The tile
       // itself must be visible, but that presentation rule is not upload state.
       if (!namesCard(card, name) || hasVisible(card, PENDING) || hasVisible(card, FAILURE) || !remove || remove.closest('[hidden],[inert]') || isDisabledControl(remove)) return false;
-      if (tileNames(card, name)) return Boolean(adapter.findSendButton());
+      // A fill or empty-draft direct template uploads before its description
+      // exists. The native sender can stay disabled until that text is written.
+      if (tileNames(card, name)) return !requireSendReady || Boolean(adapter.findSendButton());
       return card.getAttribute('data-state') === 'ready' || card.getAttribute('data-status') === 'complete'
         || [...card.querySelectorAll('button,a,[role="button"],.file-name,[data-testid="file-name"]')].some(element => element !== remove && !isDisabledControl(element)
           && [element.getAttribute('aria-label'), element.getAttribute('title'), element.textContent.trim()].includes(name));

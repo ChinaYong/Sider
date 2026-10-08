@@ -2,6 +2,7 @@ import { installEnhancement } from './enhancement.js';
 import { siteForURL } from '../ai-web.js';
 import { createWebAdapter } from './adapters.js';
 import { pickSendButton } from './send-picker.js';
+import { installGeminiDefaults } from './gemini-defaults.js';
 
 (() => {
   if (globalThis.__siderChatInitialized) return;
@@ -18,6 +19,7 @@ import { pickSendButton } from './send-picker.js';
   let siteConfirmed = false;
   let handshake;
   let picker;
+  let geminiDefaults;
 
   function isExtensionSender(sender) {
     if (sender?.id !== chrome.runtime.id) return false;
@@ -151,11 +153,26 @@ import { pickSendButton } from './send-picker.js';
     }
   }
 
+  function startGeminiDefaults() {
+    if (site?.id !== 'gemini' || geminiDefaults) return;
+    geminiDefaults = installGeminiDefaults({ document, async getSettings() {
+      const result = await chrome.runtime.sendMessage({ type: 'SIDER_GEMINI_DEFAULTS_GET' });
+      if (!result?.ok) throw new Error(result?.error || '无法读取 Gemini 默认设置。');
+      return result.settings;
+    }, onResult(result) {
+      document.documentElement.setAttribute('data-sider-gemini-defaults', result.complete ? 'applied' : result.reason || 'failed');
+      if (!result.complete) console.warn('[Sider] Gemini 默认设置未完成：', result.reason);
+    } });
+    geminiDefaults.start();
+  }
+
   connectBridge();
+  startGeminiDefaults();
   window.addEventListener('pagehide', () => {
     clearTimeout(reconnect);
     closeHandshake();
     picker?.abort();
+    geminiDefaults?.dispose();
     enhancement?.dispose();
   });
 })();

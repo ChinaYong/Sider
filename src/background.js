@@ -1,7 +1,10 @@
 import { getState, patchState, addReference, removeReference, updateReference, setReferenceSelected } from './store.js';
-import { TAB_CONTEXT_PREFIX, CONTEXT_SETTINGS_KEY } from './context.js';
-import { getTabContext, updateTabSelection, setTabAttachment, applyTabDefaults, requestTabPage, invalidateTabSource, clearTabSelection, resetTabContext, removeTabContext, getContextSettings, patchContextSettings } from './context-store.js';
-import { AI_WEB_SETTINGS_KEY, BUILTIN_AI_SITES, normalizeAIWebSettings, validateAIWebSettings, normalizeCustomAISite, listAISites, selectedAISite, siteForURL, aiSitePattern } from './ai-web.js';
+import { TAB_CONTEXT_PREFIX, expandTemplateItem } from './context.js';
+import { getTabContext, updateTabSelection, setTabAttachment, applyTemplateDefaults, setTabTemplate, clearTabTemplates, requestTabPage, invalidateTabSource, clearTabSelection, resetTabContext, removeTabContext, getContextSettings, patchContextSettings } from './context-store.js';
+import { AI_WEB_SETTINGS_KEY, BUILTIN_AI_SITES, aiSiteURL, normalizeAIWebSettings, validateAIWebSettings, normalizeCustomAISite, listAISites, selectedAISite, siteForURL, aiSitePattern } from './ai-web.js';
+import { UNIFIED_TEMPLATES_KEY, PRESET_IDS, getTemplates, validateTemplates } from './prompt-templates.js';
+import { needsPageVariables, needsTemplateSelection } from './variables.js';
+import { CONFIGURATION_KEYS, ENABLED_ORIGINS_KEY, exportConfiguration, validateConfiguration, configurationStorage } from './configuration.js';
 
 const extensionRoot = chrome.runtime.getURL('/');
 const recentSources = new Map();
@@ -10,7 +13,7 @@ const chatPorts = new Set();
 const embedRegistrations = new Map();
 const panelPorts = new Map();
 const EMBED_STORAGE_KEY = 'siderEmbedRegistrations';
-const ENHANCEMENT_MESSAGES = new Set(['SIDER_TAB_CONTEXT_GET', 'SIDER_TAB_ATTACHMENT_SET', 'SIDER_TAB_SELECTION_CLEAR', 'SIDER_CONTEXT_SETTINGS_PATCH', 'SIDER_SOURCE_INFO']);
+const ENHANCEMENT_MESSAGES = new Set(['SIDER_TAB_CONTEXT_GET', 'SIDER_TAB_ATTACHMENT_SET', 'SIDER_TAB_TEMPLATE_SET', 'SIDER_TAB_TEMPLATES_CLEAR', 'SIDER_TAB_SELECTION_CLEAR', 'SIDER_CONTEXT_SETTINGS_PATCH', 'SIDER_SOURCE_INFO', 'SIDER_TEMPLATE_CONTEXT_GET', 'SIDER_PROMPT_TEMPLATES_GET', 'SIDER_PROMPT_TEMPLATES_SAVE']);
 const CONTENT_MESSAGES = new Set(['SIDER_SELECTION_CHANGED', 'SIDER_OPEN_SOURCE_PANEL']);
 const tabOperations = new Map();
 const liveSources = new Map();
@@ -30,6 +33,11 @@ let aiSettingsQueue = Promise.resolve();
 let installedEmbedSignature = '';
 let installedEmbedRuleIds = [EMBED_RULE_ID];
 let aiScriptsQueue = Promise.resolve();
+let configurationQueue = Promise.resolve();
+function configurationOperation(operation) {
+  const pending = configurationQueue.then(operation);
+  configurationQueue = pending.catch(() => {}); return pending;
+}
 
 function syncAIScripts(settings = aiWebSettings) {
   const operation = aiScriptsQueue.then(() => performAIScriptSync(settings));
@@ -56,7 +64,7 @@ async function performAIScriptSync(settings) {
 }
 
 async function saveAISettings(raw) {
-  const operation = aiSettingsQueue.then(async () => {
+  const operation = configurationOperation(async () => {
     await aiSettingsInitialization;
     const settings = validateAIWebSettings(raw);
     const selected = selectedAISite(settings);
@@ -100,6 +108,7 @@ function authorize(message, sender) {
   if (!message || typeof message.type !== 'string') throw new Error('请求格式错误。');
   if (isExtensionSender(sender)) return;
   if (message.type === 'SIDER_CHAT_READY' && isChatSender(sender)) return;
+  if (message.type === 'SIDER_GEMINI_DEFAULTS_GET' && isChatSender(sender)) return;
   if (message.type === 'SIDER_ENHANCEMENT_REQUEST' && isChatSender(sender) && message.embedded && embedRegistration(sender, message.bridgeId)) return;
   if (isPageSender(sender) && !isChatURL(sender.url) && CONTENT_MESSAGES.has(message.type)) {
     if (message.type === 'SIDER_CAPTURE' && message.tabId != null && message.tabId !== sender.tab.id) {
@@ -237,13 +246,14 @@ async function syncSourceContext(tabId) {
   return { context: await updateTabSelection(tabId, { url: current.url, title: current.title || result.source.title }, result.reference || null), needsAccess: false };
 }
 
-async function contextResponse(tabId, sync = true, { defaultKinds, settings: savedSettings, refreshPage = false } = {}) {
+async function contextResponse(tabId, sync = true, { defaultKinds, settings: savedSettings, refreshPage = false, knownContext } = {}) {
+  const templates = await getTemplates();
   let snapshot;
   if (sync) {
     const settings = savedSettings || await getContextSettings();
     try {
       snapshot = await syncSourceContext(tabId);
-      snapshot.context = await applyTabDefaults(tabId, settings, defaultKinds);
+      snapshot.context = await applyTemplateDefaults(tabId, templates, defaultKinds?.map(kind => PRESET_IDS[kind]));
       if (snapshot.needsAccess) {
         if (snapshot.context.pageRequested) snapshot.context = await requestTabPage(tabId, sourceAccessError().message);
       } else if (snapshot.context.pageRequested && (refreshPage || (!snapshot.context.attachments.page && !snapshot.context.pageError))) {
@@ -261,25 +271,21 @@ async function contextResponse(tabId, sync = true, { defaultKinds, settings: sav
       }
       else {
         await invalidateTabSource(tabId);
-        const context = await applyTabDefaults(tabId, settings, defaultKinds);
+        const context = await applyTemplateDefaults(tabId, templates, defaultKinds?.map(kind => PRESET_IDS[kind]));
         snapshot = { context: context.pageRequested ? await requestTabPage(tabId, error.message) : context, needsAccess: true };
       }
     }
   } else snapshot = { context: await getTabContext(tabId), needsAccess: false };
-  return { ok: true, ...snapshot, settings: await getContextSettings() };
+  if (!refreshPage && knownContext?.tabId === tabId && knownContext.revision === snapshot.context.revision) {
+    return { ok: true, contextUnchanged: true, needsAccess: snapshot.needsAccess, settings: await getContextSettings() };
+  }
+  return { ok: true, ...snapshot, settings: await getContextSettings(), templates };
 }
 
 async function captureRequestedPage(tabId) {
   const version = sourceVersions.get(tabId) || 0;
   try {
-    const tab = await sourceById(tabId);
-    if (tab.status === 'loading') throw new Error('来源网页正在加载，请等待完成后重试正文。');
-    const result = await chrome.tabs.sendMessage(tabId, { type: 'SIDER_PAGE_CAPTURE', kind: 'page' }, { frameId: 0 });
-    if (!result?.ok || !result.reference) throw new Error(result?.error || '没有取得网页正文。');
-    validateReference(result.reference, {});
-    const current = await sourceById(tabId);
-    if (result.reference.url !== current.url || current.url !== tab.url || current.status === 'loading' || version !== (sourceVersions.get(tabId) || 0)) throw new Error('页面已经跳转，请重新引用正文。');
-    return await setTabAttachment(tabId, 'page', result.reference);
+    return await setTabAttachment(tabId, 'page', await capturePageSnapshot(tabId));
   } catch (error) {
     if (version !== (sourceVersions.get(tabId) || 0) || error.code === 'SOURCE_UNSUPPORTED') throw error;
     const context = await requestTabPage(tabId, error?.message || '没有取得网页正文，请重试或取消正文引用。');
@@ -288,27 +294,68 @@ async function captureRequestedPage(tabId) {
   }
 }
 
-function changeTabAttachment(tabId, kind, enabled) {
+async function capturePageSnapshot(tabId) {
+  const version = sourceVersions.get(tabId) || 0;
+  const tab = await sourceById(tabId);
+  if (tab.status === 'loading') throw new Error('来源网页正在加载，请等待完成后重试正文。');
+  const result = await chrome.tabs.sendMessage(tabId, { type: 'SIDER_PAGE_CAPTURE', kind: 'page' }, { frameId: 0 });
+  if (!result?.ok || !result.reference) throw new Error(result?.error || '没有取得网页正文。');
+  validateReference(result.reference, {});
+  const current = await sourceById(tabId);
+  if (result.reference.url !== current.url || current.url !== tab.url || current.status === 'loading' || version !== (sourceVersions.get(tabId) || 0)) throw new Error('页面已经跳转，请重新引用正文。');
+  return result.reference;
+}
+
+function templateContext(tabId, inner) {
   return withTab(tabId, async () => {
-    if (!['selection', 'url', 'page'].includes(kind) || typeof enabled !== 'boolean') throw new Error('网页引用选项无效。');
+    const ids = Array.isArray(inner.ids) ? inner.ids : [];
+    const templates = (await getTemplates()).filter(item => ids.includes(item.id));
+    const needsPage = inner.needPage || templates.some(item => needsPageVariables(item.text) || item.delivery !== 'text' && needsPageVariables(item.attachmentText));
+    const result = await contextResponse(tabId, true, { refreshPage: inner.refreshPage === true && needsPage });
+    if (needsPage) {
+      if (result.needsAccess) throw sourceAccessError();
+      if (result.context.pageError) throw new Error(result.context.pageError);
+      result.variablePage = result.context.attachments.page || await capturePageSnapshot(tabId);
+    }
+    return result;
+  });
+}
+
+function changeTabAttachment(tabId, kind, enabled) {
+  if (!Object.hasOwn(PRESET_IDS, kind)) throw new Error('网页引用选项无效。');
+  return changeTabTemplate(tabId, PRESET_IDS[kind], enabled);
+}
+
+function changeTabTemplate(tabId, id, enabled) {
+  return withTab(tabId, async () => {
+    const templates = await getTemplates();
     if (!enabled) {
-      await applyTabDefaults(tabId, await getContextSettings());
-      await setTabAttachment(tabId, kind, false);
+      await setTabTemplate(tabId, id, false, templates);
       return contextResponse(tabId, false);
     }
     await syncSourceContext(tabId);
-    await applyTabDefaults(tabId, await getContextSettings());
-    if (kind === 'page') {
+    const template = templates.find(item => item.id === id);
+    const wasSelected = Boolean((await getTabContext(tabId)).templateSelections?.[id]);
+    const next = await setTabTemplate(tabId, id, true, templates);
+    if (template && needsTemplateSelection(template) && !next.selection?.content) return contextResponse(tabId, false);
+    if (next.pageRequested) {
       await requestTabPage(tabId);
       await captureRequestedPage(tabId);
-    } else await setTabAttachment(tabId, kind, true);
+    }
+    if (template) {
+      const errors = expandTemplateItem(template, await getTabContext(tabId)).errors;
+      if (errors.length) {
+        if (!wasSelected) await setTabTemplate(tabId, id, false, templates);
+        throw new Error(errors[0]);
+      }
+    }
     return contextResponse(tabId, false);
   });
 }
 
 function changeContextSettings(tabId, patch) {
   return withTab(tabId, async () => {
-    const { settings, changedDefaults } = await patchContextSettings(patch, { includeChanges: true });
+    const { settings, changedDefaults } = await configurationOperation(() => patchContextSettings(patch, { includeChanges: true }));
     return contextResponse(tabId, changedDefaults.length > 0, { defaultKinds: changedDefaults, settings });
   });
 }
@@ -318,6 +365,7 @@ function clearCurrentSelection(tabId) {
     try { await chrome.tabs.sendMessage(tabId, { type: 'SIDER_PAGE_CLEAR_SELECTION' }, { frameId: 0 }); }
     catch { /* Storage cancellation still works if the source is unavailable. */ }
     await clearTabSelection(tabId);
+    await setTabTemplate(tabId, PRESET_IDS.selection, false, await getTemplates());
     return contextResponse(tabId, false);
   });
 }
@@ -654,10 +702,28 @@ async function enhancementRequest(message, sender) {
   const tabId = registration.tabId;
   if (!Number.isInteger(tabId)) throw new Error('侧栏尚未绑定来源标签页，请关闭旧侧栏并在来源网页上重新打开。');
   if (inner.type === 'SIDER_SOURCE_INFO') return sourceInfo({ tabId });
-  if (inner.type === 'SIDER_TAB_CONTEXT_GET') return withTab(tabId, () => contextResponse(tabId, true, { refreshPage: inner.refreshPage === true }));
+  if (inner.type === 'SIDER_TAB_CONTEXT_GET') return withTab(tabId, () => contextResponse(tabId, true, { refreshPage: inner.refreshPage === true, knownContext: inner.knownContext }));
   if (inner.type === 'SIDER_TAB_ATTACHMENT_SET') return changeTabAttachment(tabId, inner.kind, inner.enabled);
+  if (inner.type === 'SIDER_TAB_TEMPLATE_SET') return changeTabTemplate(tabId, inner.id, inner.enabled);
+  if (inner.type === 'SIDER_TAB_TEMPLATES_CLEAR') return withTab(tabId, async () => {
+    await clearTabTemplates(tabId, await getTemplates(), inner.expectedContext);
+    return contextResponse(tabId, false);
+  });
   if (inner.type === 'SIDER_TAB_SELECTION_CLEAR') return clearCurrentSelection(tabId);
   if (inner.type === 'SIDER_CONTEXT_SETTINGS_PATCH') return changeContextSettings(tabId, inner.patch);
+  if (inner.type === 'SIDER_TEMPLATE_CONTEXT_GET') return templateContext(tabId, inner);
+  if (inner.type === 'SIDER_PROMPT_TEMPLATES_GET') return { ok: true, templates: await getTemplates() };
+  if (inner.type === 'SIDER_PROMPT_TEMPLATES_SAVE') {
+    return configurationOperation(async () => {
+      const templates = validateTemplates(inner.templates);
+      const previous = await getTemplates();
+      if (inner.expected && JSON.stringify(inner.expected) !== JSON.stringify(previous)) throw new Error('预设已在另一侧栏修改，请重新打开预设菜单后保存。');
+      await chrome.storage.local.set({ [UNIFIED_TEMPLATES_KEY]: templates });
+      const changed = templates.filter(item => previous.find(old => old.id === item.id)?.defaultIncluded !== item.defaultIncluded).map(item => item.id);
+      await applyTemplateDefaults(tabId, templates, changed);
+      return contextResponse(tabId, false);
+    });
+  }
 }
 
 async function sourceInfo(target) {
@@ -681,7 +747,7 @@ async function requestSourceAccess(target) {
 }
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  const settingsChanged = area === 'local' && Object.hasOwn(changes, CONTEXT_SETTINGS_KEY);
+  const settingsChanged = area === 'local' && changes[UNIFIED_TEMPLATES_KEY]?.oldValue !== undefined;
   const tabIds = area === 'session' ? new Set(Object.keys(changes).filter(key => key.startsWith(TAB_CONTEXT_PREFIX)).map(key => Number(key.slice(TAB_CONTEXT_PREFIX.length)))) : new Set();
   for (const entry of chatPorts) {
     const owner = embedRegistrations.get(entry.bridgeId);
@@ -694,14 +760,21 @@ async function openChat(siteId) {
   await aiSettingsInitialization;
   const site = listAISites(aiWebSettings).find(candidate => candidate.id === (siteId || aiWebSettings.activeSiteId)) || [...embedRegistrations.values()].find(registration => registration.site?.id === siteId)?.site;
   if (!site) throw new Error('此 AI 网站已移除，请更新 AI 网站设置。');
+  const desiredURL = aiSiteURL(site, aiWebSettings);
   const tabs = (await chrome.tabs.query({ url: aiSitePattern(site) })).filter(tab => parseURL(tab.url)?.origin === site.origin);
+  const preferredTabs = site.id !== 'gemini' ? tabs : tabs.filter(tab => {
+    const pathname = parseURL(tab.url)?.pathname || '';
+    const isSpark = pathname === '/spark' || pathname.startsWith('/spark/');
+    const desiredPath = new URL(desiredURL).pathname;
+    return isSpark === (desiredPath === '/spark' || desiredPath.startsWith('/spark/'));
+  });
   const currentWindow = await chrome.windows.getLastFocused();
-  const ranked = [...tabs].sort((a, b) =>
+  const ranked = [...preferredTabs].sort((a, b) =>
     Number(b.windowId === currentWindow.id) - Number(a.windowId === currentWindow.id) ||
     Number(b.active) - Number(a.active) || (b.lastAccessed || 0) - (a.lastAccessed || 0));
   const tab = ranked[0]
     ? await chrome.tabs.update(ranked[0].id, { active: true })
-    : await chrome.tabs.create({ url: site.url, active: true, windowId: currentWindow.id });
+    : await chrome.tabs.create({ url: desiredURL, active: true, windowId: currentWindow.id });
   if (Number.isInteger(tab.windowId)) await chrome.windows.update(tab.windowId, { focused: true });
   return tab;
 }
@@ -798,7 +871,7 @@ function siteScriptId(origin) {
 }
 
 function changeSite(message, sender, enabled) {
-  const operation = siteQueue.then(async () => {
+  const operation = siteQueue.then(() => configurationOperation(async () => {
     const tab = await sourceTab(message, sender);
     const origin = parseURL(tab.url).origin;
     const pattern = `${origin}/*`;
@@ -826,9 +899,47 @@ function changeSite(message, sender, enabled) {
       await chrome.tabs.sendMessage(candidate.id, { type: 'SIDER_ENABLE_SELECTION', enabled }, { frameId: 0 });
     }));
     return { ok: true, enabled, origin };
-  });
+  }));
   siteQueue = operation.catch(() => {});
   return operation;
+}
+
+async function syncSourceScripts(origins) {
+  if (!chrome.scripting.getRegisteredContentScripts) return;
+  const desired = [];
+  for (const origin of origins) if (await chrome.permissions.contains({ origins: [`${origin}/*`] })) desired.push({ id: siteScriptId(origin), matches: [`${origin}/*`], js: ['page-content.js'], runAt: 'document_idle', persistAcrossSessions: true });
+  const old = (await chrome.scripting.getRegisteredContentScripts()).filter(script => script.id.startsWith('sider-selection-'));
+  const removed = old.filter(script => !desired.some(next => next.id === script.id));
+  if (removed.length) await chrome.scripting.unregisterContentScripts({ ids: removed.map(script => script.id) });
+  const added = desired.filter(script => !old.some(previous => previous.id === script.id));
+  if (added.length) await chrome.scripting.registerContentScripts(added);
+}
+
+function importConfiguration(message) {
+  return configurationOperation(async () => {
+    await getTemplates();
+    const backup = validateConfiguration(message.backup);
+    const previous = exportConfiguration(await chrome.storage.local.get(CONFIGURATION_KEYS));
+    if (!message.expected || JSON.stringify(message.expected) !== JSON.stringify(previous.configuration)) throw new Error('预览后配置已变化，请重新选择文件并核对变更。已有配置保持原样。');
+    const settings = backup.configuration.aiWeb;
+    const site = selectedAISite(settings);
+    if (!await chrome.permissions.contains({ origins: [aiSitePattern(site)] })) throw new Error(`尚未获得 ${site.name} 的网站权限，已有配置保持原样。`);
+    try {
+      await syncAIScripts(settings); await syncSourceScripts(backup.configuration.enabledOrigins);
+      // One storage commit replaces every supported setting together.
+      await chrome.storage.local.set(configurationStorage(backup)); aiWebSettings = settings;
+    } catch (error) {
+      const restored = await Promise.allSettled([syncAIScripts(previous.configuration.aiWeb), syncSourceScripts(previous.configuration.enabledOrigins)]);
+      if (restored.some(result => result.status === 'rejected')) throw new Error(`${error.message}\n已有配置未改动，但网站脚本恢复失败，请在扩展管理页面重新加载 Sider 后重试。`);
+      throw error;
+    }
+    for (const origin of new Set([...previous.configuration.enabledOrigins, ...backup.configuration.enabledOrigins])) {
+      const enabled = backup.configuration.enabledOrigins.includes(origin);
+      const tabs = await chrome.tabs.query({ url: `${origin}/*` }).catch(() => []);
+      await Promise.allSettled(tabs.map(async tab => { if (enabled) await injectPage(tab.id); await chrome.tabs.sendMessage(tab.id, { type: 'SIDER_ENABLE_SELECTION', enabled }, { frameId: 0 }); }));
+    }
+    return { ok: true, settings };
+  });
 }
 
 async function handleMessage(message, sender) {
@@ -840,10 +951,13 @@ async function handleMessage(message, sender) {
       await aiSettingsInitialization;
       return { ok: true, settings: aiWebSettings, sites: listAISites(aiWebSettings) };
     case 'SIDER_AI_WEB_SETTINGS_SAVE': return saveAISettings(message.settings);
+    case 'SIDER_CONFIGURATION_EXPORT': await getTemplates(); return { ok: true, backup: exportConfiguration(await chrome.storage.local.get(CONFIGURATION_KEYS)) };
+    case 'SIDER_CONFIGURATION_IMPORT': return importConfiguration(message);
+    case 'SIDER_GEMINI_DEFAULTS_GET': return { ok: true, settings: { geminiModel: aiWebSettings.geminiModel, geminiExtendedThinking: aiWebSettings.geminiExtendedThinking } };
     case 'SIDER_ENHANCEMENT_REQUEST': return enhancementRequest(message, sender);
     case 'SIDER_SELECTION_CHANGED': return receiveSelection(message, sender);
     case 'SIDER_OPEN_SOURCE_PANEL': return changeTabAttachment(sender.tab.id, 'selection', true);
-    case 'SIDER_TAB_CONTEXT_GET': return withTab(message.tabId, () => contextResponse(message.tabId, true, { refreshPage: message.refreshPage === true }));
+    case 'SIDER_TAB_CONTEXT_GET': return withTab(message.tabId, () => contextResponse(message.tabId, true, { refreshPage: message.refreshPage === true, knownContext: message.knownContext }));
     case 'SIDER_TAB_ATTACHMENT_SET': return changeTabAttachment(message.tabId, message.kind, message.enabled);
     case 'SIDER_TAB_SELECTION_CLEAR': return clearCurrentSelection(message.tabId);
     case 'SIDER_CONTEXT_SETTINGS_PATCH': return changeContextSettings(message.tabId, message.patch);
@@ -905,7 +1019,7 @@ async function contextCapture(info, tab, kind) {
       result.context = await updateTabSelection(tab.id, source, reference);
     }
     if (!result.context.selection) throw new Error('请先在网页正文中划词。');
-    result.context = await setTabAttachment(tab.id, 'selection', true);
+    result.context = await setTabTemplate(tab.id, PRESET_IDS.selection, true, await getTemplates());
     return result;
   });
 }
@@ -998,7 +1112,10 @@ chrome.permissions.onRemoved?.addListener((removed) => {
   });
 });
 
-chrome.permissions.onAdded?.addListener(() => { void aiSettingsInitialization.then(syncAIScripts).catch(() => {}); });
+chrome.permissions.onAdded?.addListener(() => {
+  void aiSettingsInitialization.then(syncAIScripts).catch(() => {});
+  void chrome.storage.local.get(ENABLED_ORIGINS_KEY).then(stored => syncSourceScripts(stored[ENABLED_ORIGINS_KEY] || [])).catch(() => {});
+});
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !changes[AI_WEB_SETTINGS_KEY]) return;
   aiWebSettings = normalizeAIWebSettings(changes[AI_WEB_SETTINGS_KEY].newValue);

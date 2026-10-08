@@ -69,6 +69,22 @@ export function getComposerText(element) {
   return value.replace(/\r\n?/g, '\n');
 }
 
+export function captureComposerSelection(element) {
+  const document = element.ownerDocument;
+  const text = getComposerText(element);
+  if (document.activeElement !== element && !element.contains(document.activeElement)) return { from: text.length, to: text.length };
+  if (element.tagName === 'TEXTAREA') return { from: element.selectionStart, to: element.selectionEnd };
+  const selection = document.defaultView.getSelection();
+  if (!selection?.rangeCount) return { from: text.length, to: text.length };
+  const selected = selection.getRangeAt(0);
+  if (!element.contains(selected.startContainer) || !element.contains(selected.endContainer)) return { from: text.length, to: text.length };
+  const offset = (node, position) => {
+    const range = document.createRange(); range.selectNodeContents(element); range.setEnd(node, position);
+    return editableText(range.cloneContents()).length;
+  };
+  return { from: offset(selected.startContainer, selected.startOffset), to: offset(selected.endContainer, selected.endOffset) };
+}
+
 function waitForComposer(document, timeoutMs, locate) {
   const immediate = locate(document);
   if (immediate) return Promise.resolve(immediate);

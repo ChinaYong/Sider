@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { BUILTIN_AI_SITES, normalizeCustomAISite, normalizeAIWebSettings, validateAIWebSettings, listAISites, siteForURL, selectedAISite } from '../src/ai-web.js';
+import { BUILTIN_AI_SITES, GEMINI_MODE_SPARK, GEMINI_MODEL_PRO, GEMINI_NORMAL_URL, GEMINI_SPARK_URL, aiSiteURL, normalizeCustomAISite, normalizeAIWebSettings, normalizeGeminiDefaults, validateAIWebSettings, listAISites, siteForURL, selectedAISite } from '../src/ai-web.js';
 import { createWebAdapter } from '../src/content/adapters.js';
 import { installEnhancement } from '../src/content/enhancement.js';
 import { createNativeAttachmentDriver } from '../src/content/attachment-drivers.js';
@@ -130,6 +130,9 @@ test('generic native generation is scoped to an observed composer and never repl
 
 test('AI website settings default to ChatGPT and isolate site origins exactly', () => {
   assert.equal(normalizeAIWebSettings().activeSiteId, 'chatgpt');
+  assert.equal(normalizeAIWebSettings().geminiMode, 'normal');
+  assert.equal(normalizeAIWebSettings().geminiModel, 'flash-lite');
+  assert.equal(normalizeAIWebSettings().geminiExtendedThinking, false);
   assert.deepEqual(listAISites().map(site => site.id), ['chatgpt', 'gemini', 'claude']);
   assert.equal(siteForURL('https://chatgpt.com.evil.test/'), null);
   assert.equal(siteForURL('http://chatgpt.com/'), null);
@@ -137,6 +140,22 @@ test('AI website settings default to ChatGPT and isolate site origins exactly', 
   const settings = validateAIWebSettings({ activeSiteId: site.id, customSites: [site] });
   assert.equal(siteForURL('http://localhost:8181/new', settings).id, site.id);
   assert.equal(siteForURL('http://localhost:8182/new', settings), null);
+});
+
+test('Gemini interface mode resolves the normal and Spark entry URLs without changing its origin', () => {
+  const normal = selectedAISite({ activeSiteId: 'gemini', customSites: [] });
+  const spark = validateAIWebSettings({ activeSiteId: 'gemini', customSites: [], geminiMode: GEMINI_MODE_SPARK });
+  assert.equal(normal.url, GEMINI_NORMAL_URL);
+  assert.equal(aiSiteURL(normal, { geminiMode: 'normal' }), GEMINI_NORMAL_URL);
+  assert.equal(aiSiteURL(normal, spark), GEMINI_SPARK_URL);
+  assert.equal(new URL(aiSiteURL(normal, spark)).origin, normal.origin);
+  assert.equal(normalizeAIWebSettings({ activeSiteId: 'gemini', customSites: [], geminiMode: 'invalid' }).geminiMode, 'normal');
+  assert.throws(() => validateAIWebSettings({ activeSiteId: 'gemini', customSites: [], geminiMode: 'invalid' }), /界面设置无效/);
+  const defaults = validateAIWebSettings({ activeSiteId: 'gemini', customSites: [], geminiModel: GEMINI_MODEL_PRO, geminiExtendedThinking: true });
+  assert.deepEqual(normalizeGeminiDefaults(defaults), { model: GEMINI_MODEL_PRO, extendedThinking: true });
+  assert.equal(normalizeAIWebSettings({ activeSiteId: 'gemini', customSites: [], geminiModel: 'unknown' }).geminiModel, 'flash-lite');
+  assert.throws(() => validateAIWebSettings({ activeSiteId: 'gemini', customSites: [], geminiModel: 'unknown' }), /默认模型设置无效/);
+  assert.throws(() => validateAIWebSettings({ activeSiteId: 'gemini', customSites: [], geminiExtendedThinking: 'yes' }), /扩展思考设置无效/);
 });
 
 test('custom website validation rejects unsafe addresses, duplicate origins, reserved sites and corrupt persisted entries', () => {
@@ -147,7 +166,7 @@ test('custom website validation rejects unsafe addresses, duplicate origins, res
 });
 
 test('builtin selector overrides keep immutable site identity and preserve old settings without migration', () => {
-  assert.deepEqual(normalizeAIWebSettings(), { activeSiteId: 'chatgpt', customSites: [] });
+  assert.deepEqual(normalizeAIWebSettings(), { activeSiteId: 'chatgpt', customSites: [], geminiMode: 'normal', geminiModel: 'flash-lite', geminiExtendedThinking: false });
   const settings = validateAIWebSettings({ activeSiteId: 'claude', customSites: [custom()], builtinOverrides: { claude: { url: 'https://evil.test', adapter: 'generic', selectors: { send: ' #picked ' } } } });
   const site = selectedAISite(settings);
   assert.equal(site.origin, 'https://claude.ai'); assert.equal(site.adapter, 'claude'); assert.equal(site.selectors.send, '#picked');
@@ -399,11 +418,11 @@ test('reference controls render and open on a page that rejects HTML-string assi
   const api = installEnhancement({ document: f.document, chrome, bridgeId: 'native-controls-0003', adapter: f.adapter });
   t.after(() => api.dispose());
   await new Promise(resolve => setTimeout(resolve, 40));
-  api.root.querySelector('[data-pane="references"]').click();
+  api.root.querySelector('[data-pane="templates"]').click();
   assert.equal(api.root.querySelector('.popover').hidden, false);
-  assert.equal(api.root.querySelector('#pane-title').textContent, '引用当前网页');
-  api.root.querySelector('[data-pane="settings"]').click();
-  assert.ok(api.root.querySelector('#selection-template'));
+  assert.equal(api.root.querySelector('#pane-title').textContent, '预设');
+  api.root.querySelector('[aria-label="编辑预设 划词"]').click();
+  assert.ok(api.root.querySelector('#template-text'));
   assert.equal(api.host.isConnected, true);
 });
 

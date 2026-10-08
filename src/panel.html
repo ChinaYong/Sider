@@ -35,6 +35,17 @@
     <div class="dialog-title"><strong id="ai-settings-title">AI 网站设置</strong><button id="ai-close-settings" aria-label="关闭 AI 网站设置">×</button></div>
     <p>网站选择全局共用，新开或重新加载侧栏时生效。当前会话和问题保持原样。</p>
     <label for="ai-active-site">使用的 AI 网站</label><select id="ai-active-site"></select>
+    <details id="ai-site-settings" class="site-settings-menu">
+      <summary>网站专属设置<span>界面、模型、推理与控件</span></summary>
+      <div id="ai-site-groups"></div>
+      <div id="ai-gemini-options">
+    <div class="setting-toggle"><label for="ai-gemini-spark">打开 Gemini Spark 界面</label><input id="ai-gemini-spark" type="checkbox" role="switch" aria-label="打开 Gemini Spark 界面"></div>
+    <p class="setting-help">关闭时打开普通 Gemini 界面；此开关只影响 Gemini。</p>
+    <label for="ai-gemini-model">Gemini 默认模型</label><select id="ai-gemini-model"></select>
+    <div class="setting-toggle"><label for="ai-gemini-thinking">开启扩展思考</label><input id="ai-gemini-thinking" type="checkbox" role="switch" aria-label="开启 Gemini 扩展思考"></div>
+    <p class="setting-help">Gemini 页面加载后尝试选择模型和思考级别；是否可用取决于账号和原站当前版本。</p>
+      </div>
+    </details>
     <div class="settings-actions"><button id="ai-add-site">添加网站</button><button id="ai-edit-site" hidden>编辑网站</button><button id="ai-remove-site" hidden>从列表移除</button></div>
     <section id="ai-custom-fields" hidden>
       <label for="ai-site-name">网站名称</label><input id="ai-site-name" maxlength="80" placeholder="我的 AI 网站">
@@ -53,6 +64,17 @@
     </section>
     <p id="ai-settings-error" role="alert" hidden></p>
     <button id="ai-save-settings">保存全局设置</button>
+    <button id="configuration-open" type="button">配置导入／导出</button>
+    <p class="setting-help">备份预设、附件设置、AI 网站与控件、Gemini 选项和自动划词网站；不包含登录、权限、聊天或正文缓存。</p>
+  </dialog>
+  <dialog id="configuration-dialog" aria-labelledby="configuration-title">
+    <div class="dialog-title"><strong id="configuration-title">配置导入／导出</strong><button id="configuration-close" type="button" aria-label="关闭配置备份">×</button></div>
+    <p>导入会完整替换可自定义配置。选择文件后先检查变更，再执行替换；当前会话和草稿保留。</p>
+    <button id="configuration-export" type="button">导出完整配置</button>
+    <label for="configuration-file">选择 Sider JSON 配置文件</label><input id="configuration-file" type="file" accept=".json,application/json">
+    <pre id="configuration-preview"></pre>
+    <p id="configuration-status" role="status" aria-live="polite"></p>
+    <button id="configuration-apply" type="button" disabled>按预览完整替换配置</button>
   </dialog>
   <dialog id="site-dialog">
     <div class="dialog-title"><strong id="site-dialog-title">网页划词引用</strong><button id="close-site" aria-label="关闭网站授权">×</button></div>

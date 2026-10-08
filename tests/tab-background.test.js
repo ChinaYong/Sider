@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TAB_CONTEXT_PREFIX, CONTEXT_SETTINGS_KEY, composeContextPrompt } from '../src/context.js';
+import { AI_WEB_SETTINGS_KEY } from '../src/ai-web.js';
+import { PROMPT_TEMPLATES_KEY, UNIFIED_TEMPLATES_KEY, PRESET_IDS, newTemplate } from '../src/prompt-templates.js';
 
 function event() {
   const listeners = new Set();
@@ -66,7 +68,7 @@ function browserModel() {
   };
   function area(data, name) {
     return {
-      async get(key) { return structuredClone({ [key]: data[key] }); },
+      async get(key) { return structuredClone(Object.fromEntries((Array.isArray(key) ? key : [key]).map(name => [name, data[name]]))); },
       async set(update) {
         const changes = {};
         for (const [key, value] of Object.entries(update)) { changes[key] = { oldValue: data[key], newValue: structuredClone(value) }; data[key] = structuredClone(value); }
@@ -90,6 +92,177 @@ function browserModel() {
 }
 
 let sequence = 0;
+
+test('custom defaults apply only to the saving tab and cancelled choices survive polls and worker restart', async () => {
+ const f = await fixture(); await f.register(1); await f.register(2);
+ const previous = (await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_GET' })).templates;
+ const custom = newTemplate({ id: 'custom-default-001', name: '默认提示', text: '固定文本', defaultIncluded: false });
+ await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_SAVE', templates: [...previous, custom], expected: previous });
+ await f.wrapped(2, { type: 'SIDER_TAB_CONTEXT_GET' });
+ const changed = [...previous, { ...custom, defaultIncluded: true }];
+ const result = await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_SAVE', templates: changed, expected: [...previous, custom] });
+ assert.equal(result.context.templateSelections[custom.id], true);
+ assert.equal((await f.wrapped(2, { type: 'SIDER_TAB_CONTEXT_GET' })).context.templateSelections[custom.id], false);
+ await f.wrapped(1, { type: 'SIDER_TAB_TEMPLATE_SET', id: custom.id, enabled: false }); await f.restart();
+ assert.equal((await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' })).context.templateSelections[custom.id], false);
+});
+
+test('preset capture depends on edited variables; custom body metadata shares one fresh collection', async () => {
+ const f = await fixture(); await f.register(1);
+ const previous = (await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_GET' })).templates;
+ const templates = [...previous.map(item => item.preset === 'page' ? { ...item, text: '只引用 {{title}}', delivery: 'text', defaultIncluded: true } : item), newTemplate({ id: 'custom-meta-001', name: '资料时间', text: '{{page.capturedAt}}' }), newTemplate({ id: 'custom-body-001', name: '完整正文', text: '{{content}}' })];
+ await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_SAVE', templates, expected: previous });
+ assert.equal(f.sent.filter(item => item.message.type === 'SIDER_PAGE_CAPTURE').length, 0);
+ const captures = f.sent.filter(item => item.message.type === 'SIDER_PAGE_CAPTURE').length;
+ const response = await f.wrapped(1, { type: 'SIDER_TEMPLATE_CONTEXT_GET', ids: ['custom-meta-001', 'custom-body-001'], refreshPage: true });
+ assert.equal(response.ok, true); assert.equal(response.variablePage.content, 'A 的完整正文');
+ assert.equal(f.sent.filter(item => item.message.type === 'SIDER_PAGE_CAPTURE').length - captures, 1);
+ assert.equal(response.context.pageRequested, false);
+});
+
+test('a newly created default attaches on the saving page and fresh pages while existing pages keep their choices', async () => {
+ const f = await fixture(); await Promise.all([1,2,3].map(f.register));
+ await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' }); await f.wrapped(2, { type: 'SIDER_TAB_CONTEXT_GET' });
+ const previous = (await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_GET' })).templates;
+ const item = newTemplate({ id: 'custom-new-default-001', name: '新增默认项', text: '固定提示', defaultIncluded: true, action: 'send' });
+ const saved = await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_SAVE', templates: [...previous, item], expected: previous });
+ assert.equal(saved.context.templateSelections[item.id], true);
+ assert.equal((await f.wrapped(2, { type: 'SIDER_TAB_CONTEXT_GET' })).context.templateSelections[item.id], false);
+ assert.equal((await f.wrapped(3, { type: 'SIDER_TAB_CONTEXT_GET' })).context.templateSelections[item.id], true);
+ assert.equal(f.sent.some(request => request.message.type === 'SIDER_PAGE_CAPTURE'), false);
+});
+
+test('manual and default selection dependencies stay checked and wait without capture', async () => {
+ const f = await fixture(); await f.register(1);
+ const previous = (await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_GET' })).templates;
+ const item = newTemplate({ id: 'custom-selection-001', name: '选择与正文', text: '{{selection}} {{content}}', defaultIncluded: true });
+ const templates = [...previous, item];
+ await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_SAVE', templates, expected: previous });
+ assert.equal(f.sent.filter(call => call.message.type === 'SIDER_PAGE_CAPTURE').length, 0);
+ const result = await f.wrapped(1, { type: 'SIDER_TAB_TEMPLATE_SET', id: item.id, enabled: true });
+ assert.equal(result.ok, true); assert.equal(result.context.templateSelections[item.id],true); assert.equal(result.context.pageRequested,false);
+ assert.equal(f.sent.filter(call => call.message.type === 'SIDER_PAGE_CAPTURE').length,0);
+ await f.select(1,'新的划词'); const ready=await f.wrapped(1,{type:'SIDER_TAB_CONTEXT_GET'}); assert.equal(ready.context.templateSelections[item.id],true);
+ assert.equal(ready.context.attachments.page.content,'A 的完整正文');
+});
+
+test('send completion clears every preset only in the bound tab and survives polling and reopening', async () => {
+ const f = await fixture(); await f.register(1); await f.register(2); await f.select(1, '保留的划词');
+ const previous = (await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_GET' })).templates;
+ const item = newTemplate({ id: 'send-reset-custom-001', name: '默认自建预设', text: '{{content}}', defaultIncluded: true });
+ const templates = [...previous, item];
+ await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_SAVE', templates, expected: previous });
+ await f.wrapped(1, { type: 'SIDER_TAB_TEMPLATE_SET', id: PRESET_IDS.url, enabled: true });
+ const before = (await f.wrapped(1, { type: 'SIDER_TAB_TEMPLATE_SET', id: PRESET_IDS.page, enabled: true })).context;
+ const other = (await f.wrapped(2, { type: 'SIDER_TAB_CONTEXT_GET' })).context;
+ const calls = f.sent.length;
+ const cleared = await f.wrapped(1, { type: 'SIDER_TAB_TEMPLATES_CLEAR', expectedContext: before, tabId: 2 });
+ assert.equal(cleared.ok, true); assert.equal(cleared.context.revision, before.revision + 1);
+ assert.ok(Object.values(cleared.context.templateSelections).every(value => value === false));
+ assert.deepEqual(cleared.context.explicitTemplates, []); assert.equal(cleared.context.pageRequested, false);
+ assert.deepEqual(cleared.context.attachments, { url: false, page: null }); assert.equal(cleared.context.selection.content, '保留的划词');
+ assert.equal(f.sent.length, calls); assert.deepEqual(f.local[UNIFIED_TEMPLATES_KEY], templates);
+ assert.deepEqual(f.session[`${TAB_CONTEXT_PREFIX}2`], other);
+ await f.register(1); const polled = (await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' })).context;
+ assert.deepEqual(polled, cleared.context);
+ await f.select(1, '之后的新划词'); assert.ok(Object.values((await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' })).context.templateSelections).every(value => value === false));
+ await f.register(3); assert.equal((await f.wrapped(3, { type: 'SIDER_TAB_CONTEXT_GET' })).context.templateSelections[item.id], true);
+});
+
+test('delayed or failed send resets preserve newer choices and stored context', async () => {
+ const f = await fixture(); await f.register(1);
+ const old = (await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' })).context;
+ const current = (await f.wrapped(1, { type: 'SIDER_TAB_TEMPLATE_SET', id: PRESET_IDS.url, enabled: true })).context;
+ assert.deepEqual((await f.wrapped(1, { type: 'SIDER_TAB_TEMPLATES_CLEAR', expectedContext: old })).context, current);
+ const set = f.api.storage.session.set;
+ f.api.storage.session.set = async () => { throw new Error('取消勾选存储失败'); };
+ const failed = await f.wrapped(1, { type: 'SIDER_TAB_TEMPLATES_CLEAR', expectedContext: current });
+ f.api.storage.session.set = set;
+ assert.equal(failed.ok, false); assert.match(failed.error, /取消勾选存储失败/);
+ assert.deepEqual(f.session[`${TAB_CONTEXT_PREFIX}1`], current);
+});
+
+test('template saves reject stale previews and leave all templates intact on storage failure', async () => {
+ const f = await fixture(); await f.register(1);
+ const previous = (await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_GET' })).templates;
+ const templates = previous.map(item => item.preset === 'url' ? { ...item, name: '新名称' } : item);
+ const stale = await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_SAVE', templates, expected: [] });
+ assert.equal(stale.ok, false); assert.deepEqual(f.local[UNIFIED_TEMPLATES_KEY], previous);
+ const set = f.api.storage.local.set; f.api.storage.local.set = async change => { if (change[UNIFIED_TEMPLATES_KEY]) throw new Error('预设保存失败'); return set(change); };
+ const failed = await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_SAVE', templates, expected: previous });
+ assert.equal(failed.ok, false); assert.match(failed.error, /预设保存失败/); assert.deepEqual(f.local[UNIFIED_TEMPLATES_KEY], previous);
+});
+
+test('unchanged revision replies omit the large body while changes and send preparation return complete data', async () => {
+  const f = await fixture(); await f.register(1);
+  f.pages.set(1, '长正文'.repeat(20000));
+  const initial = await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: true });
+  const knownContext = { tabId: 1, revision: initial.context.revision };
+  const unchanged = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET', knownContext });
+  assert.equal(unchanged.contextUnchanged, true); assert.equal(unchanged.context, undefined);
+  assert.ok(JSON.stringify(unchanged).length < 1000);
+  const captures = f.sent.filter(call => call.message.type === 'SIDER_PAGE_CAPTURE').length;
+  assert.equal(captures, 1);
+  await f.select(1, '新划词');
+  const changed = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET', knownContext });
+  assert.equal(changed.context.selection.content, '新划词'); assert.equal(changed.context.attachments.page.content.length, 60000);
+  const send = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET', knownContext: { tabId: 1, revision: changed.context.revision }, refreshPage: true });
+  assert.equal(send.context.attachments.page.content.length, 60000); assert.equal(f.sent.filter(call => call.message.type === 'SIDER_PAGE_CAPTURE').length, 2);
+});
+
+test('template body capture with references disabled leaves the tab choices unchanged', async () => {
+  const f = await fixture(); await f.register(1);
+  const before = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+  const start = f.sent.filter(call => call.message.type === 'SIDER_PAGE_CAPTURE').length;
+  const result = await f.wrapped(1, { type: 'SIDER_TEMPLATE_CONTEXT_GET', needPage: true, refreshPage: true });
+  assert.equal(result.ok, true); assert.equal(result.variablePage.content, 'A 的完整正文');
+  assert.equal(result.context.pageRequested, false); assert.equal(result.context.attachments.page, null);
+  assert.equal(result.context.revision, before.context.revision);
+  assert.equal(f.sent.filter(call => call.message.type === 'SIDER_PAGE_CAPTURE').length - start, 1);
+});
+
+test('direct body templates and active body references share exactly one fresh snapshot', async () => {
+  const f = await fixture(); await f.register(1); await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: true });
+  f.pages.set(1, '更新后的正文');
+  const start = f.sent.filter(call => call.message.type === 'SIDER_PAGE_CAPTURE').length;
+  const result = await f.wrapped(1, { type: 'SIDER_TEMPLATE_CONTEXT_GET', needPage: true, refreshPage: true });
+  assert.equal(result.variablePage.content, '更新后的正文'); assert.equal(result.context.attachments.page.content, result.variablePage.content);
+  assert.equal(f.sent.filter(call => call.message.type === 'SIDER_PAGE_CAPTURE').length - start, 1);
+});
+
+test('configuration import replaces sites and templates together while preserving session context and legacy data', async () => {
+  const f = await fixture(); await f.register(1); await f.select(1, '当前划词');
+  const oldTemplate = { id: 'template-old-1234', name: '旧预设', text: '{{url}}', directSend: false };
+  f.local[PROMPT_TEMPLATES_KEY] = [oldTemplate];
+  const templates = (await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_GET' })).templates;
+  f.local[UNIFIED_TEMPLATES_KEY] = [...templates, newTemplate({ id: oldTemplate.id, name: oldTemplate.name, text: oldTemplate.text })];
+  f.local[AI_WEB_SETTINGS_KEY] = { activeSiteId: 'chatgpt', customSites: [{ id: 'custom-old-1234', name: '旧网站', url: 'https://old.test/' }] };
+  const { backup: before } = await f.send({ type: 'SIDER_CONFIGURATION_EXPORT' });
+  const backup = structuredClone(before); backup.configuration.templates = structuredClone(templates); backup.configuration.aiWeb.customSites = [];
+  backup.configuration.templates.find(item => item.preset === 'selection').defaultIncluded = false;
+  const session = structuredClone(f.session), legacy = structuredClone(f.local['sider.state.v1']);
+  const imported = await f.send({ type: 'SIDER_CONFIGURATION_IMPORT', backup, expected: before.configuration });
+  assert.equal(imported.ok, true, imported.error);
+  assert.deepEqual(f.local[PROMPT_TEMPLATES_KEY], [oldTemplate]); assert.deepEqual(f.local[AI_WEB_SETTINGS_KEY].customSites, []);
+  assert.equal(f.local[UNIFIED_TEMPLATES_KEY].find(item => item.preset === 'selection').defaultIncluded, false); assert.deepEqual(f.session, session); assert.deepEqual(f.local['sider.state.v1'], legacy);
+});
+
+test('configuration rejection, changed preview, permission denial, and storage failure retain all existing keys', async () => {
+  const f = await fixture();
+  const { backup: before } = await f.send({ type: 'SIDER_CONFIGURATION_EXPORT' });
+  const local = structuredClone(f.local);
+  const invalid = structuredClone(before); delete invalid.configuration.templates;
+  assert.equal((await f.send({ type: 'SIDER_CONFIGURATION_IMPORT', backup: invalid, expected: before.configuration })).ok, false);
+  const next = structuredClone(before); next.configuration.templates.find(item => item.preset === 'url').defaultIncluded = true;
+  assert.equal((await f.send({ type: 'SIDER_CONFIGURATION_IMPORT', backup: next, expected: {} })).ok, false);
+  f.api.permissions.contains = async () => false;
+  assert.equal((await f.send({ type: 'SIDER_CONFIGURATION_IMPORT', backup: next, expected: before.configuration })).ok, false);
+  f.api.permissions.contains = async () => true;
+  const save = f.api.storage.local.set;
+  f.api.storage.local.set = async changes => { if (changes[AI_WEB_SETTINGS_KEY]) throw new Error('模拟存储失败'); return save(changes); };
+  const failed = await f.send({ type: 'SIDER_CONFIGURATION_IMPORT', backup: next, expected: before.configuration });
+  assert.equal(failed.ok, false); assert.match(failed.error, /模拟存储失败/); assert.deepEqual(f.local, local);
+});
 
 test('builtin button overrides persist across worker restart without changing an already loaded sidebar configuration', async () => {
   const f = await fixture();
@@ -238,8 +411,8 @@ test('clearing a selection clears the owning source frame, survives polling and 
     await f.select(1, 'A 的重新划词');
     const fresh = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
     assert.equal(fresh.ok, true, fresh.error); assert.equal(fresh.context.selection.content, 'A 的重新划词');
-    assert.equal(fresh.context.selectionIncluded, defaultSelection);
-    assert.equal(composeContextPrompt('问题', fresh.context, fresh.settings).text.includes('A 的重新划词'), defaultSelection);
+    assert.equal(fresh.context.selectionIncluded, false);
+    assert.equal(composeContextPrompt('问题', fresh.context, fresh.settings).text.includes('A 的重新划词'), false);
     assert.deepEqual(fresh.context.attachments, before.context.attachments);
   }
 });
@@ -353,7 +526,7 @@ test('selection storage notifications reach only the owning ChatGPT port while s
   assert.deepEqual(ports.map(port => port.messages.length), [1, 0, 1]);
   await f.wrapped(1, { type: 'SIDER_CONTEXT_SETTINGS_PATCH', patch: { urlTemplate: '网页url为：{{url}}' } });
   assert.deepEqual(ports.map(port => port.messages.length), [2, 1, 2]);
-  assert.equal(f.local[CONTEXT_SETTINGS_KEY].urlTemplate, '网页url为：{{url}}');
+  assert.equal(f.local[UNIFIED_TEMPLATES_KEY].find(item => item.preset === 'url').text, '网页url为：{{url}}');
   assert.ok(ports.every(port => port.messages.every(message => message.type === 'SIDER_TAB_CONTEXT_CHANGED')));
 });
 
@@ -526,7 +699,7 @@ test('saving changed defaults updates only the owning current tab and future pag
   const formatOnly = await f.wrapped(1, { type: 'SIDER_CONTEXT_SETTINGS_PATCH', patch: { defaultSelection: false, defaultUrl: true, defaultPage: true, urlTemplate: '网址 {{url}}' } });
   assert.equal(formatOnly.context.attachments.url, false); assert.equal(formatOnly.context.pageRequested, false);
   await f.select(2, 'B 的新词');
-  assert.equal(f.session[`${TAB_CONTEXT_PREFIX}2`].selectionIncluded, false);
+  assert.equal(f.session[`${TAB_CONTEXT_PREFIX}2`].selectionIncluded, true);
 });
 
 test('default body capture failure persists across reads and supports retry and cancellation', async () => {
@@ -592,12 +765,15 @@ test('a same-URL reload during default capture rejects the old document and reap
   assert.equal(fresh.ok, true, fresh.error); assert.equal(fresh.context.attachments.page.content, '刷新后的新正文');
 });
 
-test('explicit selection menu, shortcut and webpage button override the disabled selection default', async () => {
+test('explicit selection menu, shortcut and webpage button always attach even when the preset click action is send', async () => {
   const f = await fixture(); await f.register(1); f.local[CONTEXT_SETTINGS_KEY] = { defaultSelection: false };
+  const presets = (await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_GET' })).templates;
+  f.local[UNIFIED_TEMPLATES_KEY] = presets.map(item => ({ ...item, action: 'send' }));
   const tab = f.tabs.get(1);
   await f.select(1, '右键划词'); await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
   let included = f.waitForSession(data => data[`${TAB_CONTEXT_PREFIX}1`]?.selectionIncluded === true);
   await f.api.contextMenus.onClicked.emit({ menuItemId: 'sider-quote-selection', editable: false, frameId: 0, selectionText: '右键划词' }, structuredClone(tab)); await included;
+  await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'selection', enabled: false });
   await f.select(1, '快捷键划词');
   assert.equal(f.session[`${TAB_CONTEXT_PREFIX}1`].selectionIncluded, false);
   included = f.waitForSession(data => data[`${TAB_CONTEXT_PREFIX}1`]?.selectionIncluded === true);
@@ -608,7 +784,7 @@ test('explicit selection menu, shortcut and webpage button override the disabled
   const repeat = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' }); assert.equal(repeat.context.selectionIncluded, true);
   await f.select(1, null);
   const empty = await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'selection', enabled: true });
-  assert.equal(empty.ok, false); assert.match(empty.error, /划词/);
+  assert.equal(empty.ok, true); assert.equal(empty.context.selectionIncluded,true); assert.equal(empty.context.selection,null);
 });
 
 test('unsupported pages ignore automatic defaults and keep ordinary questions usable', async () => {

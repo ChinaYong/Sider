@@ -18,7 +18,7 @@ for (const size of [16, 32, 48, 128]) {
   const filename = `icon-${size}.png`;
   await copyFile(path.join(root, 'assets', 'icons', filename), path.join(iconDir, filename));
 }
-const packages = ['@mozilla/readability', 'turndown', 'turndown-plugin-gfm'];
+const packages = ['@mozilla/readability', 'turndown', 'turndown-plugin-gfm', 'css-tree', 'mdn-data', 'source-map-js'];
 let notices = 'Sider third-party notices\n\n';
 for (const name of packages) {
   const packageDir = path.join(root, 'node_modules', name);

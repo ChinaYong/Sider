@@ -17,6 +17,24 @@ test('global AI selection loads Gemini and a different website cannot perform it
   assert.equal(port.messages[0].site.id, 'gemini');
 });
 
+test('Gemini Spark mode loads the Spark interface in the embedded frame', async t => {
+  const f = await fixture(t, { aiSettings: { activeSiteId: 'gemini', customSites: [], geminiMode: 'spark' } });
+  await f.resolve(0, { ok: true, compatibility: true, site: BUILTIN_AI_SITES[1] });
+  const url = new URL(f.document.querySelector('iframe').src);
+  assert.equal(url.origin, 'https://gemini.google.com');
+  assert.equal(url.pathname, '/spark');
+  assert.equal(url.searchParams.get('sider_bridge'), f.calls[0].message.bridgeId);
+});
+
+test('Gemini default changes offer a reload without replacing the current conversation', async t => {
+  const f = await fixture(t, { aiSettings: { activeSiteId: 'gemini', customSites: [] } });
+  await f.resolve(0, { ok: true, compatibility: true, site: BUILTIN_AI_SITES[1] });
+  const before = f.document.querySelector('iframe').src;
+  f.updateAI({ activeSiteId: 'gemini', customSites: [], geminiModel: 'pro', geminiExtendedThinking: true });
+  assert.equal(f.document.querySelector('iframe').src, before);
+  assert.equal(f.document.querySelector('#ai-settings-updated').hidden, false);
+});
+
 test('global website changes keep a live frame and draft until the user reloads', async t => {
   const f = await fixture(t); await f.resolve(0, { ok: true, compatibility: true });
   const before = f.document.querySelector('iframe').src;
