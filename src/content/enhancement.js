@@ -9,6 +9,7 @@ import { installPresetSort } from './preset-sort.js';
 import { createMotion } from '../motion.js';
 import { createSourcePicker } from './source-picker.js';
 import { enhancementStyles as CSS } from './enhancement-styles.js';
+import { installFontSettings } from '../font-settings.js';
 
 const SEND_CONTROL_GRACE_MS = 500;
 
@@ -64,6 +65,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   const host = document.createElement('div');
   host.id = 'sider-enhancement';
   host.dataset.siderEnhancement = 'true';
+  const fontSettings = installFontSettings({ element: host, chrome });
   const root = host.attachShadow({ mode: 'open' });
   // DOM construction also works on sites enforcing Trusted Types. No policy
   // creation or HTML-string sink is needed to render our static controls.
@@ -1036,7 +1038,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   return { host, root, refresh, dispose() {
     if (disposed) return;
     delivery?.abort.abort(); void Promise.resolve(attachments.dispose()).catch(() => {}); disposeTextDrop();
-    disposed = true; sourcePicker?.dispose(); sorting?.dispose(); clearSendGap(); observer.disconnect(); resizeObserver?.disconnect(); view.clearInterval(interval); view.clearTimeout(statusTimer);
+    disposed = true; fontSettings.dispose(); sourcePicker?.dispose(); sorting?.dispose(); clearSendGap(); observer.disconnect(); resizeObserver?.disconnect(); view.clearInterval(interval); view.clearTimeout(statusTimer);
     if (mountFrame !== null) view.cancelAnimationFrame(mountFrame);
     showPane(null, { immediate: true, restoreFocus: false }); motion.dispose();
     for (const type of uiEvents) root.removeEventListener(type, containUIEvent);

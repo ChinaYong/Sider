@@ -1,6 +1,6 @@
 :root {
   color-scheme: light dark;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-family: var(--sider-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif);
   font-size: 13px;
   color: var(--ink);
   background: var(--canvas);
@@ -136,6 +136,7 @@ dialog > button:not(.primary):hover, .dialog-footer button:not(.primary):hover, 
 details.settings-card:not([open]) > summary { border-bottom: 0; border-radius: 12px; }
 details.settings-card > summary:hover { background: var(--hover); }
 .settings-card-body { padding: 0 14px 2px; }
+.font-preview { margin: 12px 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--subtle); font-size: 14px; line-height: 1.8; overflow-wrap: anywhere; }
 .scope-badge, .site-badge { flex: none; font-size: 10px; font-weight: 550; line-height: 1.6; padding: 2px 7px; border-radius: 5px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
 .scope-badge.immediate { background: var(--success-soft); color: var(--success); }
 .settings-actions { display: flex; gap: 6px; flex-wrap: wrap; margin: 12px 0; }
@@ -195,7 +196,7 @@ kbd { padding: 3px 6px; border: 1px solid var(--control-line); border-bottom-wid
 .editor-heading { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
 .editor-heading h3 { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .editor-actions { border-top: 1px solid var(--line); padding-top: 12px; margin-bottom: 0; justify-content: flex-end; }
-#configuration-preview { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.8 system-ui; }
+#configuration-preview { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.8; font-family: inherit; }
 #configuration-preview:empty, #configuration-status:empty { display: none; }
 #configuration-file { max-width: 100%; min-width: 0; font-size: 12px; }
 #configuration-file::file-selector-button { font: inherit; padding: 8px 10px; margin-right: 8px; border: 1px solid var(--control-line); border-radius: 7px; background: var(--surface); color: inherit; cursor: pointer; }

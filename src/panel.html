@@ -33,7 +33,7 @@
   </dialog>
   <dialog id="ai-settings-dialog" aria-labelledby="ai-settings-title">
     <div class="dialog-title"><strong id="ai-settings-title">AI 网站设置</strong><button id="ai-close-settings" aria-label="关闭 AI 网站设置">×</button></div>
-    <p class="dialog-intro">选择常用 AI，管理网站偏好与侧栏入口。</p>
+    <p class="dialog-intro">选择常用 AI，管理网站偏好、扩展字体与侧栏入口。</p>
     <section class="settings-card" aria-labelledby="ai-preferences-title">
       <div class="settings-card-heading"><h2 id="ai-preferences-title">AI 网站</h2><span class="scope-badge">保存后生效</span></div>
       <div class="settings-card-body">
@@ -60,6 +60,20 @@
         <div id="ai-editor-home"></div>
       </div>
     </section>
+    <details id="font-settings" class="settings-card">
+      <summary class="settings-card-heading"><span class="summary-copy"><strong>扩展字体</strong><span>字体选择与预览</span></span><span class="scope-badge immediate">立即生效</span></summary>
+      <div class="settings-card-body">
+        <label for="extension-font">界面字体</label><select id="extension-font" aria-describedby="extension-font-help"></select>
+        <p id="extension-font-help" class="setting-help">所有侧栏共用，用于设置、预设、引用和网页提示。字体需已安装在本机，缺失时自动使用备用字体。</p>
+        <div id="extension-font-custom" hidden>
+          <label for="extension-font-name">本机字体名称</label><input id="extension-font-name" maxlength="100" placeholder="例如：LXGW WenKai" autocomplete="off">
+          <div class="settings-actions"><button id="extension-font-apply" type="button">应用字体</button></div>
+        </div>
+        <div id="extension-font-preview" class="font-preview" aria-label="字体预览">把正在读的网页，带进 AI 对话。<br>Sider · Aa Bb 0123456789</div>
+        <div class="settings-actions"><button id="extension-font-reset" type="button">恢复系统默认</button></div>
+        <p id="extension-font-status" class="setting-help" role="status" aria-live="polite"></p>
+      </div>
+    </details>
     <details id="launcher-settings" class="settings-card">
       <summary class="settings-card-heading"><span class="summary-copy"><strong>打开方式</strong><span>悬浮球、右键与快捷键</span></span><span class="scope-badge immediate">立即生效</span></summary>
       <div class="settings-card-body">
