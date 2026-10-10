@@ -12,7 +12,7 @@
 <body>
   <header class="utility-bar">
     <span id="connection-status" role="status"><i></i><span>正在打开 ChatGPT</span></span>
-    <div><button id="ai-settings-toggle" title="AI 网站设置" aria-label="AI 网站设置">⚙</button><button id="reload-chatgpt" title="重新加载 AI 网站" aria-label="重新加载 AI 网站">↻</button><button id="open-chatgpt" title="在标签页登录或打开 AI 网站" aria-label="在标签页打开 AI 网站">↗</button><button id="diagnostics-toggle" title="连接信息" aria-label="连接信息">⋯</button></div>
+    <div><button id="ai-settings-toggle" title="AI 网站设置" aria-label="AI 网站设置"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16M8 4v6M16 14v6"/></svg></button><button id="reload-chatgpt" title="重新加载 AI 网站" aria-label="重新加载 AI 网站"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M20 12a8 8 0 1 0-2.3 5.7"/></svg></button><button id="open-chatgpt" title="在标签页登录或打开 AI 网站" aria-label="在标签页打开 AI 网站"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4 10 14M10 5H5v14h14v-5"/></svg></button><button id="diagnostics-toggle" title="连接信息" aria-label="连接信息"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button></div>
   </header>
   <main>
     <button id="ai-settings-updated" class="settings-updated" hidden>AI 网站设置已更新，点击重新加载</button>
@@ -33,58 +33,84 @@
   </dialog>
   <dialog id="ai-settings-dialog" aria-labelledby="ai-settings-title">
     <div class="dialog-title"><strong id="ai-settings-title">AI 网站设置</strong><button id="ai-close-settings" aria-label="关闭 AI 网站设置">×</button></div>
-    <p class="dialog-intro">选择常用 AI，按需调整各网站的界面与控件。</p>
-    <details id="launcher-settings" class="site-settings-menu">
-      <summary>打开方式<span>悬浮球、右键与快捷键</span></summary>
-      <div class="site-settings-content">
+    <p class="dialog-intro">选择常用 AI，管理网站偏好与侧栏入口。</p>
+    <section class="settings-card" aria-labelledby="ai-preferences-title">
+      <div class="settings-card-heading"><h2 id="ai-preferences-title">AI 网站</h2><span class="scope-badge">保存后生效</span></div>
+      <div class="settings-card-body">
+        <label for="ai-active-site">使用的 AI 网站</label><select id="ai-active-site" aria-describedby="ai-active-site-help"></select>
+        <p id="ai-active-site-help" class="setting-help">所有侧栏共用，新开或重新加载侧栏时应用。</p>
+        <div class="settings-actions"><button id="ai-add-site">＋ 添加网站</button><button id="ai-edit-site" hidden>编辑网站</button><button id="ai-remove-site" class="danger" hidden>从列表移除</button></div>
+        <details id="ai-site-settings" class="site-settings-menu">
+          <summary><span class="summary-copy"><strong>网站专属设置</strong><span>按网站调整界面、模型与控件</span></span></summary>
+          <div id="ai-site-groups"></div>
+          <div id="ai-gemini-options">
+            <section class="setting-block" aria-labelledby="gemini-interface-title">
+              <h3 id="gemini-interface-title">界面偏好</h3>
+              <div class="setting-toggle"><label for="ai-gemini-spark">打开 Gemini Spark 界面</label><input id="ai-gemini-spark" type="checkbox" role="switch" aria-label="打开 Gemini Spark 界面" aria-describedby="ai-gemini-spark-help"></div>
+              <p id="ai-gemini-spark-help" class="setting-help">关闭时使用普通 Gemini 界面。</p>
+            </section>
+            <section class="setting-block" aria-labelledby="gemini-response-title">
+              <h3 id="gemini-response-title">模型与思考</h3>
+              <label for="ai-gemini-model">默认模型</label><select id="ai-gemini-model"></select>
+              <div class="setting-toggle"><label for="ai-gemini-thinking">开启扩展思考</label><input id="ai-gemini-thinking" type="checkbox" role="switch" aria-label="开启 Gemini 扩展思考" aria-describedby="ai-gemini-model-help"></div>
+              <p id="ai-gemini-model-help" class="setting-help">加载后尝试应用，是否可用取决于账号和原站版本。</p>
+            </section>
+          </div>
+        </details>
+        <div id="ai-editor-home"></div>
+      </div>
+    </section>
+    <details id="launcher-settings" class="settings-card">
+      <summary class="settings-card-heading"><span class="summary-copy"><strong>打开方式</strong><span>悬浮球、右键与快捷键</span></span><span class="scope-badge immediate">立即生效</span></summary>
+      <div class="settings-card-body">
+        <section class="setting-block" aria-labelledby="launcher-appearance-title">
+        <h3 id="launcher-appearance-title">网页悬浮球</h3>
         <div class="setting-toggle"><label for="launcher-floating">显示网页悬浮球</label><input id="launcher-floating" type="checkbox" role="switch" checked></div>
-        <p class="setting-help">点击打开当前标签页的侧栏，再次点击关闭。拖动后自动贴边并记住位置，默认在已授权网页显示。</p>
+        <p class="setting-help">点击打开或关闭侧栏；拖动后自动贴边并记住位置。</p>
         <label for="launcher-mode">显示模式</label>
         <select id="launcher-mode"><option value="blacklist">黑名单：除名单内网站外显示</option><option value="whitelist">白名单：仅在名单内网站显示</option></select>
+        <div class="current-site-box">
         <p id="launcher-current-site" class="setting-help">展开后读取当前网页…</p>
         <div class="settings-actions"><button id="launcher-add-current" type="button" disabled>当前网站加入黑名单</button></div>
+        </div>
         <details class="launcher-list-editor"><summary id="launcher-list-summary">黑名单（0）</summary>
           <ul id="launcher-sites" class="launcher-sites"></ul>
           <label for="launcher-site-input">添加网站</label><input id="launcher-site-input" placeholder="example.com 或网页地址" autocomplete="off">
           <div class="settings-actions"><button id="launcher-add-site" type="button">加入名单</button></div>
         </details>
-        <p class="setting-help">按域名匹配，同一域名的所有页面、协议和端口共用规则，子域名单独设置。切换模式会保留两份名单。</p>
+        <p class="setting-help">按域名匹配，子域名单独设置。切换模式保留两份名单。</p>
+        </section>
+        <section class="setting-block" aria-labelledby="launcher-access-title">
+        <h3 id="launcher-access-title">网页访问权限</h3>
         <div class="settings-actions"><button id="launcher-grant-all" type="button">允许访问所有网页</button></div>
         <p class="setting-help">悬浮球只在已授权网页按名单显示；将当前网站加入白名单时，会按需请求该网站的访问权限。</p>
-        <p class="setting-help">这里的更改立即生效。</p>
-        <p>网页右键 → 打开 Sider 侧栏<br>快捷键：<strong id="launcher-shortcut">Ctrl+Shift+Y</strong></p>
+        </section>
+        <section class="setting-block" aria-labelledby="launcher-shortcuts-title">
+        <h3 id="launcher-shortcuts-title">其他打开方式</h3>
+        <p class="shortcut-row"><span>网页右键</span><span>打开 Sider 侧栏</span></p>
+        <p class="shortcut-row"><span>快捷键</span><kbd id="launcher-shortcut">Ctrl+Shift+Y</kbd></p>
         <div class="settings-actions"><button id="launcher-configure-shortcut" type="button">自定义快捷键</button></div>
+        </section>
         <p id="launcher-status" class="setting-help" role="status" aria-live="polite"></p>
       </div>
     </details>
-    <label for="ai-active-site">使用的 AI 网站</label><select id="ai-active-site"></select>
-    <p class="setting-help">全局共用，保存后在新开或重新加载侧栏时生效。</p>
-    <div class="settings-actions"><button id="ai-add-site">＋ 添加网站</button><button id="ai-edit-site" hidden>编辑网站</button><button id="ai-remove-site" class="danger" hidden>从列表移除</button></div>
-    <details id="ai-site-settings" class="site-settings-menu">
-      <summary>网站专属设置<span>界面、模型、推理与控件</span></summary>
-      <div id="ai-site-groups"></div>
-      <div id="ai-gemini-options">
-    <div class="setting-toggle"><label for="ai-gemini-spark">打开 Gemini Spark 界面</label><input id="ai-gemini-spark" type="checkbox" role="switch" aria-label="打开 Gemini Spark 界面"></div>
-    <p class="setting-help">关闭时打开普通 Gemini 界面；此开关只影响 Gemini。</p>
-    <label for="ai-gemini-model">Gemini 默认模型</label><select id="ai-gemini-model"></select>
-    <div class="setting-toggle"><label for="ai-gemini-thinking">开启扩展思考</label><input id="ai-gemini-thinking" type="checkbox" role="switch" aria-label="开启 Gemini 扩展思考"></div>
-    <p class="setting-help">Gemini 页面加载后尝试选择模型和思考级别；是否可用取决于账号和原站当前版本。</p>
-      </div>
-    </details>
-    <section id="ai-custom-fields" hidden>
+    <section id="ai-custom-fields" class="site-editor" aria-labelledby="ai-editor-title" hidden>
+      <div class="editor-heading"><h3 id="ai-editor-title">网站与控件</h3><span class="scope-badge">编辑中</span></div>
       <label for="ai-site-name">网站名称</label><input id="ai-site-name" maxlength="80" placeholder="我的 AI 网站">
       <label for="ai-site-url">网站地址</label><input id="ai-site-url" type="url" placeholder="https://example.com/chat">
       <p id="ai-site-help">默认自动识别输入框和发送控件。自定义网站支持文本引用；能否在侧栏加载取决于原站。</p>
       <div class="settings-actions"><button id="ai-pick-send">在页面点选发送按钮</button><button id="ai-reset-send">恢复自动识别发送按钮</button></div>
       <p>点选前先加载此网站，并在原站输入问题，使发送按钮出现。点选只记录按钮，不会发送消息。</p>
       <p id="ai-pick-status" role="status" hidden></p>
-      <details><summary>高级配置</summary>
+      <details class="advanced-settings"><summary>高级配置<span class="summary-hint">手动指定控件</span></summary>
+        <div class="advanced-settings-body">
         <label for="ai-selector-composer">输入框 CSS 选择器</label><input id="ai-selector-composer" placeholder="留空则自动识别">
         <label for="ai-selector-send">发送控件 CSS 选择器</label><input id="ai-selector-send" maxlength="1000" placeholder="可点选按钮自动填写；留空则自动识别">
         <label for="ai-selector-mount">引用栏挂载位置 CSS 选择器</label><input id="ai-selector-mount" placeholder="引用栏会放在此元素后面">
         <label for="ai-send-shortcut">原站发送快捷键</label><select id="ai-send-shortcut"><option value="enter">Enter</option><option value="ctrl-enter">Ctrl / ⌘ + Enter</option><option value="button">仅发送按钮</option></select>
+        </div>
       </details>
-      <div class="settings-actions"><button id="ai-cancel-edit">取消编辑</button><button id="ai-apply-site" class="primary">完成编辑</button></div>
+      <div class="settings-actions editor-actions"><button id="ai-cancel-edit">取消编辑</button><button id="ai-apply-site" class="primary">完成编辑</button></div>
     </section>
     <p id="ai-settings-error" role="alert" hidden></p>
     <p id="ai-settings-status" class="setting-help" role="status" hidden></p>

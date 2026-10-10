@@ -7,6 +7,7 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
   const siteGroups = $('#ai-site-groups');
   const geminiOptions = $('#ai-gemini-options');
   const siteEditor = $('#ai-custom-fields');
+  const editorHome = $('#ai-editor-home');
   let draft = normalizeAIWebSettings();
   let editingId = null;
   let editingBuiltin = false;
@@ -28,20 +29,30 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
   function renderSiteGroups() {
     const expanded = new Set([...siteGroups.children].filter(group => group.open).map(group => group.dataset.siteId));
     // Keep the shared editor and Gemini controls (and their listeners) when rebuilding the list.
-    dialog.insertBefore(siteEditor, $('#ai-settings-error'));
+    editorHome.append(siteEditor);
     geminiOptions.remove();
     siteGroups.replaceChildren();
     for (const site of listAISites(draft)) {
       const group = document.createElement('details');
       group.className = 'site-settings-group'; group.dataset.siteId = site.id; group.open = expanded.has(site.id);
-      const summary = document.createElement('summary'); summary.textContent = site.name;
+      const summary = document.createElement('summary');
+      const name = document.createElement('span'); name.className = 'site-name'; name.textContent = site.name;
+      const badge = document.createElement('span'); badge.className = 'site-badge';
+      const selected = site.id === draft.activeSiteId;
+      group.toggleAttribute('data-selected', selected);
+      badge.textContent = selected ? '已选择' : site.builtin ? '内置' : '自定义';
+      summary.append(name, badge);
       const content = document.createElement('div'); content.className = 'site-settings-content';
       if (site.id === 'gemini') content.append(geminiOptions);
+      const controls = document.createElement('section'); controls.className = 'setting-block';
+      const title = document.createElement('h3'); title.textContent = '网站控件';
+      const description = document.createElement('p'); description.className = 'setting-help';
+      description.textContent = '输入框或发送按钮识别异常时，在这里调整。';
       const actions = document.createElement('div'); actions.className = 'settings-actions';
       const configure = document.createElement('button'); configure.type = 'button';
       configure.textContent = site.builtin ? '配置网站控件' : '编辑网站与控件';
       configure.addEventListener('click', () => { error(''); edit(site); });
-      actions.append(configure); content.append(actions); group.append(summary, content); siteGroups.append(group);
+      actions.append(configure); controls.append(title, description, actions); content.append(controls); group.append(summary, content); siteGroups.append(group);
     }
   }
   function render() {
@@ -65,7 +76,8 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
       const group = [...siteGroups.children].find(candidate => candidate.dataset.siteId === site.id);
       siteMenu.open = true; group.open = true;
       group.querySelector('.site-settings-content').append(siteEditor);
-    } else dialog.insertBefore(siteEditor, $('#ai-settings-error'));
+    } else editorHome.append(siteEditor);
+    $('#ai-editor-title').textContent = site ? `编辑 ${site.name}` : '添加 AI 网站';
     editingId = site?.id || `custom-${crypto.randomUUID()}`;
     editingBuiltin = Boolean(site?.builtin);
     $('#ai-site-name').value = site?.name || '';

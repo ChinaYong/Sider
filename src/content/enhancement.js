@@ -8,43 +8,9 @@ import { TemplateDraft } from './template-draft.js';
 import { installPresetSort } from './preset-sort.js';
 import { createMotion } from '../motion.js';
 import { createSourcePicker } from './source-picker.js';
+import { enhancementStyles as CSS } from './enhancement-styles.js';
 
 const SEND_CONTROL_GRACE_MS = 500;
-
-const CSS = `
-:host{all:initial;display:block;position:relative;font-family:system-ui,"Microsoft YaHei",sans-serif;font-size:12px;line-height:1.5;width:100%;min-width:0;z-index:30;--surface:#fff;--line:#e6e6e6;--muted:#888;--hover:#f4f4f4;--ink:#262626;color:var(--ink);color-scheme:light}
-*{box-sizing:border-box}[hidden]{display:none!important}button,input,select,textarea{font:inherit;color:inherit}button{cursor:pointer;border:0;background:transparent;padding:6px 8px;border-radius:7px;line-height:1.4;white-space:nowrap}button:hover{background:var(--hover)}button:disabled{opacity:.45;cursor:wait}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid #10a37f;outline-offset:1px}.bar{display:flex;gap:5px;align-items:center;min-height:32px;padding:4px 2px;border-top:1px solid var(--line);margin-top:5px;min-width:0}.bar>button{font-size:11px;padding:5px 7px;flex:none}.bar>button:last-child{margin-left:auto}.chips{display:flex;gap:5px;align-items:center;flex-wrap:wrap;min-width:0;flex:1}.chip{display:flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:7px;background:var(--hover);font-size:11px;padding-left:7px;max-width:100%;min-width:0}.chip button{font-size:15px;line-height:1;padding:4px 6px;flex:none;color:var(--muted)}.selection-chip{flex:0 1 auto;max-width:100%;color:var(--ink)}.selection-chip .excerpt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.selection-icon{color:#10a37f;flex:none}.popover{position:fixed;z-index:2147483646;width:380px;max-width:calc(100vw - 20px);max-height:min(600px,75dvh);background:var(--surface);border:1px solid var(--line);border-radius:13px;padding:14px;box-shadow:0 8px 36px #0002;overflow:auto;color:var(--ink);overscroll-behavior:contain}.heading{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:8px}.heading strong{font-size:13px;font-weight:600}.heading button{font-size:18px;padding:0 5px}.source{font-size:11px;color:var(--muted);line-height:1.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0 0 9px}.note{font-size:11px;line-height:1.75;color:var(--muted);margin:8px 0;white-space:pre-line;overflow-wrap:anywhere}.attachment-actions{display:flex;gap:7px}.attachment-actions button{flex:1;border:1px solid var(--line);padding:9px}.attachment-actions button[aria-pressed="true"]{color:#10a37f;border-color:#10a37f;background:var(--hover)}.form label{display:block;font-size:11px;margin:10px 0 5px}.form input,.form textarea,.form select{display:block;width:100%;border:1px solid var(--line);border-radius:7px;padding:7px 9px;background:var(--surface);font-size:12px;line-height:1.8;resize:vertical}.form textarea{max-height:200px}.format-heading{font-size:12px;font-weight:600;margin:14px 0 5px}.format-heading:first-child{margin-top:0}.position-field{display:flex;align-items:center;gap:9px;margin:6px 0}.position-field label{margin:0;white-space:nowrap}.position-field select{width:auto;flex:1}.footer{display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end;margin-top:12px}.footer button{border:1px solid var(--line);font-size:11px}.footer .primary{background:var(--ink);color:var(--surface);border-color:var(--ink)}.status{font-size:11px;line-height:1.7;margin:2px 2px 6px;color:var(--muted);overflow-wrap:anywhere}.status.error{color:#b45c3c}.access{font-size:11px;color:#10a37f;border:1px solid var(--line);margin-bottom:6px}:host([data-dark]){--surface:#2f2f2f;--line:#454545;--hover:#383838;--muted:#aaa;--ink:#ececec;color-scheme:dark}
-:host{flex:0 0 auto;align-self:stretch;box-sizing:border-box}
-.popover{inset:auto;margin:0}
-.chip button:disabled{cursor:default}
-.template-row .template-use{flex:1;min-width:75px;white-space:normal;text-align:left;overflow-wrap:anywhere}.template-row>button:first-child{flex:0 0 auto;min-width:0}.template-row [data-sort-handle]{cursor:grab;touch-action:none;user-select:none;font-size:16px}.sorting [data-sort-handle]{cursor:grabbing}.template-row.dragging{opacity:.6;background:var(--hover)}.drop-before{box-shadow:0 -2px #10a37f}.drop-after{box-shadow:0 2px #10a37f}button:disabled:not([data-busy]){cursor:default}button:disabled:hover{background:transparent}button[data-busy]{cursor:wait}
-.default-options{min-width:0;border:0;margin:0 0 14px;padding:0;display:flex;flex-wrap:wrap;gap:8px 14px}.default-options legend{font-size:12px;font-weight:600;margin-bottom:7px}.form label.default-option{display:flex;align-items:center;gap:6px;margin:0;font-size:12px;cursor:pointer}.form .default-option input{display:inline-block;width:auto;flex:none;margin:0;padding:0;accent-color:#10a37f}
-.form [aria-invalid="true"]{border-color:#b45c3c}.form .field-error{color:#b45c3c;margin:5px 0}
-.page-body{white-space:pre-wrap;overflow-wrap:anywhere;max-height:36dvh;overflow:auto;font:12px/1.8 ui-monospace,monospace;user-select:text}.page-meta{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;color:var(--muted)}[data-chip="page"] .excerpt{cursor:pointer}[data-chip="page"] .excerpt:focus-visible{outline:2px solid #10a37f}
-.template-row{display:flex;gap:3px;align-items:center;flex-wrap:wrap;margin:8px 0}.form .template-row>input{width:auto;flex:none;accent-color:#10a37f}.template-row>button{font-size:11px;padding:4px}.template-row>button:first-child{flex-basis:110px}.chip .excerpt{cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.chip{min-width:0}.template-row>button:first-child{flex:1;min-width:0;white-space:normal;text-align:left;overflow-wrap:anywhere}.variables{font-size:11px}.variables summary{cursor:pointer;padding:8px 0}.variable{border-top:1px solid var(--line);padding:7px 0;overflow-wrap:anywhere}.variable p{margin:3px 0}.template-toggle{display:flex!important;align-items:center;gap:6px}.template-toggle input{width:auto!important}
-.template-row>[data-sort-handle]:first-child{flex:0 0 auto;min-width:0}
-button,summary{transition:background-color 120ms cubic-bezier(.2,.8,.2,1),color 120ms cubic-bezier(.2,.8,.2,1),opacity 120ms cubic-bezier(.2,.8,.2,1)}button:active:not(:disabled){background:var(--line)}[data-motion-closing]{pointer-events:none}.template-row{transition:background-color 120ms ease,opacity 120ms ease}@media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important}}
-.preset-list button{transition-property:background-color,color}
-/* Keep the compact composer bar; give the editable surfaces clearer hierarchy. */
-:host{--muted:#657068;--highlight:#eef7f1;--focus:#177455}
-:host([data-dark]){--muted:#b0bbb3;--highlight:#293d32;--focus:#7dd7ae}
-.popover{padding:16px;border-radius:14px;scroll-padding-block:54px 16px;scrollbar-width:thin;scrollbar-color:var(--line) transparent}
-.heading{position:sticky;top:-16px;z-index:2;background:var(--surface);padding:12px 0;margin:-4px 0 12px;border-bottom:1px solid var(--line)}
-.heading strong{font-size:14px}.heading button{min-width:28px;min-height:28px;color:var(--muted)}
-.template-row{padding:6px 3px;margin:4px 0;border:1px solid var(--line);border-radius:9px;gap:4px;flex-wrap:nowrap}
-.template-row:has(input:checked){background:var(--highlight);border-color:var(--focus)}
-.template-row .template-use{min-width:0;line-height:1.6;padding:6px 3px}
-.template-row>button{min-height:28px}.template-row>[data-sort-handle]{color:var(--muted)}
-.form .template-row>input{width:15px;height:15px;margin:0 2px}
-.template-row>button:not(.template-use){flex-shrink:0}
-.form input,.form select,.form textarea{border-radius:8px;padding:8px 10px}
-.form .template-row>input,.form .default-option input,.form .template-toggle input{padding:0}
-.source{padding:8px 10px;background:var(--hover);border-radius:7px}
-button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
-.footer .primary{background:var(--focus);color:var(--surface);border-color:transparent}
-:host([data-dark]) .footer .primary{color:#153627}
-.source-picker{margin-bottom:9px;min-width:0}.source-line{display:flex;align-items:center;gap:5px;min-width:0}.source-trigger{display:flex;gap:8px;align-items:center;justify-content:space-between;flex:1;min-width:0;text-align:left;margin:0;border:1px solid transparent}.source-trigger:hover,.source-trigger[aria-expanded="true"]{border-color:var(--line)}.source-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.source-back{flex:none;font-size:11px;color:var(--focus);padding:7px 5px}.source-menu{margin-top:6px;border:1px solid var(--line);border-radius:9px;padding:7px;background:var(--surface)}.source-options{max-height:min(260px,34dvh);overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;margin-top:5px}.source-window{font-size:10px;color:var(--muted);padding:7px 6px 3px}.source-option{display:flex;flex-direction:column;gap:1px;width:100%;text-align:left;padding:7px 8px;border:1px solid transparent;white-space:normal;min-width:0}.source-option-title,.source-option-url{display:block;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.source-option-title{font-size:11px}.source-option-url{font-size:10px;color:var(--muted)}.source-option[aria-selected="true"]{color:var(--focus)}.source-option.active{background:var(--highlight);border-color:var(--focus)}.source-menu .note{margin:5px 3px}.form .source-search{font-size:11px;padding:6px 8px}
-`;
 
 /** The original site's editor stays the only question editor. */
 export function installEnhancement({ document, chrome, bridgeId, onReady = () => {}, attachmentManager, adapter = createWebAdapter(document) }) {
@@ -390,32 +356,42 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     const input = element('input', { id, type: 'checkbox' }); input.checked = value;
     row.append(input, document.createTextNode(label)); body.append(row); return input;
   }
+  function formSection(body, title, id) {
+    const section = element('section', { class: 'form-section', 'aria-labelledby': id });
+    section.append(element('h3', { id }, title)); body.append(section); return section;
+  }
   function renderTemplates(edit = null) {
     const previousSort = sorting; sorting = null; previousSort?.dispose();
     sourcePicker?.dispose(); sourcePicker = null;
     const body = $('#pane-body'); body.replaceChildren();
+    $('#pane-title').textContent = edit ? '编辑预设' : '预设';
     if (edit) {
       const expected = structuredClone(templates);
-      const name = field(body, '预设名称', 'text', edit.name, 'template-name'); name.maxLength = 80;
-      const text = field(body, '预设内容（文本＋变量）', 'textarea', edit.text, 'template-text'); text.rows = 5;
-      body.append(button('设为附件区域', () => {
+      const content = formSection(body, '预设内容', 'template-content-title');
+      const name = field(content, '预设名称', 'text', edit.name, 'template-name'); name.maxLength = 80;
+      const text = field(content, '内容（支持文本与变量）', 'textarea', edit.text, 'template-text'); text.rows = 5;
+      content.append(button('设为附件区域', () => {
         const from = text.selectionStart, to = text.selectionEnd, selected = text.value.slice(from, to);
         text.setRangeText('<attachment>' + selected + '</attachment>', from, to, 'end');
         text.focus(); text.setSelectionRange(from + 12, from + 12 + selected.length);
         text.dispatchEvent(new view.Event('input', { bubbles: true }));
-      }));
-      body.append(element('p', { class: 'note' }, '用 <attachment>…</attachment> 标记一个附件区域；区域外保留为提示词。不标记时，附件规则作用于整条内容。'));
-      const position = selectField(body, '位置（插入及发送时引用）', 'template-position', edit.position, [['prepend', '问题前'], ['append', '问题后']]);
-      const defaultIncluded = checkboxField(body, '默认勾选（发送时引用，不会自动执行）', 'template-default', edit.defaultIncluded);
-      const action = selectField(body, '点击行为', 'template-action', edit.action, [['replace', '替换'], ['append', '追加'], ['send', '直接发送']]);
+      }, 'inline-action'));
+      content.append(element('p', { class: 'note' }, '用 <attachment>…</attachment> 标记一个附件区域，区域外保留为提示词。不标记时，附件规则作用于整条内容。'));
+      const behavior = formSection(body, '使用方式', 'template-behavior-title');
+      const position = selectField(behavior, '插入位置', 'template-position', edit.position, [['prepend', '问题前'], ['append', '问题后']]);
+      const defaultIncluded = checkboxField(behavior, '默认勾选，随消息引用', 'template-default', edit.defaultIncluded);
+      behavior.append(element('p', { class: 'note' }, '勾选不会立即执行预设，发送成功后自动取消。'));
+      const action = selectField(behavior, '点击名称时', 'template-action', edit.action, [['replace', '替换'], ['append', '追加'], ['send', '直接发送']]);
       const advanced = element('details', { class: 'variables' }); advanced.append(element('summary', {}, '高级：发送方式与附件'));
-      const delivery = selectField(advanced, '发送方式', 'template-delivery', edit.delivery, [['text', '始终文本'], ['auto', '超出阈值转附件'], ['file', '始终附件']]);
-      const fileFields = element('div'); advanced.append(fileFields);
+      const advancedBody = element('div', { class: 'variables-body' }); advanced.append(advancedBody);
+      const delivery = selectField(advancedBody, '发送方式', 'template-delivery', edit.delivery, [['text', '始终文本'], ['auto', '超出阈值转附件'], ['file', '始终附件']]);
+      const fileFields = element('div'); advancedBody.append(fileFields);
       const threshold = field(fileFields, '超过此字符数时转附件', 'number', edit.threshold, 'template-threshold'); threshold.min = 1; threshold.max = 1000000;
       const attachmentText = field(fileFields, '附件说明（添加到问题中）', 'textarea', edit.attachmentText, 'template-attachment-text');
       fileFields.append(element('p', { class: 'note' }, '{{template.name}} 预设名称 · {{filename}} 实际文件名。每条预设生成独立附件。'));
       const update = () => { fileFields.hidden = delivery.value === 'text'; threshold.disabled = delivery.value !== 'auto'; };
       delivery.addEventListener('change', update); update(); body.append(advanced);
+      variableDirectory(body);
       const error = element('p', { id: 'template-error', class: 'note field-error', role: 'alert' }); body.append(error);
       const footer = element('div', { class: 'footer' });
       footer.append(button('取消编辑', () => renderTemplates()), button('保存预设', async () => {
@@ -447,24 +423,34 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
         onError: error => report(error.message, true),
         requestAccess: () => requestSitePermission('SIDER_SOURCE_ACCESS_REQUEST'),
       });
-      body.append(sourcePicker.element);
-      body.append(element('p', { class: 'note' }, '勾选以随下一条消息引用，发送后自动取消。点击名称立即应用；拖动手柄调整顺序。'));
+      body.append(element('p', { class: 'source-label' }, '引用来源'), sourcePicker.element);
+      const listHeading = element('div', { class: 'preset-list-heading' });
+      listHeading.append(element('strong', {}, '消息预设'), element('span', {}, '勾选以随消息引用'));
+      body.append(listHeading);
       const list = element('div', { class: 'preset-list', 'aria-label': '预设顺序' }); body.append(list);
       for (const template of templates) {
         const row = element('div', { class: 'template-row', 'data-sort-id': template.id });
         const handle = element('button', { type: 'button', 'data-sort-handle': '', 'aria-label': '拖动预设 ' + template.name, title: '拖动排序' }, '⠿');
-        const use = button(template.name + ' · ' + ({ replace: '替换', append: '追加', send: '直接发送' })[template.action], () => useTemplate(template), 'template-use'); use.dataset.templateId = template.id;
+        const actionLabel = ({ replace: '替换', append: '追加', send: '直接发送' })[template.action];
+        const use = button('', () => useTemplate(template), 'template-use'); use.dataset.templateId = template.id;
+        use.setAttribute('aria-label', template.name + ' · ' + actionLabel);
+        use.append(element('span', { class: 'template-name' }, template.name), element('span', { class: 'template-action' }, '点击' + actionLabel));
         const toggle = element('input', { type: 'checkbox', 'aria-label': '发送时引用 ' + template.name }); toggle.checked = Boolean(context?.templateSelections?.[template.id]); toggle.title = '发送时引用';
         toggle.addEventListener('change', () => run(toggle, () => toggleTemplate(template, toggle.checked)));
         const editButton = button('编辑', () => renderTemplates(template)); editButton.setAttribute('aria-label', '编辑预设 ' + template.name);
         row.append(handle, use, toggle, editButton);
-        if (!template.preset) { const remove = button('删除', async () => { await removeTemplate(template.id); await saveTemplates(templates.filter(item => item.id !== template.id)); renderTemplates(); }); remove.setAttribute('aria-label', '删除预设 ' + template.name); row.append(remove); }
+        if (!template.preset) { const remove = button('删除', async () => { await removeTemplate(template.id); await saveTemplates(templates.filter(item => item.id !== template.id)); renderTemplates(); }, 'danger'); remove.setAttribute('aria-label', '删除预设 ' + template.name); row.append(remove); }
         list.append(row);
       }
       installSorting(list);
-      body.append(button('新增预设', () => renderTemplates(newTemplate({ id: view.crypto.randomUUID() }))));
+      body.append(button('新增预设', () => renderTemplates(newTemplate({ id: view.crypto.randomUUID() })), 'preset-add'));
+      body.append(element('p', { class: 'note' }, '勾选仅影响下一条消息，发送后自动取消。拖动左侧手柄调整顺序。'));
+      variableDirectory(body);
     }
-    variableDirectory(body); schedulePosition(); motion.enter(body, { fadeOnly: true, duration: 120 });
+    // Each view starts at its heading, even when the previous editor was scrolled to its footer.
+    popup.scrollTop = 0;
+    if (edit) $('#template-name').focus({ preventScroll: true });
+    schedulePosition(); motion.enter(body, { fadeOnly: true, duration: 120 });
   }
   function installSorting(list) {
     sorting = installPresetSort(list, { scroller: popup, items: structuredClone(templates), save: saveTemplates,

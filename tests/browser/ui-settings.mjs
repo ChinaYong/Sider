@@ -46,6 +46,8 @@ try {
     await page.locator('#ai-site-settings > summary').click();
     await page.locator('[data-site-id="gemini"] > summary').click();
     await page.locator('#ai-gemini-spark').check();
+    await page.locator('[data-site-id="gemini"] > summary').scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `tmp/browser/ui-gemini-${width}-${colorScheme}.png` });
     await page.locator('[data-site-id="claude"] > summary').click();
     await page.locator('[data-site-id="claude"] button').click();
     if (!await page.locator('#ai-selector-send').isVisible()) await page.locator('#ai-custom-fields details > summary').click();
@@ -59,6 +61,12 @@ try {
     assert.ok(rect.y >= 0 && rect.y + rect.height <= 640);
     await page.screenshot({ path: `tmp/browser/ui-editor-${width}-${colorScheme}.png` });
     await page.locator('#ai-cancel-edit').click();
+    await page.locator('#ai-site-settings > summary').click();
+    await page.locator('#launcher-settings > summary').click();
+    await page.locator('#launcher-mode').scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `tmp/browser/ui-launcher-${width}-${colorScheme}.png` });
+    assert.equal(await page.locator('#ai-settings-dialog').evaluate(node => node.scrollWidth > node.clientWidth), false);
+    await page.locator('#launcher-settings > summary').click();
     await page.keyboard.press('Escape');
     await page.waitForFunction(() => !document.querySelector('#ai-settings-dialog').open);
     assert.equal(await page.evaluate(() => document.activeElement.id), 'ai-settings-toggle');
