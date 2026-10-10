@@ -3,6 +3,208 @@ import assert from 'node:assert/strict';
 import { TAB_CONTEXT_PREFIX, CONTEXT_SETTINGS_KEY, composeContextPrompt } from '../src/context.js';
 import { AI_WEB_SETTINGS_KEY } from '../src/ai-web.js';
 import { PROMPT_TEMPLATES_KEY, UNIFIED_TEMPLATES_KEY, PRESET_IDS, newTemplate } from '../src/prompt-templates.js';
+import { REFERENCE_SESSIONS_KEY } from '../src/reference-sessions.js';
+import { expandVariables } from '../src/variables.js';
+
+test('source picker lists all accessible windows and marks unsupported pages without changing the active tab', async () => {
+  const f = await fixture(); await f.register(1);
+  f.tabs.get(2).windowId = 27;
+  f.tabs.set(4, { id: 4, windowId: 27, index: 2, url: 'chrome://settings/', title: '设置' });
+  f.tabs.set(5, { id: 5, windowId: 9, index: 3, url: 'https://chatgpt.com/', title: 'ChatGPT' });
+  const result = await f.wrapped(1, { type: 'SIDER_SOURCE_TABS_LIST' });
+  assert.equal(result.ok, true); assert.equal(result.ownerWindowId, 9);
+  assert.deepEqual(result.tabs.map(tab => tab.tabId), [1, 3, 5, 2, 4]);
+  assert.match(result.tabs.find(tab => tab.tabId === 4).disabledReason, /内部/);
+  assert.match(result.tabs.find(tab => tab.tabId === 5).disabledReason, /AI/);
+  assert.equal(result.tabs.find(tab => tab.tabId === 2).disabledReason, '');
+  assert.equal(f.tabs.get(1).active, true); assert.equal(f.opened.length, 0);
+  assert.equal((await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 4 })).ok, false);
+  assert.equal((await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: -1 })).ok, false);
+});
+
+test('borrowing a cross-window source keeps sidebar choices and does not mutate the borrowed sidebar context', async () => {
+  const f = await fixture(); await f.register(1); await f.register(2);
+  await f.select(1, 'A 的划词'); await f.select(2, 'B 的划词');
+  await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'url', enabled: true });
+  await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: true });
+  await f.wrapped(2, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'url', enabled: false });
+  const beforeA = (await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' })).context;
+  const beforeB = structuredClone(f.session[TAB_CONTEXT_PREFIX + 2]);
+  f.tabs.get(2).windowId = 27;
+  const switched = await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 2 });
+  assert.equal(switched.ok, true, switched.error);
+  assert.equal(switched.context.tabId, 2); assert.equal(switched.referenceSource.ownerTabId, 1);
+  assert.equal(switched.context.selection.content, 'B 的划词');
+  assert.deepEqual(switched.context.templateSelections, beforeA.templateSelections);
+  assert.deepEqual(f.session[TAB_CONTEXT_PREFIX + 2], beforeB);
+  assert.equal(f.session.siderEmbedRegistrations[f.bridge(1)].tabId, 1);
+  const variables = expandVariables('{{title}}|{{url}}|{{selection}}|{{content}}', switched.context);
+  assert.deepEqual(variables.errors, []);
+  assert.equal(variables.text, '网页 B|https://example.test/B|B 的划词|B 的完整正文');
+  const refreshed = await f.wrapped(1, { type: 'SIDER_TEMPLATE_CONTEXT_GET', ids: [PRESET_IDS.page], refreshPage: true });
+  assert.equal(refreshed.variablePage.content, 'B 的完整正文');
+  assert.deepEqual(f.session[TAB_CONTEXT_PREFIX + 2], beforeB);
+  assert.equal((await f.wrapped(2, { type: 'SIDER_TAB_CONTEXT_GET' })).context.attachments.url, false);
+  const returned = await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 1 });
+  assert.equal(returned.context.selection.content, 'A 的划词');
+  assert.deepEqual(returned.context.templateSelections, beforeA.templateSelections);
+});
+
+test('reference choices, cancellations and selected source survive worker restart and successful-send clearing', async () => {
+  const f = await fixture(); await f.register(1);
+  await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'url', enabled: true });
+  await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 2 });
+  await f.restart();
+  const result = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET', tabId: 3 });
+  assert.equal(result.ok, true); assert.equal(result.context.tabId, 2); assert.equal(result.context.attachments.url, true);
+  const expectedContext = { tabId: 2, url: result.context.url, revision: result.context.revision, referenceEpoch: result.referenceSource.epoch };
+  const cleared = await f.wrapped(1, { type: 'SIDER_TAB_TEMPLATES_CLEAR', expectedContext });
+  assert.equal(cleared.ok, true); assert.equal(cleared.referenceSource.tabId, 2);
+  assert.ok(Object.values(cleared.context.templateSelections).every(enabled => !enabled));
+  const poll = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET', knownContext: { tabId: 2, revision: cleared.context.revision, referenceEpoch: cleared.referenceSource.epoch } });
+  assert.equal(poll.contextUnchanged, true);
+  await f.restart();
+  const restored = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+  assert.equal(restored.referenceSource.tabId, 2); assert.equal(restored.context.attachments.url, false);
+});
+
+test('a closed borrowed source clears material, retains choices and leaves its consumer sidebar registered', async () => {
+  const f = await fixture(); await f.register(1); await f.register(2);
+  await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'url', enabled: true });
+  const switched = await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 2 });
+  f.tabs.delete(2); await f.api.tabs.onRemoved.emit(2);
+  await f.waitForSession(data => data[REFERENCE_SESSIONS_KEY]?.[1]?.status === 'closed');
+  const result = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+  assert.equal(result.ok, true); assert.equal(result.referenceSource.status, 'closed');
+  assert.equal(result.context.url, ''); assert.equal(result.context.selection, null); assert.equal(result.context.attachments.page, null);
+  assert.deepEqual(result.context.templateSelections, switched.context.templateSelections);
+  assert.match(result.referenceSource.error, /已关闭/);
+  assert.equal((await f.send({ type: 'SIDER_EMBED_STATUS_GET', bridgeId: f.bridge(1) })).registered, true);
+  const returned = await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 1 });
+  assert.equal(returned.ok, true); assert.equal(returned.context.url, 'https://example.test/A');
+  f.tabs.delete(1); await f.api.tabs.onRemoved.emit(1);
+  await f.waitForSession(data => !data[REFERENCE_SESSIONS_KEY]?.[1]);
+});
+
+test('late selection and page reads cannot overwrite a later reference switch or clear its choices', async () => {
+  const f = await fixture(); await f.register(1);
+  await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: true });
+  await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 2 });
+  const selectionGate = f.gateNextSelection(2);
+  const oldRead = f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+  await selectionGate.reached.promise;
+  const latest = await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 3 });
+  selectionGate.release.resolve(); assert.equal((await oldRead).code, 'REFERENCE_CHANGED');
+  assert.equal(latest.context.tabId, 3);
+  await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 2 });
+  const pageGate = f.gateNextPage(2);
+  const oldPage = f.wrapped(1, { type: 'SIDER_TEMPLATE_CONTEXT_GET', ids: [PRESET_IDS.page], refreshPage: true });
+  await pageGate.reached.promise;
+  const expected = (await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' })).context;
+  const epoch = f.session[REFERENCE_SESSIONS_KEY][1].epoch;
+  const switched = await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 3 });
+  pageGate.release.resolve(); assert.equal((await oldPage).code, 'REFERENCE_CHANGED');
+  const staleClear = await f.wrapped(1, { type: 'SIDER_TAB_TEMPLATES_CLEAR', referenceEpoch: epoch,
+    expectedContext: { tabId: 2, url: expected.url, revision: expected.revision, referenceEpoch: epoch } });
+  assert.equal(staleClear.ok, true); assert.equal(staleClear.context.tabId, 3);
+  assert.deepEqual(staleClear.context.templateSelections, switched.context.templateSelections);
+  assert.equal(staleClear.context.attachments.page.content, 'C 的完整正文');
+});
+
+test('borrowed source notifications reach its consumers and navigation invalidates pending reads while preserving choices', async () => {
+  const f = await fixture(); await f.register(1); await f.register(2); await f.register(3);
+  await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 2 });
+  const a = await f.connect(1), b = await f.connect(2), c = await f.connect(3);
+  await f.select(2, '新划词');
+  assert.ok(a.messages.some(message => message.type === 'SIDER_TAB_CONTEXT_CHANGED'));
+  assert.ok(b.messages.some(message => message.type === 'SIDER_TAB_CONTEXT_CHANGED'));
+  assert.equal(c.messages.length, 0);
+  await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'url', enabled: true });
+  const before = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+  const gate = f.gateNextSelection(2), pending = f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+  await gate.reached.promise;
+  Object.assign(f.tabs.get(2), { url: 'https://example.test/B-new', title: '新标题', status: 'loading' });
+  await f.api.tabs.onUpdated.emit(2, { status: 'loading', url: f.tabs.get(2).url }, f.tabs.get(2));
+  await f.waitForSession(data => data[REFERENCE_SESSIONS_KEY]?.[1]?.epoch > before.referenceSource.epoch);
+  gate.release.resolve(); assert.equal((await pending).code, 'REFERENCE_CHANGED');
+  f.selections.delete(2); f.tabs.get(2).status = 'complete';
+  const after = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+  assert.equal(after.context.title, '新标题'); assert.equal(after.context.selection, null);
+  assert.deepEqual(after.context.templateSelections, before.context.templateSelections);
+});
+
+test('access denial and authorization target the selected source and stale authorization requests fail', async () => {
+  const f = await fixture(); await f.register(1);
+  const execute = f.api.scripting.executeScript;
+  f.api.scripting.executeScript = async options => { if (options.target.tabId === 2) throw new Error('Missing host permission'); return execute(options); };
+  const result = await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 2 });
+  assert.equal(result.ok, true); assert.equal(result.needsAccess, true); assert.equal(result.context.url, '');
+  assert.equal(result.referenceSource.title, '网页 B');
+  const info = await f.send({ type: 'SIDER_SOURCE_INFO', tabId: 1, bridgeId: f.bridge(1) });
+  assert.equal(info.source.tabId, 2); assert.equal(info.source.url, 'https://example.test/B');
+  await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 3 });
+  const stale = await f.send({ type: 'SIDER_SOURCE_ACCESS_REQUEST', tabId: 1, bridgeId: f.bridge(1), expectedSource: { tabId: 2, referenceEpoch: info.source.referenceEpoch } });
+  assert.equal(stale.code, 'REFERENCE_CHANGED');
+  f.api.scripting.executeScript = execute;
+  const recovered = await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 2 });
+  assert.equal(recovered.referenceSource.status, 'ready'); assert.equal(recovered.context.title, '网页 B');
+});
+
+test('borrowed-source preset edits apply defaults only to that sidebar and metadata capture stays demand driven', async () => {
+  const f = await fixture(); await f.register(1); await f.register(2);
+  await f.wrapped(2, { type: 'SIDER_TAB_CONTEXT_GET' });
+  const before = structuredClone(f.session[TAB_CONTEXT_PREFIX + 2]);
+  await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 2 });
+  const previous = (await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_GET' })).templates;
+  const custom = newTemplate({ id: 'borrowed-custom-001', name: '来源信息', text: '{{title}}', defaultIncluded: true });
+  const saved = await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_SAVE', templates: [...previous, custom], expected: previous });
+  assert.equal(saved.context.templateSelections[custom.id], true);
+  assert.deepEqual(f.session[TAB_CONTEXT_PREFIX + 2], before);
+  const count = f.sent.filter(item => item.message.type === 'SIDER_PAGE_CAPTURE').length;
+  const ordinary = await f.wrapped(1, { type: 'SIDER_TEMPLATE_CONTEXT_GET', ids: [custom.id] });
+  assert.equal(ordinary.context.title, '网页 B');
+  assert.equal(f.sent.filter(item => item.message.type === 'SIDER_PAGE_CAPTURE').length, count);
+  const page = await f.wrapped(1, { type: 'SIDER_TEMPLATE_CONTEXT_GET', ids: [], needPage: true });
+  assert.equal(page.variablePage.content, 'B 的完整正文'); assert.equal(page.context.pageRequested, false);
+  assert.deepEqual(f.session[TAB_CONTEXT_PREFIX + 2], before);
+});
+
+test('failed fresh capture of a borrowed body clears its cached material and a later retry recovers', async () => {
+  const f = await fixture(); await f.register(1);
+  await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: true });
+  await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 2 });
+  const send = f.api.tabs.sendMessage;
+  let fail = true;
+  f.api.tabs.sendMessage = async (tabId, message, ...rest) => {
+    if (tabId === 2 && message.type === 'SIDER_PAGE_CAPTURE' && fail) throw new Error('fixture 正文采集失败');
+    return send(tabId, message, ...rest);
+  };
+  const failed = await f.wrapped(1, { type: 'SIDER_TEMPLATE_CONTEXT_GET', ids: [PRESET_IDS.page], refreshPage: true });
+  assert.equal(failed.ok, false); assert.match(failed.error, /正文采集失败/);
+  const after = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+  assert.equal(after.context.attachments.page, null); assert.match(after.context.pageError, /正文采集失败/);
+  assert.equal(after.context.templateSelections[PRESET_IDS.page], true);
+  fail = false;
+  const retry = await f.wrapped(1, { type: 'SIDER_TEMPLATE_CONTEXT_GET', ids: [PRESET_IDS.page], refreshPage: true });
+  assert.equal(retry.ok, true); assert.equal(retry.variablePage.content, 'B 的完整正文'); assert.equal(retry.context.pageError, '');
+});
+
+test('revoking a borrowed source permission invalidates material without changing choices and granting it recovers', async () => {
+  const f = await fixture(); await f.register(1);
+  await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: true });
+  const before = await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 2 });
+  const execute = f.api.scripting.executeScript;
+  f.api.permissions.contains = async request => !request.origins?.includes('https://example.test/*');
+  f.api.scripting.executeScript = async options => { if (options.target.tabId === 2) throw new Error('Missing host permission'); return execute(options); };
+  await f.api.permissions.onRemoved.emit({ origins: ['https://example.test/*'] });
+  await f.waitForSession(data => data[REFERENCE_SESSIONS_KEY]?.[1]?.status === 'needs-access');
+  const denied = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+  assert.equal(denied.needsAccess, true); assert.equal(denied.context.url, ''); assert.equal(denied.context.attachments.page, null);
+  assert.deepEqual(denied.context.templateSelections, before.context.templateSelections);
+  f.api.permissions.contains = async () => true; f.api.scripting.executeScript = execute;
+  const recovered = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+  assert.equal(recovered.referenceSource.status, 'ready'); assert.equal(recovered.context.attachments.page.content, 'B 的完整正文');
+});
 
 function event() {
   const listeners = new Set();
@@ -27,7 +229,7 @@ function browserModel() {
   const rules = new Map();
   const selectionGates = new Map();
   const pageGates = new Map();
-  const sent = [], injections = [], panelOptions = [];
+  const sent = [], injections = [], panelOptions = [], opened = [], closed = [], menus = [];
   const api = {
     runtime: { id: 'sider-test', getURL: path => `chrome-extension://sider-test/${path.replace(/^\//, '')}`, onMessage: event(), onConnect: event(), onInstalled: event(), onStartup: event() },
     storage: { onChanged: event() },
@@ -57,8 +259,8 @@ function browserModel() {
       },
     },
     windows: { onRemoved: event(), async getLastFocused() { return { id: 9 }; } },
-    action: { onClicked: event() }, commands: { onCommand: event() }, contextMenus: { onClicked: event() },
-    sidePanel: { async setOptions(options) { panelOptions.push(options); }, async setPanelBehavior() {}, async open() {} },
+    action: { onClicked: event() }, commands: { onCommand: event() }, contextMenus: { onClicked: event(), async removeAll() { menus.length = 0; }, create(menu) { menus.push(menu); } },
+    sidePanel: { onOpened: event(), onClosed: event(), async setOptions(options) { panelOptions.push(options); }, async setPanelBehavior() {}, async open(options) { opened.push(options); }, async close(options) { closed.push(options); } },
     scripting: { async executeScript(options) { injections.push(options); if (!tabs.get(options.target.tabId)?.url) throw new Error('Missing host permission'); return []; } },
     permissions: { onRemoved: event(), async contains() { return true; } },
     declarativeNetRequest: {
@@ -85,7 +287,7 @@ function browserModel() {
       api.storage.onChanged.addListener(listener);
     });
   }
-  return { api, tabs, selections, pages, local, session, rules, sent, injections, panelOptions, waitForSession,
+  return { api, tabs, selections, pages, local, session, rules, sent, injections, panelOptions, opened, closed, menus, waitForSession,
     gateNextSelection(tabId) { const gate = { reached: deferred(), release: deferred() }; selectionGates.set(tabId, gate); return gate; },
     gateNextPage(tabId) { const gate = { reached: deferred(), release: deferred() }; pageGates.set(tabId, gate); return gate; },
   };
@@ -311,6 +513,7 @@ async function fixture() {
     return { port, messages };
   }
   async function restart() {
+    model.api.sidePanel.onOpened.listeners.clear(); model.api.sidePanel.onClosed.listeners.clear();
     for (const surface of [model.api.runtime.onMessage, model.api.runtime.onConnect, model.api.runtime.onInstalled, model.api.runtime.onStartup, model.api.storage.onChanged, model.api.tabs.onCreated, model.api.tabs.onActivated, model.api.tabs.onUpdated, model.api.tabs.onRemoved, model.api.windows.onRemoved, model.api.permissions.onRemoved, model.api.action.onClicked, model.api.commands.onCommand, model.api.contextMenus.onClicked]) surface.listeners.clear();
     await loadWorker();
   }
@@ -765,18 +968,68 @@ test('a same-URL reload during default capture rejects the old document and reap
   assert.equal(fresh.ok, true, fresh.error); assert.equal(fresh.context.attachments.page.content, '刷新后的新正文');
 });
 
-test('explicit selection menu, shortcut and webpage button always attach even when the preset click action is send', async () => {
+test('right-click installs a single open menu and preserves reference choices without capturing body', async () => {
+  const f = await fixture(); await f.register(1); f.local[CONTEXT_SETTINGS_KEY] = { defaultSelection: false };
+  await f.select(1, '选中文字'); await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+  await f.api.runtime.onInstalled.emit(); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.menus.map(menu => [menu.id, menu.contexts]), [['sider-open-panel', ['all']]]);
+  const tab = structuredClone(f.tabs.get(1));
+  const captures = f.sent.filter(item => item.message.type === 'SIDER_PAGE_CAPTURE').length;
+  await f.api.contextMenus.onClicked.emit({ menuItemId: 'sider-open-panel', editable: true, frameId: 2 }, tab);
+  assert.deepEqual(f.opened.at(-1), { tabId: 1 });
+  assert.equal((await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' })).context.selectionIncluded, false);
+  assert.equal(f.sent.filter(item => item.message.type === 'SIDER_PAGE_CAPTURE').length, captures);
+  const opened = f.opened.length;
+  await f.api.contextMenus.onClicked.emit({ menuItemId: 'sider-quote-page' }, tab);
+  assert.equal(f.opened.length, opened);
+});
+
+test('floating opener calls sidePanel before asynchronous work and rejects nested or foreign senders', async () => {
+  const f = await fixture(); await f.register(1); f.local[CONTEXT_SETTINGS_KEY] = { defaultSelection: false };
+  await f.select(1, '保持未勾选'); await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+  const tab = structuredClone(f.tabs.get(1));
+  const sender = { id: f.api.runtime.id, url: tab.url, tab, frameId: 0 };
+  const result = f.send({ type: 'SIDER_OPEN_PANEL', tabId: 2 }, sender);
+  assert.deepEqual(f.opened.at(-1), { tabId: 1 });
+  assert.equal((await result).ok, true);
+  assert.equal((await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' })).context.selectionIncluded, false);
+  const count = f.opened.length;
+  assert.equal((await f.send({ type: 'SIDER_OPEN_PANEL' }, { ...sender, frameId: 1 })).ok, false);
+  assert.equal((await f.send({ type: 'SIDER_OPEN_PANEL' }, { ...sender, id: 'foreign' })).ok, false);
+  assert.equal(f.opened.length, count);
+  f.api.sidePanel.open = async () => { throw new Error('打开失败'); };
+  assert.deepEqual(await f.send({ type: 'SIDER_OPEN_PANEL' }, sender), { ok: false, error: '打开失败' });
+});
+
+test('floating toggle closes only its own panel, follows native close, and restores after worker restart', async () => {
+  const f = await fixture();
+  const sender = tabId => ({ id: f.api.runtime.id, url: f.tabs.get(tabId).url, tab: structuredClone(f.tabs.get(tabId)), frameId: 0 });
+  const toggle = (tabId, opened = false) => f.send({ type: 'SIDER_TOGGLE_PANEL', tabId: 3, opened }, sender(tabId));
+  const opening = toggle(1); assert.deepEqual(f.opened.at(-1), { tabId: 1 }); assert.equal((await opening).opened, true);
+  await f.api.sidePanel.onOpened.emit({ tabId: 2, windowId: 9 });
+  assert.deepEqual(await toggle(1), { ok: true, opened: false }); assert.deepEqual(f.closed, [{ tabId: 1 }]);
+  assert.equal((await f.send({ type: 'SIDER_PANEL_STATE_GET' }, sender(2))).opened, true);
+  await f.api.sidePanel.onClosed.emit({ tabId: 2, windowId: 9 });
+  assert.equal((await toggle(2, true)).opened, true); // Native close supersedes a stale content hint.
+  await new Promise(resolve => setImmediate(resolve)); await f.restart();
+  assert.equal((await f.send({ type: 'SIDER_PANEL_STATE_GET' }, sender(2))).opened, true);
+  assert.equal((await toggle(2)).opened, false);
+  assert.equal((await toggle(2)).opened, true);
+  f.api.sidePanel.close = async () => { throw new Error('关闭失败'); };
+  assert.deepEqual(await toggle(2), { ok: false, error: '关闭失败' });
+  assert.equal((await f.send({ type: 'SIDER_PANEL_STATE_GET' }, sender(2))).opened, true);
+  assert.equal((await f.send({ type: 'SIDER_TOGGLE_PANEL' }, { ...sender(2), frameId: 1 })).ok, false);
+});
+
+test('selection shortcut and webpage button always attach even when the preset click action is send', async () => {
   const f = await fixture(); await f.register(1); f.local[CONTEXT_SETTINGS_KEY] = { defaultSelection: false };
   const presets = (await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_GET' })).templates;
   f.local[UNIFIED_TEMPLATES_KEY] = presets.map(item => ({ ...item, action: 'send' }));
   const tab = f.tabs.get(1);
-  await f.select(1, '右键划词'); await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
-  let included = f.waitForSession(data => data[`${TAB_CONTEXT_PREFIX}1`]?.selectionIncluded === true);
-  await f.api.contextMenus.onClicked.emit({ menuItemId: 'sider-quote-selection', editable: false, frameId: 0, selectionText: '右键划词' }, structuredClone(tab)); await included;
-  await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'selection', enabled: false });
   await f.select(1, '快捷键划词');
+  await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
   assert.equal(f.session[`${TAB_CONTEXT_PREFIX}1`].selectionIncluded, false);
-  included = f.waitForSession(data => data[`${TAB_CONTEXT_PREFIX}1`]?.selectionIncluded === true);
+  const included = f.waitForSession(data => data[`${TAB_CONTEXT_PREFIX}1`]?.selectionIncluded === true);
   await f.api.commands.onCommand.emit('capture-selection', structuredClone(tab)); await included;
   await f.select(1, '网页按钮划词');
   const opened = await f.send({ type: 'SIDER_OPEN_SOURCE_PANEL' }, { id: f.api.runtime.id, url: tab.url, tab: structuredClone(tab), frameId: 0 });

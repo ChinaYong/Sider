@@ -44,7 +44,7 @@ try {
   };
   const sourceTab = () => worker.evaluate(async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]);
   const before = await sourceTab();
-  assert.equal(before.url, undefined);
+  assert.equal(before.url, sourceURL);
   assert.equal(await worker.evaluate(() => chrome.permissions.contains({ origins: ['http://127.0.0.1/*'] })), false);
   const denied = await worker.evaluate(async tabId => {
     try { await chrome.scripting.executeScript({ target: { tabId }, func: () => document.title }); return false; }
@@ -55,17 +55,19 @@ try {
   // Reproduce the old automatic-toggle path with the actual browser action.
   await worker.evaluate(() => chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }));
   await trigger();
-  assert.equal((await sourceTab()).url, undefined);
+  assert.equal((await sourceTab()).url, sourceURL);
   await panel.evaluate(tabId => chrome.runtime.sendMessage({ type: 'SIDER_TAB_CONTEXT_GET', tabId }), initial.id);
   await chat.getByRole('button', { name: '允许当前网站', exact: true }).waitFor();
   assert.equal((await panel.evaluate(tabId => chrome.runtime.sendMessage({ type: 'SIDER_TAB_CONTEXT_GET', tabId }), initial.id)).needsAccess, true);
-  // The fallback can identify the tab while its URL remains unexposed.
+  // Metadata permission identifies the correct origin without granting content access.
   await chat.getByRole('button', { name: '允许当前网站', exact: true }).click();
   await panel.locator('#site-dialog').waitFor({ state: 'visible' });
-  assert.equal(await panel.locator('#grant-site').textContent(), '请求网站访问');
-  await panel.locator('#grant-site').click();
+  assert.equal(await panel.locator('#grant-site').textContent(), '允许此网站');
+  assert.match(await panel.locator('#site-description').textContent(), /127\.0\.0\.1/);
+  await panel.locator('#close-site').click();
   await panel.locator('#site-dialog').waitFor({ state: 'hidden' });
-  assert.match(await panel.locator('#toast').textContent(), /浏览器.*权限提示/);
+  const accessRequest = await panel.evaluate(tabId => chrome.runtime.sendMessage({ type: 'SIDER_SOURCE_ACCESS_REQUEST', tabId }), initial.id);
+  assert.equal(accessRequest.ok, true); assert.equal(accessRequest.requested, true);
 
   // Restore production behavior, then use the same native action on the source.
   await worker.evaluate(() => chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }));
@@ -97,7 +99,7 @@ try {
   // an old source just because that source was granted earlier.
   const otherURL = `http://localhost:${article.address().port}/other`;
   await source.goto(otherURL); await source.bringToFront();
-  assert.equal((await sourceTab()).url, undefined);
+  assert.equal((await sourceTab()).url, otherURL);
   let deniedContext;
   await assertEventually(async () => { deniedContext = await contextSnapshot(); assert.equal(deniedContext.ok, true); });
   assert.equal(deniedContext.ok, true, JSON.stringify(deniedContext));
@@ -108,7 +110,7 @@ try {
   await panel.evaluate(tabId => chrome.runtime.sendMessage({ type: 'SIDER_TAB_ATTACHMENT_SET', tabId, kind: 'page', enabled: true }), initial.id);
   const last = (await contextSnapshot()).context.attachments.page;
   assert.equal(last.url, otherURL);
-  console.log(JSON.stringify({ browser: context.browser().version(), version: JSON.parse(await readFile('dist/manifest.json', 'utf8')).version, fixture: true, addedHostPermissions: false, checks: ['old automatic sidebar toggle reproduces missing activeTab', 'request site access with unexposed URL reaches actual browser API', 'native action grants activeTab and preinstalls selection snapshot', 'selection URL and Readability body capture succeed', 'captures do not submit', 'cross-origin navigation revokes access without stale capture', 'next native action authorizes the new origin'] }, null, 2));
+  console.log(JSON.stringify({ browser: context.browser().version(), version: JSON.parse(await readFile('dist/manifest.json', 'utf8')).version, fixture: true, addedHostPermissions: false, checks: ['tabs permission exposes metadata without page access', 'old automatic sidebar toggle reproduces missing activeTab', 'request selected site access reaches actual browser API', 'native action grants activeTab and preinstalls selection snapshot', 'selection URL and Readability body capture succeed', 'captures do not submit', 'cross-origin navigation revokes access without stale capture', 'next native action authorizes the new origin'] }, null, 2));
 } finally {
   await context?.close(); await new Promise(resolve => tls.close(resolve)); await new Promise(resolve => article.close(resolve));
 }

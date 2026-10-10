@@ -6,6 +6,7 @@ import { exportConfiguration, validateConfiguration, configurationStorage } from
 import { CONTEXT_SETTINGS_KEY, composeContextPrompt, normalizeContextSettings } from '../src/context.js';
 import { PROMPT_TEMPLATES_KEY, validatePromptTemplates, pageAlreadyInline } from '../src/prompt-templates.js';
 import { captureComposerSelection } from '../src/content/composer.js';
+import { LAUNCHER_SETTINGS_KEY, normalizeLauncherSettings } from '../src/launcher-settings.js';
 
 const context = { tabId: 1, url: 'https://example.test/article', title: '标题 {{url}}', selection: { content: '词', context: '段落' }, attachments: { page: { url: 'https://example.test/article', title: '标题', content: '# 原文\n包含 {{filename}}\n尾标记', capturedAt: '2026-10-05T06:00:00Z', metadata: { author: '作者', publishedAt: '2026-10-01' } } } };
 
@@ -34,7 +35,13 @@ test('configuration roundtrip replaces every supported key and excludes cached p
   const backup = exportConfiguration(stored);
   assert.equal(JSON.stringify(backup).includes('私有草稿'), false); assert.equal(JSON.stringify(backup).includes('尾标记'), false);
   assert.deepEqual(validateConfiguration(JSON.parse(JSON.stringify(backup))).configuration, backup.configuration);
-  assert.equal(Object.keys(configurationStorage(backup)).length, 3);
+  assert.equal(Object.keys(configurationStorage(backup)).length, 4);
+  stored[LAUNCHER_SETTINGS_KEY] = { floating: false, side: 'left', y: 0.25 };
+  assert.deepEqual(configurationStorage(exportConfiguration(stored))[LAUNCHER_SETTINGS_KEY], normalizeLauncherSettings(stored[LAUNCHER_SETTINGS_KEY]));
+  delete backup.configuration.launcher;
+  assert.deepEqual(validateConfiguration(backup).configuration.launcher, normalizeLauncherSettings());
+  backup.configuration.launcher = { floating: true, side: 'right', y: 2 };
+  assert.throws(() => validateConfiguration(backup), /悬浮球设置/);
 });
 
 test('malformed and incomplete configuration cannot normalize into an implicit merge', () => {

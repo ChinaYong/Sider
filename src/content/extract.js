@@ -63,7 +63,7 @@ function isHidden(element) {
 }
 
 function isExcluded(element) {
-  return EXCLUDED_TAGS.has(element.tagName) || isEditable(element) || isHidden(element);
+  return EXCLUDED_TAGS.has(element.tagName) || element.hasAttribute('data-sider-ui') || isEditable(element) || isHidden(element);
 }
 
 function isReadableTextNode(node) {

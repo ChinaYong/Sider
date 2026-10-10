@@ -110,3 +110,37 @@ test('page closure during selection neither reopens the dialog nor applies the l
   resolve({ ok: true, selector: '#late' }); await settle();
   assert.equal(f.dialog.open, false); assert.equal(f.$('#ai-selector-send').value, '#original');
 });
+
+test('switching websites preserves an unfinished editor and reveals it for completion', async t => {
+  const f = await fixture(t);
+  f.$('#ai-edit-site').click();
+  f.$('#ai-selector-send').value = '#unsaved-send';
+  f.$('#ai-site-settings').open = false;
+  f.$('#ai-active-site').value = 'gemini';
+  f.$('#ai-active-site').dispatchEvent(new f.window.Event('change'));
+  assert.equal(f.$('#ai-active-site').value, 'chatgpt');
+  assert.equal(f.$('#ai-custom-fields').hidden, false);
+  assert.equal(f.$('#ai-site-settings').open, true);
+  assert.equal(f.$('#ai-selector-send').value, '#unsaved-send');
+  assert.equal(f.document.activeElement, f.$('#ai-apply-site'));
+  f.$('#ai-apply-site').click();
+  f.$('#ai-active-site').value = 'gemini';
+  f.$('#ai-active-site').dispatchEvent(new f.window.Event('change'));
+  f.$('#ai-save-settings').click(); await settle();
+  assert.equal(f.messages.at(-1).settings.activeSiteId, 'gemini');
+  assert.equal(f.messages.at(-1).settings.builtinOverrides.chatgpt.selectors.send, '#unsaved-send');
+});
+
+test('removing a website cannot discard an unfinished editor and cancelling returns focus', async t => {
+  const f = await fixture(t, { activeSiteId: 'custom-fixture-0001', customSites: [{ id: 'custom-fixture-0001', name: 'Custom', url: 'https://my-ai.test' }] });
+  f.$('#ai-edit-site').focus(); f.$('#ai-edit-site').click();
+  f.$('#ai-site-name').value = '未完成修改';
+  f.$('#ai-remove-site').click();
+  assert.equal(f.$('#ai-custom-fields').hidden, false);
+  assert.equal(f.$('#ai-site-name').value, '未完成修改');
+  assert.equal(f.$('#ai-active-site').value, 'custom-fixture-0001');
+  f.$('#ai-cancel-edit').click();
+  assert.equal(f.document.activeElement, f.$('#ai-edit-site'));
+  f.$('#ai-save-settings').click(); await settle();
+  assert.equal(f.messages.at(-1).settings.customSites[0].name, 'Custom');
+});

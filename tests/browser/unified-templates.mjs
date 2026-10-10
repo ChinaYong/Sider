@@ -63,25 +63,31 @@ try {
  const fixture=()=>body.evaluate(()=>({sent:window.sent,uploads:window.uploads}));
  async function menu(){if(await chat.locator('.popover').evaluate(node=>node.hidden||node.inert))await chat.locator('[data-pane="templates"]').click();}
  async function invoke(id){await menu();await chat.locator(`#pane-body [data-template-id="${id}"]`).click();}
- async function select(id,enabled=true){await menu();await chat.locator(`#pane-body [data-template-id="${id}"]`).locator('..').locator('input[type=checkbox]').setChecked(enabled);}
+ async function select(id,enabled=true){
+  await menu();const toggle=chat.locator(`#pane-body [data-template-id="${id}"]`).locator('..').locator('input[type=checkbox]');
+  await eventually(async()=>assert.equal(await chat.locator('#pane-body input[data-busy]').count(),0));
+  if(await toggle.isChecked()!==enabled)await toggle.click();
+  await eventually(async()=>{assert.equal(await toggle.isChecked(),enabled);assert.equal(await toggle.getAttribute('data-busy'),null)});
+ }
+ async function settled(){await chat.locator('#sider-enhancement').evaluate(async host=>{await Promise.all(host.shadowRoot.getAnimations().map(animation=>animation.finished.catch(()=>{})))});}
  assert.equal(await chat.locator('[data-pane="references"]').count(),0);assert.equal(await chat.locator('[data-pane="settings"]').count(),0);
  await menu();await chat.getByRole('button',{name:'编辑预设 旧预设',exact:true}).click();await chat.locator('#template-name').fill('修改后的旧预设');await chat.locator('#template-position').selectOption('prepend');await chat.getByRole('button',{name:'保存预设',exact:true}).click();
  await eventually(async()=>assert.equal((await exported()).backup.configuration.templates.find(item=>item.id==='legacy-fixture-001').name,'修改后的旧预设'));checked('one entrance edits each template and its position without touching the native draft');
  assert.equal((await exported()).backup.version,3);
   // Actual pointer events save the order, and Escape cancels a pending change.
  const order=async()=>(await exported()).backup.configuration.templates.map(item=>item.id);
- const originalOrder=await order();
+ const originalOrder=await order();await settled();
  const firstHandle=chat.locator('[data-sort-id="'+originalOrder[0]+'"] [data-sort-handle]');
  const from=await firstHandle.boundingBox(),target=await chat.locator('[data-sort-id="'+originalOrder[2]+'"]').boundingBox();
   assert.equal(await chat.getByRole('button',{name:/^(上移|下移)预设 /}).count(),0);
   await panel.mouse.move(from.x+from.width/2,from.y+from.height/2);await panel.mouse.down();await panel.mouse.move(target.x+20,target.y+target.height-2,{steps:10});
   assert.equal(await chat.getByRole('button',{name:'编辑预设 划词',exact:true}).evaluate(node=>getComputedStyle(node).cursor),'default');await panel.mouse.up();
  const moved=[originalOrder[1],originalOrder[2],originalOrder[0],...originalOrder.slice(3)];await eventually(async()=>assert.deepEqual(await order(),moved));
-  const movedFrom=await firstHandle.boundingBox(),restoreTarget=await chat.locator('[data-sort-id="'+originalOrder[1]+'"]').boundingBox();
+  await settled();const movedFrom=await firstHandle.boundingBox(),restoreTarget=await chat.locator('[data-sort-id="'+originalOrder[1]+'"]').boundingBox();
   await panel.mouse.move(movedFrom.x+movedFrom.width/2,movedFrom.y+movedFrom.height/2);await panel.mouse.down();await panel.mouse.move(restoreTarget.x+20,restoreTarget.y+2,{steps:10});await panel.mouse.up();await eventually(async()=>assert.deepEqual(await order(),originalOrder));
- const handleAgain=await firstHandle.boundingBox();await panel.mouse.move(handleAgain.x+3,handleAgain.y+3);await panel.mouse.down();await panel.mouse.move(target.x+20,target.y+target.height-2,{steps:8});await panel.keyboard.press('Escape');await panel.mouse.up();
+ await settled();const handleAgain=await firstHandle.boundingBox();await panel.mouse.move(handleAgain.x+3,handleAgain.y+3);await panel.mouse.down();await panel.mouse.move(target.x+20,target.y+target.height-2,{steps:8});await panel.keyboard.press('Escape');await panel.mouse.up();
   assert.deepEqual(await order(),originalOrder);assert.equal(await editor.inputValue(),'');assert.equal((await fixture()).sent.length,0);checked('trusted pointer sorting and Escape cancellation preserve the draft; locked controls use ordinary disabled cursors and arrow buttons are absent');
- const conflictFrom=await firstHandle.boundingBox();await panel.mouse.move(conflictFrom.x+3,conflictFrom.y+3);await panel.mouse.down();await panel.mouse.move(target.x+20,target.y+target.height-2,{steps:8});
+ await settled();const conflictFrom=await firstHandle.boundingBox();await panel.mouse.move(conflictFrom.x+3,conflictFrom.y+3);await panel.mouse.down();await panel.mouse.move(target.x+20,target.y+target.height-2,{steps:8});await chat.locator('.preset-list.sorting').waitFor({state:'visible'});
  const external=(await exported()).backup;external.configuration.templates.find(item=>item.preset==='url').name='外部更新的网页链接';
  const externalSaved=await message({type:'SIDER_CONFIGURATION_IMPORT',backup:external,expected:(await exported()).backup.configuration});assert.equal(externalSaved.ok,true,externalSaved.error);
  await eventually(async()=>assert.match(await chat.locator('.status.error').innerText(),/排序已取消/));await panel.mouse.up();assert.deepEqual(await order(),originalOrder);assert.equal(await editor.inputValue(),'');checked('external configuration changes cancel an active drag without overwriting the new settings');
@@ -133,7 +139,7 @@ try {
  checked('replacement upload failure retains the old file and draft; success replaces only own files and keeps instructions outside the attachment');
  // Switch the same real iframe to a contenteditable fixture and exercise native editing.
  await panel.evaluate(()=>{document.querySelector('iframe').src='https://chatgpt.com/c/rich'});chat=panel.frameLocator('iframe');await chat.locator('#sider-enhancement').waitFor();
- const rich=chat.locator('#prompt-textarea');await menu();await eventually(async()=>assert.equal(await chat.locator('#pane-body .source').innerText(),'预设合并来源'));await chat.getByRole('button',{name:'关闭',exact:true}).click();
+ const rich=chat.locator('#prompt-textarea');await menu();await eventually(async()=>assert.equal(await chat.locator('#pane-body .source-title').innerText(),'预设合并来源'));await chat.getByRole('button',{name:'关闭',exact:true}).click();
  await rich.fill('富文本原问题');await menu();await chat.locator('#pane-body [data-template-id="legacy-fixture-001"]').click();
  await eventually(async()=>assert.match(await chat.locator('.status').innerText(),/已追加/));assert.match(await rich.innerText(),/旧提示/);assert.ok((await rich.innerText()).includes('富文本原问题'));assert.equal((await chat.locator('body').evaluate(()=>window.sent)).length,0);
  await panel.screenshot({path:'tmp/browser/unified-rich-320.png'});checked('rich editor fills at the configured position, preserves the original draft, and does not send');

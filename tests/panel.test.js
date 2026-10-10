@@ -3,9 +3,43 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { JSDOM } from 'jsdom';
 import { AI_WEB_SETTINGS_KEY, BUILTIN_AI_SITES, normalizeAIWebSettings } from '../src/ai-web.js';
+import { LAUNCHER_SETTINGS_KEY, LAUNCHER_ORIGINS, normalizeLauncherSettings } from '../src/launcher-settings.js';
 
 let instance = 0;
 const settle = () => new Promise(resolve => setImmediate(resolve));
+
+test('borrowed-source authorization uses the selected origin and carries the source binding', async t => {
+  const f = await fixture(t); await f.resolve(0, { ok: true, compatibility: true });
+  const bridgeId = f.calls[0].message.bridgeId, frame = f.document.querySelector('iframe');
+  const expectedSource = { tabId: 29, referenceEpoch: 3 };
+  f.window.dispatchEvent(new f.window.MessageEvent('message', { origin: 'https://chatgpt.com', source: frame.contentWindow,
+    data: { type: 'SIDER_SOURCE_ACCESS_REQUEST', bridgeId, expectedSource } }));
+  await settle();
+  assert.deepEqual(f.calls.at(-1).message, { type: 'SIDER_SOURCE_INFO', tabId: 13, bridgeId, expectedSource });
+  await f.resolve(f.calls.length - 1, { ok: true, source: { tabId: 29, referenceEpoch: 3, ownerTabId: 13, url: 'https://borrowed.example/article' } });
+  assert.match(f.document.querySelector('#site-description').textContent, /borrowed\.example/);
+  f.document.querySelector('#grant-site').click(); await settle();
+  assert.deepEqual(f.permissions, [{ origins: ['https://borrowed.example/*'] }]);
+  assert.equal(f.document.querySelector('#site-dialog').open, false);
+});
+
+test('a source switch closes an obsolete authorization dialog and a late source-info response cannot reopen it', async t => {
+  const f = await fixture(t); await f.resolve(0, { ok: true, compatibility: true });
+  const bridgeId = f.calls[0].message.bridgeId, frame = f.document.querySelector('iframe');
+  const requestAccess = () => f.window.dispatchEvent(new f.window.MessageEvent('message', { origin: 'https://chatgpt.com', source: frame.contentWindow,
+    data: { type: 'SIDER_SOURCE_ACCESS_REQUEST', bridgeId, expectedSource: { tabId: 29, referenceEpoch: 3 } } }));
+  requestAccess(); await settle();
+  await f.resolve(f.calls.length - 1, { ok: true, source: { tabId: 29, referenceEpoch: 3, url: 'https://borrowed.example/article' } });
+  assert.equal(f.document.querySelector('#site-dialog').open, true);
+  f.ports[0].receive({ type: 'SIDER_REFERENCE_SOURCE_CHANGED', bridgeId, referenceSource: { tabId: 30, epoch: 4 } });
+  assert.equal(f.document.querySelector('#site-dialog').open, false);
+  requestAccess(); await settle();
+  const pending = f.calls.length - 1;
+  f.ports[0].receive({ type: 'SIDER_REFERENCE_SOURCE_CHANGED', bridgeId, referenceSource: { tabId: 31, epoch: 5 } });
+  await f.resolve(pending, { ok: true, source: { tabId: 30, referenceEpoch: 4, url: 'https://old.example/article' } });
+  assert.equal(f.document.querySelector('#site-dialog').open, false);
+  assert.equal(f.permissions.length, 0);
+});
 
 test('global AI selection loads Gemini and a different website cannot perform its handshake', async t => {
   const f = await fixture(t, { aiSettings: { activeSiteId: 'gemini', customSites: [] } });
@@ -102,6 +136,8 @@ async function fixture(t, { extension = true, sourceTab = '13', permissionsGrant
   Date.now = () => now;
   const frameMessages = [];
   let storedAI = normalizeAIWebSettings(aiSettings);
+  let storedLauncher = { floating: true, side: 'left', y: 0.25 }, allPagesGranted = false;
+  const permissionEvent = () => ({ listeners: new Set(), addListener(fn) { this.listeners.add(fn); }, removeListener(fn) { this.listeners.delete(fn); } });
   const storageListeners = new Set();
   const frame = window.document.querySelector('iframe');
   // Model the stable WindowProxy across iframe navigations. Any DOMWindow
@@ -115,9 +151,13 @@ async function fixture(t, { extension = true, sourceTab = '13', permissionsGrant
       connect({ name }) { if (connectError) throw new Error(connectError); const listeners = []; const messages = []; const receivers = []; const port = { name, messages, postMessage(message) { messages.push(message); }, onMessage: { addListener(fn) { receivers.push(fn); } }, receive(message) { for (const fn of receivers) fn(message); }, onDisconnect: { addListener(fn) { listeners.push(fn); } }, disconnect() { for(const fn of listeners) fn(); } }; ports.push(port); return port; },
     },
     windows: { async getCurrent() { return { id: 7 }; } },
-    tabs: { async get(id) { return { id, windowId: 7 }; } },
-    permissions: { async request(details) { permissions.push(details); return permissionsGranted; } },
-    storage: { local: { async get(key) { return { [key]: structuredClone(storedAI) }; } }, onChanged: { addListener(fn) { storageListeners.add(fn); }, removeListener(fn) { storageListeners.delete(fn); } } },
+    tabs: { async get(id) { return { id, windowId: 7 }; }, async create() {} },
+    commands: { async getAll() { return [{ name: 'open-side-panel', shortcut: 'Alt+Y' }]; } },
+    permissions: { onAdded: permissionEvent(), onRemoved: permissionEvent(), async contains() { return allPagesGranted; }, async request(details) { permissions.push(details); if (permissionsGranted && details.origins.length === 2) allPagesGranted = true; return permissionsGranted; } },
+    storage: { local: {
+      async get(key) { return { [key]: structuredClone(key === LAUNCHER_SETTINGS_KEY ? storedLauncher : storedAI) }; },
+      async set(update) { const oldValue = storedLauncher; storedLauncher = structuredClone(update[LAUNCHER_SETTINGS_KEY]); for (const fn of storageListeners) fn({ [LAUNCHER_SETTINGS_KEY]: { oldValue, newValue: storedLauncher } }, 'local'); },
+    }, onChanged: { addListener(fn) { storageListeners.add(fn); }, removeListener(fn) { storageListeners.delete(fn); } } },
   };
   Object.assign(globalThis, { window, document: window.document });
   if (extension) globalThis.chrome = chrome; else delete globalThis.chrome;
@@ -136,6 +176,7 @@ async function fixture(t, { extension = true, sourceTab = '13', permissionsGrant
   await import(`../src/panel.js?instance=${++instance}`);
   await settle();
   return { window, document: window.document, calls, ports, permissions, timers, frameMessages,
+    launcherSettings: () => storedLauncher,
     advanceTime(milliseconds) { now += milliseconds; },
     setPermissionGranted(value) { permissionsGranted = value; },
     updateAI(settings) { storedAI = normalizeAIWebSettings(settings); for (const listener of storageListeners) listener({ [AI_WEB_SETTINGS_KEY]: { newValue: structuredClone(storedAI) } }, 'local'); },
@@ -143,6 +184,27 @@ async function fixture(t, { extension = true, sourceTab = '13', permissionsGrant
     async tick(delay) { const [id, timer] = [...timers].find(([,entry]) => entry.delay === delay) || []; if(timer) { timers.delete(id); void timer.fn(); await settle(); } },
   };
 }
+
+test('launcher controls save immediately while retaining the last dragged position and customized shortcut', async t => {
+  const f = await fixture(t);
+  assert.equal(f.document.querySelector('#launcher-shortcut').textContent, 'Alt+Y');
+  const toggle = f.document.querySelector('#launcher-floating'); toggle.checked = false; toggle.dispatchEvent(new f.window.Event('change')); await settle();
+  assert.deepEqual(f.launcherSettings(), normalizeLauncherSettings({ floating: false, side: 'left', y: 0.25 }));
+  assert.equal(toggle.disabled, false);
+  assert.equal(f.calls.some(call => call.message.type === 'SIDER_AI_WEB_SETTINGS_SAVE'), false);
+});
+
+test('all-pages permission is requested in the click and denial keeps the launcher choice intact', async t => {
+  const f = await fixture(t, { permissionsGranted: false });
+  const toggle = f.document.querySelector('#launcher-floating'); toggle.checked = false; toggle.dispatchEvent(new f.window.Event('change')); await settle();
+  f.document.querySelector('#launcher-grant-all').click();
+  assert.deepEqual(f.permissions.at(-1), { origins: LAUNCHER_ORIGINS });
+  await settle(); assert.equal(f.launcherSettings().floating, false);
+  assert.match(f.document.querySelector('#launcher-status').textContent, /未授予/);
+  f.setPermissionGranted(true); f.document.querySelector('#launcher-grant-all').click(); await settle();
+  assert.deepEqual(f.launcherSettings(), normalizeLauncherSettings({ floating: true, side: 'left', y: 0.25 }));
+  assert.equal(f.document.querySelector('#launcher-grant-all').disabled, true);
+});
 
 function responsePort() {
   return {
@@ -190,11 +252,11 @@ test('source access requests work before the browser exposes the URL and are bou
   await settle(); assert.equal(f.calls.length, 2);
   f.window.dispatchEvent(new f.window.MessageEvent('message', { origin: 'https://chatgpt.com', source: frame.contentWindow, data: request }));
   await settle();
-  assert.deepEqual(f.calls.at(-1).message, { type: 'SIDER_SOURCE_INFO', tabId: 13 });
+  assert.deepEqual(f.calls.at(-1).message, { type: 'SIDER_SOURCE_INFO', tabId: 13, bridgeId: f.calls[0].message.bridgeId });
   await f.resolve(f.calls.length - 1, { ok: true, source: { tabId: 13, title: '当前网页', url: null, needsAccess: true } });
   assert.equal(f.document.querySelector('#site-dialog').open, true);
   f.document.querySelector('#grant-site').click(); await settle();
-  assert.deepEqual(f.calls.at(-1).message, { type: 'SIDER_SOURCE_ACCESS_REQUEST', tabId: 13 });
+  assert.deepEqual(f.calls.at(-1).message, { type: 'SIDER_SOURCE_ACCESS_REQUEST', tabId: 13, bridgeId: f.calls[0].message.bridgeId });
   await f.resolve(f.calls.length - 1, { ok: true, requested: true });
   assert.equal(f.document.querySelector('#site-dialog').open, false);
   assert.match(f.document.querySelector('#toast').textContent, /浏览器.*权限提示/);

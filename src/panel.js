@@ -1,6 +1,7 @@
 import { AI_WEB_SETTINGS_KEY, BUILTIN_AI_SITES, aiSiteURL, normalizeAIWebSettings, selectedAISite } from './ai-web.js';
 import { installAIWebSettings } from './ai-web-settings.js';
 import { installConfigurationUI } from './configuration-ui.js';
+import { installLauncherSettingsUI } from './launcher-settings-ui.js';
 import { createMotion, installDialogMotion } from './motion.js';
 
 const $ = selector => document.querySelector(selector);
@@ -18,6 +19,7 @@ let disposed = false;
 let toastTimer;
 let siteSource;
 let sitePurpose;
+let referenceBinding;
 let hasConnected = false;
 let activeSite = BUILTIN_AI_SITES[0];
 let activeAISettings = normalizeAIWebSettings();
@@ -121,7 +123,16 @@ function connectLifecycle() {
     lifecycle = port;
     port.postMessage({ type: 'SIDER_PANEL_ATTACH', bridgeId });
     port.onMessage.addListener(message => {
-      if (lifecycle !== port || disposed || message?.type !== 'SIDER_ENHANCEMENT_READY' || message.bridgeId !== bridgeId) return;
+      if (lifecycle !== port || disposed || message?.bridgeId !== bridgeId) return;
+      if (message.type === 'SIDER_REFERENCE_SOURCE_CHANGED') {
+        referenceBinding = message.referenceSource;
+        if (siteSource && (siteSource.tabId !== message.referenceSource.tabId || siteSource.referenceEpoch !== message.referenceSource.epoch)) {
+          siteSource = null;
+          if ($('#site-dialog').open) { $('#site-dialog').close(); showToast('引用来源已变化，请为新来源重新授权。'); }
+        }
+        return;
+      }
+      if (message.type !== 'SIDER_ENHANCEMENT_READY') return;
       // Read the bound registration again rather than rendering a possibly
       // outdated frame report. A later state change supersedes a pending poll.
       clearTimeout(timer);
@@ -281,7 +292,10 @@ window.addEventListener('message', async event => {
   if (event.data?.bridgeId !== bridgeId || !['SIDER_ENABLE_SITE_REQUEST', 'SIDER_SOURCE_ACCESS_REQUEST'].includes(event.data.type)) return;
   try {
     sitePurpose = event.data.type === 'SIDER_ENABLE_SITE_REQUEST' ? 'selection' : 'capture';
-    siteSource = (await request({ type: 'SIDER_SOURCE_INFO', tabId: sourceTabId })).source;
+    const source = (await request({ type: 'SIDER_SOURCE_INFO', tabId: sourceTabId, bridgeId,
+      ...(event.data.expectedSource ? { expectedSource: event.data.expectedSource } : {}) })).source;
+    if (referenceBinding && (source.tabId !== referenceBinding.tabId || source.referenceEpoch !== referenceBinding.epoch)) throw new Error('引用来源已变化，请为新来源重新授权。');
+    siteSource = source;
     $('#site-description').textContent = siteSource.url
       ? sitePurpose === 'selection'
         ? `在 ${new URL(siteSource.url).hostname} 显示划词引用按钮，之后选中文字即可加入引用。浏览器会请求此网站的访问权限。`
@@ -304,7 +318,8 @@ $('#grant-site').addEventListener('click', async () => {
   $('#site-status').textContent = '';
   try {
     if (!source.url) {
-      const result = await request({ type: 'SIDER_SOURCE_ACCESS_REQUEST', tabId: sourceTabId });
+      const result = await request({ type: 'SIDER_SOURCE_ACCESS_REQUEST', tabId: sourceTabId, bridgeId,
+        ...(source.referenceEpoch !== undefined ? { expectedSource: { tabId: source.tabId, referenceEpoch: source.referenceEpoch } } : {}) });
       $('#site-dialog').close();
       showToast(result.granted ? '当前网站已授权，划词会自动显示。' : '请在浏览器的扩展权限提示中允许当前网站，划词随后会自动显示。');
       return;
@@ -313,6 +328,7 @@ $('#grant-site').addEventListener('click', async () => {
     // Must run directly inside the user's click, with the original source snapshot.
     const granted = await chrome.permissions.request({ origins: [`${origin}/*`] });
     if (!granted) throw new Error('此网站的访问权限未授予。');
+    if (siteSource !== source) throw new Error('引用来源已变化，请为新来源重新授权。');
     if (purpose === 'selection') await request({ type: 'SIDER_ENABLE_SITE', tabId: source.tabId });
     $('#site-dialog').close();
     showToast(purpose === 'selection' ? `已在 ${new URL(source.url).hostname} 启用划词引用。` : '已允许引用此网站，划词会自动显示。');
@@ -341,6 +357,7 @@ function settingsUpdated(settings) {
 }
 installAIWebSettings({ document, chrome: globalThis.chrome, pickSendButton: pickNativeSendButton, onSaved(settings) { settingsUpdated(settings); showToast('AI 网站设置已保存，重新加载侧栏后生效。'); } });
 installConfigurationUI({ document, chrome: globalThis.chrome, onImported(settings) { $('#ai-settings-dialog').close(); settingsUpdated(settings); } });
+installLauncherSettingsUI({ document, chrome: globalThis.chrome, sourceTabId });
 const disposeDialogs = installDialogMotion(document, motion);
 window.addEventListener('pagehide', () => { clearTimeout(toastTimer); motion.dispose(); disposeDialogs(); });
 const settingsChanged = (changes, area) => { if (area === 'local' && changes[AI_WEB_SETTINGS_KEY]) settingsUpdated(normalizeAIWebSettings(changes[AI_WEB_SETTINGS_KEY].newValue)); };
