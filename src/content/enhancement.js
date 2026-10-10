@@ -7,6 +7,7 @@ import { UNIFIED_TEMPLATES_KEY, PRESET_IDS, newTemplate, presetTemplates, valida
 import { TemplateDraft } from './template-draft.js';
 import { installPresetSort } from './preset-sort.js';
 import { createMotion } from '../motion.js';
+import { createSourcePicker } from './source-picker.js';
 
 const SEND_CONTROL_GRACE_MS = 500;
 
@@ -24,6 +25,25 @@ const CSS = `
 .template-row>[data-sort-handle]:first-child{flex:0 0 auto;min-width:0}
 button,summary{transition:background-color 120ms cubic-bezier(.2,.8,.2,1),color 120ms cubic-bezier(.2,.8,.2,1),opacity 120ms cubic-bezier(.2,.8,.2,1)}button:active:not(:disabled){background:var(--line)}[data-motion-closing]{pointer-events:none}.template-row{transition:background-color 120ms ease,opacity 120ms ease}@media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important}}
 .preset-list button{transition-property:background-color,color}
+/* Keep the compact composer bar; give the editable surfaces clearer hierarchy. */
+:host{--muted:#657068;--highlight:#eef7f1;--focus:#177455}
+:host([data-dark]){--muted:#b0bbb3;--highlight:#293d32;--focus:#7dd7ae}
+.popover{padding:16px;border-radius:14px;scroll-padding-block:54px 16px;scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+.heading{position:sticky;top:-16px;z-index:2;background:var(--surface);padding:12px 0;margin:-4px 0 12px;border-bottom:1px solid var(--line)}
+.heading strong{font-size:14px}.heading button{min-width:28px;min-height:28px;color:var(--muted)}
+.template-row{padding:6px 3px;margin:4px 0;border:1px solid var(--line);border-radius:9px;gap:4px;flex-wrap:nowrap}
+.template-row:has(input:checked){background:var(--highlight);border-color:var(--focus)}
+.template-row .template-use{min-width:0;line-height:1.6;padding:6px 3px}
+.template-row>button{min-height:28px}.template-row>[data-sort-handle]{color:var(--muted)}
+.form .template-row>input{width:15px;height:15px;margin:0 2px}
+.template-row>button:not(.template-use){flex-shrink:0}
+.form input,.form select,.form textarea{border-radius:8px;padding:8px 10px}
+.form .template-row>input,.form .default-option input,.form .template-toggle input{padding:0}
+.source{padding:8px 10px;background:var(--hover);border-radius:7px}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.footer .primary{background:var(--focus);color:var(--surface);border-color:transparent}
+:host([data-dark]) .footer .primary{color:#153627}
+.source-picker{margin-bottom:9px;min-width:0}.source-line{display:flex;align-items:center;gap:5px;min-width:0}.source-trigger{display:flex;gap:8px;align-items:center;justify-content:space-between;flex:1;min-width:0;text-align:left;margin:0;border:1px solid transparent}.source-trigger:hover,.source-trigger[aria-expanded="true"]{border-color:var(--line)}.source-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.source-back{flex:none;font-size:11px;color:var(--focus);padding:7px 5px}.source-menu{margin-top:6px;border:1px solid var(--line);border-radius:9px;padding:7px;background:var(--surface)}.source-options{max-height:min(260px,34dvh);overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;margin-top:5px}.source-window{font-size:10px;color:var(--muted);padding:7px 6px 3px}.source-option{display:flex;flex-direction:column;gap:1px;width:100%;text-align:left;padding:7px 8px;border:1px solid transparent;white-space:normal;min-width:0}.source-option-title,.source-option-url{display:block;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.source-option-title{font-size:11px}.source-option-url{font-size:10px;color:var(--muted)}.source-option[aria-selected="true"]{color:var(--focus)}.source-option.active{background:var(--highlight);border-color:var(--focus)}.source-menu .note{margin:5px 3px}.form .source-search{font-size:11px;padding:6px 8px}
 `;
 
 /** The original site's editor stays the only question editor. */
@@ -54,6 +74,9 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   let settingsEpoch = 0;
   let polling = false;
   let needsAccess = false;
+  let referenceInfo = null;
+  let sourcePicker = null;
+  let sourceSwitching = false;
   let delivery = null;
   let ownedAttachment = null;
   let clearingAttachment = null;
@@ -142,6 +165,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   function reportProgress(message, transaction = delivery) {
     if (disposed || transaction && transaction !== delivery) return;
     if (transaction) transaction.progress = message;
+    sourcePicker?.sync();
     report(message, false, needsAccess, { persistent: true });
   }
 
@@ -150,6 +174,12 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     if (disposed || sequence < lastAppliedRequest) return;
     lastAppliedRequest = sequence;
     const previousPageError = context?.pageError;
+    const previousSourceError = referenceInfo?.error;
+    if (result.referenceSource) {
+      if (referenceInfo && result.referenceSource.epoch < referenceInfo.epoch) return;
+      if (result.referenceSource.epoch !== referenceInfo?.epoch) prepared = null;
+      referenceInfo = result.referenceSource;
+    }
     if (result.context) {
       const next = normalizeContext(result.context, result.context.tabId);
       if (!context || next.tabId !== context.tabId || next.revision >= context.revision) {
@@ -177,6 +207,9 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     if (pane === 'template-preview') renderTemplatePreview();
     if (pane === 'templates' && !$('#template-name')) syncTemplateList();
     if (pane === 'page') renderPagePreview();
+    sourcePicker?.sync();
+    if (referenceInfo?.error && !delivering) report(referenceInfo.error, referenceInfo.status !== 'loading', needsAccess, { persistent: true });
+    else if (previousSourceError && $('.status').textContent === previousSourceError) report('');
     if (delivery?.stamp && !delivery.replayed && delivery.stamp !== contextStamp()) delivery.abort.abort();
     if (ownedAttachment && !delivering && !templateApplying && !cleanupIssue) {
       const retained = new Set([...selectedTemplates().map(item => item.id), ...filled.snapshots().map(item => item.id)]);
@@ -187,8 +220,14 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   async function request(inner) {
     const sequence = ++requestSequence;
     const epoch = settingsEpoch;
-    const result = await chrome.runtime.sendMessage({ type: 'SIDER_ENHANCEMENT_REQUEST', bridgeId, embedded: true, request: inner });
+    const sourceEpoch = referenceInfo?.epoch;
+    const result = await chrome.runtime.sendMessage({ type: 'SIDER_ENHANCEMENT_REQUEST', bridgeId, embedded: true,
+      request: { ...(referenceInfo ? { referenceEpoch: referenceInfo.epoch } : {}), ...inner } });
     if (!result?.ok) throw Object.assign(new Error(result?.error || '扩展没有响应，请刷新侧栏。'), { code: result?.code });
+    if (result.referenceSource && referenceInfo && result.referenceSource.epoch < referenceInfo.epoch
+      || result.context && !result.referenceSource && (sourceEpoch ?? 0) !== (referenceInfo?.epoch ?? 0)) {
+      throw Object.assign(new Error('引用来源已变化，请重新操作。'), { code: 'REFERENCE_CHANGED' });
+    }
     applyResponse(result, sequence, epoch);
     return result;
   }
@@ -217,7 +256,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   function requestSitePermission(type) {
     const origin = chrome.runtime.getURL?.('/')?.replace(/\/$/, '') || Array.from(view.location.ancestorOrigins || [])[0];
     if (!origin?.startsWith('chrome-extension://')) throw new Error('请在扩展侧栏中授权网页访问。');
-    view.parent.postMessage({ type, bridgeId }, origin);
+    view.parent.postMessage({ type, bridgeId, ...(referenceInfo ? { expectedSource: { tabId: referenceInfo.tabId, referenceEpoch: referenceInfo.epoch } } : {}) }, origin);
   }
 
   function chip(kind, title, removeLabel, remove) {
@@ -266,6 +305,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   }
 
   async function toggleTemplate(template, enabled = !context?.templateSelections?.[template.id]) {
+    if (sourceSwitching) throw new Error('正在切换引用来源，请稍后操作。');
     delivery?.abort.abort();
     await request({ type: 'SIDER_TAB_TEMPLATE_SET', id: template.id, enabled });
     if (!enabled && !filled.records.has(template.id)) await removeAttachmentId(template.id);
@@ -302,6 +342,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     pane = name;
     const popup = $('.popover');
     if (!name) {
+      sourcePicker?.close({ restoreFocus: false });
       if (positionFrame !== null) { view.cancelAnimationFrame(positionFrame); positionFrame = null; }
       motion.cancel($('#pane-body'));
       motion.setVisible(popup, false, { immediate, close: () => { if (popup.hidePopover && popup.matches(':popover-open')) popup.hidePopover(); setHidden(popup, true); } });
@@ -351,6 +392,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   }
   function renderTemplates(edit = null) {
     const previousSort = sorting; sorting = null; previousSort?.dispose();
+    sourcePicker?.dispose(); sourcePicker = null;
     const body = $('#pane-body'); body.replaceChildren();
     if (edit) {
       const expected = structuredClone(templates);
@@ -392,8 +434,21 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     } else {
       renderedTemplates = templatesIdentity;
       renderedTemplateItems = new Map(templates.map(item => [item.id, JSON.stringify(item)]));
-      body.append(element('p', { class: 'source' }, context?.title || '当前网页'));
-      body.append(element('p', { class: 'note' }, '勾选表示发送时引用，发送后自动取消勾选。点击名称执行替换、追加或直接发送，追加遵循问题前／后位置并保留当时快照。拖动手柄可调整顺序。'));
+      sourcePicker = createSourcePicker({ document,
+        getSource: () => referenceInfo || { ownerTabId: context?.tabId, tabId: context?.tabId, title: context?.title || '当前网页', status: needsAccess ? 'needs-access' : 'ready' },
+        isBusy: () => delivering || templateApplying || sourceSwitching,
+        listTabs: () => request({ type: 'SIDER_SOURCE_TABS_LIST' }),
+        selectTab: async tabId => {
+          sourceSwitching = true;
+          try { await request({ type: 'SIDER_REFERENCE_SOURCE_SET', tabId }); prepared = null; }
+          finally { sourceSwitching = false; }
+        },
+        onSelected: () => { rememberInsertion(); report(referenceInfo?.error || '引用来源已切换。', Boolean(referenceInfo?.error)); schedulePosition(); },
+        onError: error => report(error.message, true),
+        requestAccess: () => requestSitePermission('SIDER_SOURCE_ACCESS_REQUEST'),
+      });
+      body.append(sourcePicker.element);
+      body.append(element('p', { class: 'note' }, '勾选以随下一条消息引用，发送后自动取消。点击名称立即应用；拖动手柄调整顺序。'));
       const list = element('div', { class: 'preset-list', 'aria-label': '预设顺序' }); body.append(list);
       for (const template of templates) {
         const row = element('div', { class: 'template-row', 'data-sort-id': template.id });
@@ -427,7 +482,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
       templates.forEach((item, index) => { const row = rows.get(item.id); if (list.children[index] !== row) list.insertBefore(row, list.children[index] || null); });
       motion.rearrange(before, list.children); renderedTemplates = templatesIdentity; installSorting(list);
     }
-    const source = $('#pane-body .source'); if (source) setText(source, context?.title || '当前网页');
+    sourcePicker?.sync();
     for (const row of root.querySelectorAll('.template-row')) {
       const use = row.querySelector('[data-template-id]');
       const template = templates.find(item => item.id === use?.dataset.templateId);
@@ -445,7 +500,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
       || saved.tabId !== context?.tabId || saved.url !== context?.url) throw new Error('问题、来源或会话已变化，请重新打开预设菜单。');
   }
   async function useTemplate(template) {
-    if (templateApplying || delivering) throw new Error('正在准备预设或发送，请等待完成。');
+    if (templateApplying || delivering || sourceSwitching) throw new Error('正在准备预设、发送或切换来源，请等待完成。');
     const saved = insertion; checkInsertion(saved);
     if (template.action === 'send') { startSend(saved.editor, { template, insertion: saved }); showPane(null); return; }
     templateApplying = true;
@@ -497,7 +552,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
       renderChips();
       if (cleanupError) throw new Error(error.message + '\n' + cleanupError.message);
       throw error;
-    } finally { templateApplying = false; if (delivery === transaction) delivery = null; }
+    } finally { templateApplying = false; if (delivery === transaction) delivery = null; sourcePicker?.sync(); }
   }
   function applyUploadName(block, filename, page, now) {
     applyAttachmentFilename(block, filename);
@@ -544,7 +599,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
           catch (cleanup) { throw new Error(error.message + '\n' + cleanup.message); }
           renderChips();
           throw error;
-        } finally { templateApplying = false; if (delivery === transaction) delivery = null; }
+        } finally { templateApplying = false; if (delivery === transaction) delivery = null; sourcePicker?.sync(); }
       }));
     }
     if (needsPageVariables((snapshot?.template || template).text)) body.append(button('查看正文快照', () => showPane('page')));
@@ -666,7 +721,13 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     return adapter.findSendButton();
   }
 
-  function contextStamp() { return JSON.stringify({ context, templates, needsAccess }); }
+  function contextStamp() {
+    // Initial source metadata can arrive after send preparation. Epoch zero
+    // describes the same owner page both before and after that hydration.
+    return JSON.stringify({ context, templates, needsAccess, referenceSource: {
+      ownerTabId: referenceInfo?.ownerTabId ?? context?.tabId, tabId: referenceInfo?.tabId ?? context?.tabId, epoch: referenceInfo?.epoch ?? 0,
+    } });
+  }
 
   function clearAttachment() {
     if (clearingAttachment) return clearingAttachment.promise;
@@ -757,6 +818,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
 
   function startSend(current, templateOptions = null) {
     if (delivering) return;
+    if (sourceSwitching) { report('正在切换引用来源，请稍后重新发送。', true); return; }
     const draft = getComposerText(current);
     const rawAvailability = adapter.availability();
     if (!rawAvailability.ready && !sendGap && !(templateOptions && rawAvailability.reason === 'send-missing')) { report(rawAvailability.detail, true); return; }
@@ -820,7 +882,8 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
         let target = findSendButton();
         if (!target && availability.reason === 'send-missing') target = await waitForSendControl(transaction, final.text, sendGap?.deadline || Date.now() + SEND_CONTROL_GRACE_MS);
         if (!target) throw new Error(adapter.site.name + ' 发送按钮尚未就绪，请稍后重新发送。');
-        const sentContext = { tabId: context.tabId, url: context.url, revision: context.revision };
+        const sentContext = { tabId: context.tabId, url: context.url, revision: context.revision,
+          ...(referenceInfo ? { referenceEpoch: referenceInfo.epoch } : {}) };
         report(compiled.notice || ''); transaction.replayed = true; replaying = true;
         try { adapter.send(target); } finally { replaying = false; }
         if (templateOptions && getComposerText(current) === final.text) {
@@ -857,7 +920,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
         renderChips();
         throw error;
       }
-    }, transaction).finally(() => { if (delivery === transaction) delivery = null; delivering = false; if (clearingAttachment?.settled) clearingAttachment = null; });
+    }, transaction).finally(() => { if (delivery === transaction) delivery = null; delivering = false; sourcePicker?.sync(); if (clearingAttachment?.settled) clearingAttachment = null; });
   }
 
   // Native editing/selecting must retain its default behavior, but these UI
@@ -883,7 +946,11 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     report(context?.pageError || '正文引用已就绪。', Boolean(context?.pageError));
   }));
   const outside = event => { if (pane && !event.composedPath().includes(host)) showPane(null, { restoreFocus: false }); };
-  const keyboard = event => { if (event.key === 'Escape') { if (sorting?.active) { event.preventDefault(); sorting.cancel(); } else showPane(null); } };
+  const keyboard = event => { if (event.key === 'Escape') {
+    if (sourcePicker?.isOpen()) { event.preventDefault(); sourcePicker.close(); }
+    else if (sorting?.active) { event.preventDefault(); sorting.cancel(); }
+    else showPane(null);
+  } };
   document.addEventListener('pointerdown', outside, true); document.addEventListener('keydown', keyboard, true);
   document.addEventListener('keydown', nativeSend, true); document.addEventListener('click', nativeSend, true);
   const nativeAttachmentRemoved = event => {
@@ -933,7 +1000,8 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
       let result;
       do {
         refreshAgain = false;
-        result = await request({ type: 'SIDER_TAB_CONTEXT_GET', ...(context ? { knownContext: { tabId: context.tabId, revision: context.revision } } : {}) });
+        result = await request({ type: 'SIDER_TAB_CONTEXT_GET', ...(context ? { knownContext: { tabId: context.tabId, revision: context.revision,
+          ...(referenceInfo ? { referenceEpoch: referenceInfo.epoch } : {}) } } : {}) });
       } while (refreshAgain && !disposed);
       return result;
     })().finally(() => { refreshPending = null; });
@@ -982,7 +1050,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   return { host, root, refresh, dispose() {
     if (disposed) return;
     delivery?.abort.abort(); void Promise.resolve(attachments.dispose()).catch(() => {}); disposeTextDrop();
-    disposed = true; sorting?.dispose(); clearSendGap(); observer.disconnect(); resizeObserver?.disconnect(); view.clearInterval(interval); view.clearTimeout(statusTimer);
+    disposed = true; sourcePicker?.dispose(); sorting?.dispose(); clearSendGap(); observer.disconnect(); resizeObserver?.disconnect(); view.clearInterval(interval); view.clearTimeout(statusTimer);
     if (mountFrame !== null) view.cancelAnimationFrame(mountFrame);
     showPane(null, { immediate: true, restoreFocus: false }); motion.dispose();
     for (const type of uiEvents) root.removeEventListener(type, containUIEvent);

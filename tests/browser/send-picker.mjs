@@ -55,6 +55,7 @@ try {
   await panel.goto(`chrome-extension://${id}/panel.html?sourceTab=${sourceTab.id}`);
   const chat=panel.frameLocator('iframe');
   const send=async message=>panel.evaluate(message=>chrome.runtime.sendMessage(message),message);
+  const reselect=async(kinds=['url','page'])=>{for(const kind of kinds){const result=await send({type:'SIDER_TAB_ATTACHMENT_SET',tabId:sourceTab.id,kind,enabled:true});assert.equal(result.ok,true,result.error);await chat.locator(`[data-chip="${kind}"]`).waitFor();}};
   await chat.locator('#sider-enhancement').waitFor();
   await send({type:'SIDER_TAB_ATTACHMENT_SET',tabId:sourceTab.id,kind:'url',enabled:true});
   await send({type:'SIDER_TAB_ATTACHMENT_SET',tabId:sourceTab.id,kind:'page',enabled:true});
@@ -68,22 +69,22 @@ try {
   await editor().fill('Draft stays here'); const oldURL=await panel.locator('iframe').getAttribute('src');await choose('gemini');
   assert.equal(await panel.locator('iframe').getAttribute('src'),oldURL);assert.equal(await editor().inputValue(),'Draft stays here');passed('global switch preserves current frame and draft');
   await reload();assert.equal(new URL(await panel.locator('iframe').getAttribute('src')).origin,'https://gemini.google.com');
-  await editor().fill('Gemini question');await editor().press('Enter');
+  await reselect();await editor().fill('Gemini question');await editor().press('Enter');
   await chat.locator('body').evaluate(()=>new Promise(resolve=>{const timer=setInterval(()=>{if(sent.length){clearInterval(timer);resolve()}},20)}));
   assert.ok((await waitSent())[0].includes(sourceURL));assert.ok((await chat.locator('body').evaluate(()=>uploaded[0].text)).includes(marker));passed('Gemini Quill native editing, drop upload and positive preview');
-  await choose('claude');await reload();await chat.locator('body').evaluate(()=>userFile());await editor().fill('Claude question');await chat.locator('#send').click();
+  await choose('claude');await reload();await reselect();await chat.locator('body').evaluate(()=>userFile());await editor().fill('Claude question');await chat.locator('#send').click();
   await chat.locator('body').evaluate(()=>new Promise(resolve=>{const timer=setInterval(()=>{if(sent.length){clearInterval(timer);resolve()}},20)}));
   assert.ok((await waitSent())[0].includes(sourceURL));assert.ok((await chat.locator('body').evaluate(()=>uploaded[0].text)).includes(marker));passed('Claude ProseMirror native editing and file-input upload');
-  await chat.locator('[data-chip="page"] button').click();assert.ok(await chat.getByRole('button',{name:'user.txt',exact:true}).count());passed('cancelling body removes only the generated attachment');
-  await panel.getByRole('button',{name:'AI 网站设置',exact:true}).click();await panel.getByRole('button',{name:'添加网站',exact:true}).click();
-  await panel.locator('#ai-site-name').fill('Custom fixture');await panel.locator('#ai-site-url').fill('https://custom-ai.test/chat');await panel.getByRole('button',{name:'保存网站',exact:true}).click();
+  await chat.locator('[data-chip="page"]').waitFor({state:'hidden'});assert.ok(await chat.getByRole('button',{name:'user.txt',exact:true}).count());passed('automatic preset deselection preserves the user attachment');
+  await panel.getByRole('button',{name:'AI 网站设置',exact:true}).click();await panel.locator('#ai-add-site').click();
+  await panel.locator('#ai-site-name').fill('Custom fixture');await panel.locator('#ai-site-url').fill('https://custom-ai.test/chat');await panel.locator('#ai-apply-site').click();
   const customId=await panel.locator('#ai-active-site').inputValue();await panel.getByRole('button',{name:'保存全局设置',exact:true}).click();await panel.locator('#ai-settings-dialog').waitFor({state:'hidden'});
   await panel.locator('#reload-chatgpt').click();await panel.locator('#connection-status').filter({hasText:'网页引用未就绪'}).waitFor();assert.match(await panel.locator('#connection-status').getAttribute('title'),/多个匹配/);passed('ambiguous custom site pauses enhancement and reports configuration');
   await panel.getByRole('button',{name:'AI 网站设置',exact:true}).click();await panel.getByRole('button',{name:'编辑网站',exact:true}).click();await panel.locator('#ai-custom-fields summary').click();
   await panel.locator('#ai-selector-composer').fill('#question');await panel.locator('#ai-selector-send').fill('#send');await panel.locator('#ai-selector-mount').fill('#custom-form');await panel.locator('#ai-send-shortcut').selectOption('ctrl-enter');
   await panel.setViewportSize({width:320,height:840});await panel.screenshot({path:'tmp/browser/send-picker-custom-settings-320.png'});
   const overflow=await panel.locator('#ai-settings-dialog').evaluate(el=>el.scrollWidth>el.clientWidth+1);assert.equal(overflow,false);passed('320px website settings layout has no horizontal overflow');
-  await panel.getByRole('button',{name:'保存网站',exact:true}).click();await panel.getByRole('button',{name:'保存全局设置',exact:true}).click();await panel.locator('#ai-settings-dialog').waitFor({state:'hidden'});await reload();
+  await panel.locator('#ai-apply-site').click();await panel.getByRole('button',{name:'保存全局设置',exact:true}).click();await panel.locator('#ai-settings-dialog').waitFor({state:'hidden'});await reload();
   await send({type:'SIDER_TAB_ATTACHMENT_SET',tabId:sourceTab.id,kind:'page',enabled:true});await editor().fill('Custom question');await editor().press('Control+Enter');
   await chat.locator('body').evaluate(()=>new Promise(resolve=>{const timer=setInterval(()=>{if(sent.length){clearInterval(timer);resolve()}},20)}));
   assert.ok((await waitSent())[0].includes(marker));assert.equal(await chat.locator('body').evaluate(()=>uploaded.length),0);assert.match(await chat.locator('.status').innerText(),/完整文本/);passed('custom configured shortcut and complete-text fallback');
@@ -111,7 +112,7 @@ try {
   const previousFrame=await panel.locator('iframe').getAttribute('src');await saveEdit();
   assert.equal(await panel.locator('iframe').getAttribute('src'),previousFrame);assert.equal(await editor().inputValue(),'Keep draft during calibration');
   assert.equal((await send({type:'SIDER_AI_WEB_SETTINGS_GET'})).settings.builtinOverrides.chatgpt.selectors.send,'button[id="send"]');
-  await reload();await editor().fill('One Enter with selected native button');await unknownButton();
+  await reload();await reselect(['url']);await editor().fill('One Enter with selected native button');await unknownButton();
   await panel.locator('#connection-status').filter({hasText:'网页引用已就绪'}).waitFor();
   await chat.locator('#send').evaluate(button=>{const replacement=button.cloneNode(true);replacement.onclick=button.onclick;button.replaceWith(replacement);});
   await editor().press('Enter');
@@ -132,7 +133,7 @@ try {
   await send({type:'SIDER_TAB_ATTACHMENT_SET',tabId:sourceTab.id,kind:'page',enabled:true});await editor().fill('Custom trusted shortcut');await editor().press('Control+Enter');await awaitSend(1);
   assert.ok((await waitSent())[0].includes(marker));assert.equal(await chat.locator('body').evaluate(()=>uploaded.length),0);
   passed('custom point-selected button preserves its shortcut and sends a complete text reference in one gesture');
-  await choose('gemini');await reload();await send({type:'SIDER_CONTEXT_SETTINGS_PATCH',patch:{pageMode:'auto'}});
+  await choose('gemini');await reload();assert.equal((await send({type:'SIDER_CONTEXT_SETTINGS_PATCH',tabId:sourceTab.id,patch:{pageMode:'auto'}})).ok,true);await reselect(['page']);
   await chat.locator('body').evaluate(()=>{window.dropObservations=[];const editor=document.querySelector('.ql-editor');for(const node of [editor,document.querySelector('.input-area'),document])node.addEventListener('drop',event=>dropObservations.push({targetIsEditor:event.target===editor,x:event.clientX,y:event.clientY,size:event.dataTransfer.files.length}));});
   await editor().fill('Drop reaches local and fullscreen handlers');await editor().press('Enter');await awaitSend(1);
   const observations=await chat.locator('body').evaluate(()=>dropObservations);assert.equal(observations.length,3);for(const observation of observations){assert.equal(observation.targetIsEditor,true);assert.equal(observation.size,1);assert.ok(observation.x>0&&observation.y>0);}

@@ -77,7 +77,8 @@ try {
     const url = `http://127.0.0.1:${article.address().port}/${key}`;
     await page.goto(url); await page.bringToFront();
     const currentBefore = await worker.evaluate(async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]);
-    assert.equal(currentBefore.url, undefined, 'Source must start without website access');
+    assert.equal(currentBefore.url, url, 'tabs permission exposes metadata without granting page access');
+    assert.equal(await worker.evaluate(() => chrome.permissions.contains({ origins: ['http://127.0.0.1/*'] })), false);
     const { targetInfos } = await browserCDP.send('Target.getTargets', { filter: [{ type: 'tab', exclude: false }] });
     const tabTarget = targetInfos.find(info => info.url === url);
     assert.ok(tabTarget, `Source ${key} must have a native browser tab target`);

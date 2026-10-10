@@ -101,7 +101,7 @@ export function applyTabDefaults(tabId, rawSettings, kinds) {
   });
 }
 
-function initializeTemplates(context, templates) {
+export function initializeTemplates(context, templates) {
   if (context.templateSelections !== null) return;
   const legacy = context.defaultsInitialized;
   context.templateSelections = Object.fromEntries(templates.map(item => [item.id, legacy && item.preset
@@ -109,7 +109,7 @@ function initializeTemplates(context, templates) {
     : item.defaultIncluded]));
   context.defaultsInitialized = true;
 }
-function syncTemplateDemand(context, templates) {
+export function syncTemplateDemand(context, templates) {
   const selected = templates.filter(item => context.templateSelections?.[item.id]
     && (!needsTemplateSelection(item) || context.selection?.content));
   context.selectionIncluded = Boolean(context.templateSelections?.[PRESET_IDS.selection]);

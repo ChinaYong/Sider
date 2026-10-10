@@ -98,8 +98,8 @@ try {
   await chat.getByRole('button',{name:'预设',exact:true}).click(); await chat.getByRole('button',{name:'删除预设 富文本预设',exact:true}).click();
   await assertEventually(async()=>assert.equal(await chat.locator('#pane-body [data-template-id]').count(),3)); await chat.getByRole('button',{name:'关闭',exact:true}).click();
   passed('real rich editor template creation, draft preservation, editing, variable directory, direct body send without enabling references, deletion and 420px layout');
-  await panel.getByRole('button',{name:'AI 网站设置',exact:true}).click();await panel.getByRole('button',{name:'添加网站',exact:true}).click();
-  await panel.locator('#ai-site-name').fill('Custom fixture');await panel.locator('#ai-site-url').fill('https://custom-ai.test/chat');await panel.getByRole('button',{name:'保存网站',exact:true}).click();
+  await panel.getByRole('button',{name:'AI 网站设置',exact:true}).click();await panel.locator('#ai-add-site').click();
+  await panel.locator('#ai-site-name').fill('Custom fixture');await panel.locator('#ai-site-url').fill('https://custom-ai.test/chat');await panel.locator('#ai-apply-site').click();
   const customId=await panel.locator('#ai-active-site').inputValue();await panel.getByRole('button',{name:'保存全局设置',exact:true}).click();await panel.locator('#ai-settings-dialog').waitFor({state:'hidden'});
   await panel.locator('#reload-chatgpt').click();await panel.locator('#connection-status').filter({hasText:'网页引用未就绪'}).waitFor();assert.match(await panel.locator('#connection-status').getAttribute('title'),/多个匹配/);passed('ambiguous custom site pauses enhancement and reports configuration');
   await panel.getByRole('button',{name:'AI 网站设置',exact:true}).click();
@@ -115,7 +115,7 @@ try {
   await panel.locator('#ai-selector-composer').fill('#question');await panel.locator('#ai-selector-send').fill('#send');await panel.locator('#ai-selector-mount').fill('#custom-form');await panel.locator('#ai-send-shortcut').selectOption('ctrl-enter');
   await panel.setViewportSize({width:320,height:840});await panel.screenshot({path:'tmp/browser/ai-web-settings-320.png'});
   const overflow=await panel.locator('#ai-settings-dialog').evaluate(el=>el.scrollWidth>el.clientWidth+1);assert.equal(overflow,false);passed('320px website settings layout has no horizontal overflow');
-  await panel.getByRole('button',{name:'保存网站',exact:true}).click();await panel.getByRole('button',{name:'保存全局设置',exact:true}).click();await panel.locator('#ai-settings-dialog').waitFor({state:'hidden'});await reload();
+  await panel.locator('#ai-apply-site').click();await panel.getByRole('button',{name:'保存全局设置',exact:true}).click();await panel.locator('#ai-settings-dialog').waitFor({state:'hidden'});await reload();
   await send({type:'SIDER_TAB_ATTACHMENT_SET',tabId:sourceTab.id,kind:'page',enabled:true});await chat.locator('#question').fill('Custom question');await chat.locator('#question').press('Control+Enter');
   await chat.locator('body').evaluate(()=>new Promise(resolve=>{const timer=setInterval(()=>{if(sent.length){clearInterval(timer);resolve()}},20)}));
   assert.ok((await waitSent())[0].includes(marker));assert.equal(await chat.locator('body').evaluate(()=>uploaded.length),0);assert.match(await chat.locator('.status').innerText(),/完整文本/);passed('custom configured shortcut and complete-text fallback');

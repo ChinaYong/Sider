@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "Sider native carrier capability fixture",
+  "version": "1.0.0",
+  "permissions": ["sidePanel", "tabs"],
+  "background": { "service_worker": "background.js" },
+  "side_panel": { "default_path": "carrier.html" }
+}

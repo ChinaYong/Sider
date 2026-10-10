@@ -435,7 +435,7 @@ test('background rejects default capture from a ChatGPT tab and opens the panel 
   assert.equal(mock.opened.length, 1);
   // Waiting on the same source queue flushes the shortcut and its source sync.
   await send({ type: 'SIDER_TAB_CONTEXT_GET', tabId: 1 });
-  assert.equal(mock.sent[0].message.type, 'SIDER_PAGE_SELECTION_GET');
+  assert.equal(mock.sent.find(item => item.message.type.startsWith('SIDER_PAGE_')).message.type, 'SIDER_PAGE_SELECTION_GET');
   await new Promise((resolve) => setTimeout(resolve, 10));
   const before = mock.sent.length;
   const previousURL = mock.source.url;
@@ -460,13 +460,17 @@ test('toolbar actions open the panel synchronously and prepare the invoked sourc
   const sender = { id: 'sider-test', url: mock.api.runtime.getURL('panel.html') };
   const result = await new Promise(resolve => listener({ type: 'SIDER_TAB_CONTEXT_GET', tabId: 1 }, sender, resolve));
   assert.equal(result.ok, true);
-  assert.equal(mock.injections[0].target.tabId, 1);
-  assert.deepEqual(mock.injections[0].files, ['page-content.js']);
+  const pageInjections = () => mock.injections.filter(item => item.files.includes('page-content.js'));
+  assert.equal(pageInjections()[0].target.tabId, 1);
+  assert.equal(pageInjections().length, 1);
+  assert.ok(mock.injections.some(item => item.target.tabId === 1 && item.files.includes('launcher-content.js')));
   assert.ok(mock.panelOptions.some(options => options.tabId === 1 && options.path === 'panel.html?sourceTab=1'));
   assert.ok(mock.panelOptions.some(options => options.tabId == null && options.enabled === false));
   assert.equal(mock.sent.at(-1).tabId, 1);
   mock.api.action.onClicked.emit(mock.chat);
-  assert.equal(mock.injections.length, 1); // The ChatGPT tab isn't a source to inject.
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pageInjections().length, 1); // The AI tab gets only a launcher, never source collection.
+  assert.ok(mock.injections.some(item => item.target.tabId === mock.chat.id && item.files.includes('launcher-content.js')));
 });
 
 test('an unexposed source URL can request site access in its own window without reading an older tab', async t => {

@@ -12,8 +12,19 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
   let editingBuiltin = false;
   let picking = false;
   let disposed = false;
+  let editOpener = null;
   document.defaultView.addEventListener('pagehide', () => { disposed = true; });
   const error = message => { $('#ai-settings-error').textContent = message; $('#ai-settings-error').hidden = !message; };
+  const status = message => { $('#ai-settings-status').textContent = message; $('#ai-settings-status').hidden = !message; };
+  function revealEditor() {
+    for (let parent = siteEditor.parentElement; parent && parent !== dialog; parent = parent.parentElement) if (parent.tagName === 'DETAILS') parent.open = true;
+    error('请先完成或取消当前网站编辑。'); $('#ai-apply-site').focus();
+  }
+  function finishEdit() {
+    siteEditor.hidden = true; editingId = null; error('');
+    const opener = editOpener?.isConnected ? editOpener : $('#ai-edit-site');
+    opener.focus();
+  }
   function renderSiteGroups() {
     const expanded = new Set([...siteGroups.children].filter(group => group.open).map(group => group.dataset.siteId));
     // Keep the shared editor and Gemini controls (and their listeners) when rebuilding the list.
@@ -47,7 +58,9 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
     renderSiteGroups();
   }
   function edit(site) {
-    if (!siteEditor.hidden) { error('请先保存或取消当前网站编辑。'); return; }
+    if (!siteEditor.hidden) { revealEditor(); return; }
+    editOpener = document.activeElement;
+    status('完成编辑后，点击「保存全局设置」应用更改。');
     if (site) {
       const group = [...siteGroups.children].find(candidate => candidate.dataset.siteId === site.id);
       siteMenu.open = true; group.open = true;
@@ -67,7 +80,7 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
   }
   async function open() {
     if (picking) return;
-    error(''); $('#ai-custom-fields').hidden = true; editingId = null;
+    error(''); status(''); $('#ai-custom-fields').hidden = true; editingId = null;
     siteMenu.open = false;
     for (const group of siteGroups.children) group.open = false;
     dialog.showModal();
@@ -84,13 +97,16 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
     void open();
   });
   $('#ai-close-settings').addEventListener('click', () => dialog.close());
-  $('#ai-active-site').addEventListener('change', () => { draft.activeSiteId = $('#ai-active-site').value; $('#ai-custom-fields').hidden = true; editingId = null; error(''); render(); });
+  $('#ai-active-site').addEventListener('change', () => {
+    if (!siteEditor.hidden) { $('#ai-active-site').value = draft.activeSiteId; revealEditor(); return; }
+    draft.activeSiteId = $('#ai-active-site').value; error(''); status('网站已选择，保存后生效。'); render();
+  });
   $('#ai-gemini-spark').addEventListener('change', () => { draft.geminiMode = $('#ai-gemini-spark').checked ? GEMINI_MODE_SPARK : GEMINI_MODE_NORMAL; error(''); });
   $('#ai-gemini-model').addEventListener('change', () => { draft.geminiModel = $('#ai-gemini-model').value; error(''); });
   $('#ai-gemini-thinking').addEventListener('change', () => { draft.geminiExtendedThinking = $('#ai-gemini-thinking').checked; error(''); });
   $('#ai-add-site').addEventListener('click', () => { error(''); edit(); });
   $('#ai-edit-site').addEventListener('click', () => { error(''); edit(selectedAISite(draft)); });
-  $('#ai-cancel-edit').addEventListener('click', () => { $('#ai-custom-fields').hidden = true; editingId = null; error(''); });
+  $('#ai-cancel-edit').addEventListener('click', () => { finishEdit(); status('已取消本次网站编辑。'); });
   $('#ai-reset-send').addEventListener('click', () => { $('#ai-selector-send').value = ''; $('#ai-pick-status').hidden = true; });
   $('#ai-pick-send').addEventListener('click', async () => {
     error('');
@@ -127,19 +143,19 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
           const existing = draft.customSites.some(candidate => candidate.id === site.id);
           return validateAIWebSettings({ ...draft, activeSiteId: existing ? draft.activeSiteId : site.id, customSites: [...draft.customSites.filter(candidate => candidate.id !== site.id), site] });
         })();
-      draft = settings; $('#ai-custom-fields').hidden = true; editingId = null; error(''); render();
+      draft = settings; finishEdit(); render(); $('#ai-edit-site').focus(); status('网站编辑已完成，保存全局设置后生效。');
     } catch (cause) { error(cause.name === 'SyntaxError' ? 'CSS 选择器无效，请检查高级配置。' : cause.message); }
   });
   $('#ai-remove-site').addEventListener('click', () => {
+    if (!siteEditor.hidden) { revealEditor(); return; }
     draft.customSites = draft.customSites.filter(site => site.id !== draft.activeSiteId); draft.activeSiteId = 'chatgpt';
     $('#ai-custom-fields').hidden = true; editingId = null; error(''); render();
   });
   $('#ai-save-settings').addEventListener('click', async () => {
     if (!$('#ai-custom-fields').hidden) {
-      for (let parent = siteEditor.parentElement; parent && parent !== dialog; parent = parent.parentElement) if (parent.tagName === 'DETAILS') parent.open = true;
-      error('请先保存或取消当前网站编辑。'); $('#ai-apply-site').focus(); return;
+      revealEditor(); return;
     }
-    const button = $('#ai-save-settings'); button.disabled = true; error('');
+    const button = $('#ai-save-settings'); button.disabled = true; button.textContent = '正在保存…'; button.setAttribute('aria-busy', 'true'); error('');
     const controls = [...dialog.querySelectorAll('input,select,button')].filter(control => control.id !== 'ai-close-settings' && control !== button);
     const disabled = controls.map(control => control.disabled);
     controls.forEach(control => { control.disabled = true; });
@@ -153,7 +169,7 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
       if (!result?.ok) throw new Error(result?.error || '设置保存失败，请重试。');
       dialog.close(); onSaved?.(normalizeAIWebSettings(result.settings));
     } catch (cause) { error(cause.message); }
-    finally { button.disabled = false; controls.forEach((control, index) => { control.disabled = disabled[index]; }); }
+    finally { button.disabled = false; button.textContent = '保存全局设置'; button.removeAttribute('aria-busy'); controls.forEach((control, index) => { control.disabled = disabled[index]; }); }
   });
   render();
 }

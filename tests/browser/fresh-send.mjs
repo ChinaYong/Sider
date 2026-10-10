@@ -69,7 +69,8 @@ try {
   const source = await context.newPage();
   const sourceURL = `http://127.0.0.1:${article.address().port}/article`;
   await source.goto(sourceURL); await source.bringToFront();
-  assert.equal(await worker.evaluate(async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0].url), undefined);
+  assert.equal(await worker.evaluate(async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0].url), sourceURL);
+  assert.equal(await worker.evaluate(() => chrome.permissions.contains({ origins: ['http://127.0.0.1/*'] })), false);
   const { targetInfos } = await browserCDP.send('Target.getTargets', { filter: [{ type: 'tab', exclude: false }] });
   const target = targetInfos.find(info => info.url === sourceURL); assert.ok(target);
   await browserCDP.send('Extensions.triggerAction', { id: extensionId, targetId: target.targetId });

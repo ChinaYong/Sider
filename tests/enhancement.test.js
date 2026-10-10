@@ -20,6 +20,25 @@ const selection = (text = '当前选中的词汇') => createReference({ kind: 's
 const page = (text = '完整的网页正文') => createReference({ kind: 'page', title: '当前网页', url: 'https://example.com/article', content: text }, { alias: 'r2' });
 const customSite = normalizeCustomAISite({ id: 'custom-test-ai-0001', name: 'Custom AI', url: 'https://custom-ai.test/chat' });
 
+test('initial owner-source metadata arriving during send preparation is not treated as a source switch', async t => {
+  const f = fixture(t); await pause(); await f.seed({ attachments: { url: true } });
+  const original = f.chrome.runtime.sendMessage;
+  let preparing = false, hydrated = false;
+  f.chrome.runtime.sendMessage = async message => {
+    if (message.request.type === 'SIDER_TEMPLATE_CONTEXT_GET') preparing = true;
+    const result = await original(message);
+    if (preparing && message.request.type === 'SIDER_TAB_CONTEXT_GET') {
+      hydrated = true;
+      return { ...result, referenceSource: { ownerTabId: f.context.tabId, tabId: f.context.tabId, epoch: 0, title: f.context.title, status: 'ready', error: '' } };
+    }
+    return result;
+  };
+  f.editor.value = '导航后立即提问'; assert.equal(f.send(), true);
+  await waitUntil(() => f.submitted.length === 1);
+  assert.equal(hydrated, true); assert.match(f.submitted[0], /导航后立即提问/);
+  assert.match(f.submitted[0], /https:\/\/example\.com\/article/);
+});
+
 function openTemplates(f, from = f.editor.value.length, to = from) {
   f.editor.focus(); f.editor.setSelectionRange(from, to);
   f.root.querySelector('[data-pane="templates"]').dispatchEvent(new f.window.Event('pointerdown', { bubbles: true }));
@@ -205,7 +224,9 @@ test('a sender becoming Stop during reference preparation is never replayed and 
   const button = f.window.document.querySelector('button');
   button.setAttribute('aria-label', 'Stop generating');
   button.addEventListener('click', () => { clicks++; });
-  release(); await pause();
+  release();
+  const deadline = Date.now() + 2000;
+  while (!/发送按钮尚未就绪/.test(f.root.querySelector('.status').textContent) && Date.now() < deadline) await pause();
   assert.equal(clicks, 0);
   assert.deepEqual(f.submitted, []);
   assert.equal(f.editor.value, '保留原问题');
@@ -357,7 +378,7 @@ test('background refresh preserves template controls and focused cancellation bu
  await f.seed({ title: '新页面标题', attachments: { url: false, page: null }, pageRequested: false, selectionIncluded: false, selection: null });
  assert.equal(f.root.querySelector('[aria-label="发送时引用 网页正文"]'), checkbox);
  assert.equal(f.root.activeElement, checkbox); assert.equal(checkbox.checked, false);
- assert.equal(f.root.querySelector('.source').textContent, '新页面标题'); assert.deepEqual(f.submitted, []);
+ assert.equal(f.root.querySelector('.source-title').textContent, '新页面标题'); assert.deepEqual(f.submitted, []);
 });
 
 test('refresh cannot enable another body request while its reference control is pending', async t => {
