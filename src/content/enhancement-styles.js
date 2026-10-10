@@ -1,8 +1,10 @@
+import { DEFAULT_FONT_FAMILY } from '../font-settings.js';
+
 // Shadow-root styles use the same neutral surfaces and indigo accent as the panel.
 export const enhancementStyles = `
 :host {
   all:initial; display:block; position:relative; flex:0 0 auto; align-self:stretch; box-sizing:border-box;
-  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
+  font-family:var(--sider-font-family,${DEFAULT_FONT_FAMILY});
   font-size:12px; line-height:1.5; width:100%; min-width:0; z-index:30; color:var(--ink); color-scheme:light;
   --canvas:#f3f4f8; --surface:#fff; --subtle:#f6f7fb; --inset:#eef0f6; --hover:#e9edf5;
   --line:#dfe3ed; --control-line:#bac3d5; --ink:#20283d; --muted:#5d6880;
@@ -71,7 +73,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .form .template-row>input{width:15px;height:15px;flex:none;padding:0;margin:0 3px;accent-color:var(--focus);cursor:pointer}
 .preset-add{width:100%;margin-top:8px;padding:9px;color:var(--focus);background:var(--surface);border:1px dashed var(--control-line);font-size:11px}
 .danger{color:var(--danger)} .danger:hover{background:var(--danger-soft)}
-.page-body{white-space:pre-wrap;overflow-wrap:anywhere;max-height:36dvh;overflow:auto;font:12px/1.8 ui-monospace,monospace;user-select:text;background:var(--surface);padding:12px;border:1px solid var(--line);border-radius:8px}
+.page-body{white-space:pre-wrap;overflow-wrap:anywhere;max-height:36dvh;overflow:auto;font-size:12px;line-height:1.8;font-family:inherit;user-select:text;background:var(--surface);padding:12px;border:1px solid var(--line);border-radius:8px}
 .page-meta{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;color:var(--muted)}
 .source{font-size:11px;color:var(--muted);line-height:1.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:0 0 9px;padding:8px 10px;background:var(--surface);border-radius:7px}
 .source-picker{margin-bottom:9px;min-width:0} .source-label{margin:0 0 7px;font-size:11px;font-weight:600;color:var(--muted)}

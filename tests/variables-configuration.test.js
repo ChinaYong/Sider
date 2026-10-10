@@ -35,7 +35,7 @@ test('configuration roundtrip replaces every supported key and excludes cached p
   const backup = exportConfiguration(stored);
   assert.equal(JSON.stringify(backup).includes('私有草稿'), false); assert.equal(JSON.stringify(backup).includes('尾标记'), false);
   assert.deepEqual(validateConfiguration(JSON.parse(JSON.stringify(backup))).configuration, backup.configuration);
-  assert.equal(Object.keys(configurationStorage(backup)).length, 4);
+  assert.equal(Object.keys(configurationStorage(backup)).length, 5);
   stored[LAUNCHER_SETTINGS_KEY] = { floating: false, side: 'left', y: 0.25 };
   assert.deepEqual(configurationStorage(exportConfiguration(stored))[LAUNCHER_SETTINGS_KEY], normalizeLauncherSettings(stored[LAUNCHER_SETTINGS_KEY]));
   delete backup.configuration.launcher;

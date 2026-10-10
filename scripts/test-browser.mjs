@@ -6,7 +6,7 @@ import path from 'node:path';
 const root = fileURLToPath(new URL('../', import.meta.url));
 process.chdir(root);
 await mkdir('tmp/browser', { recursive: true });
-const suites = ['permissions', 'context', 'fresh-send', 'entry-drop', 'gemini-upload', 'send-picker', 'ai-web', 'unified-templates', 'reference-source', 'motion', 'ui-settings', 'launcher', 'side-panel-capabilities'];
+const suites = ['permissions', 'context', 'fresh-send', 'entry-drop', 'gemini-upload', 'send-picker', 'ai-web', 'unified-templates', 'reference-source', 'motion', 'ui-settings', 'font-settings', 'launcher', 'side-panel-capabilities'];
 const chosen = process.argv.slice(2);
 for (const suite of chosen.length ? chosen : suites) {
   if (!suites.includes(suite)) throw new Error(`Unknown browser suite: ${suite}`);

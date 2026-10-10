@@ -4,9 +4,10 @@ import { AI_WEB_SETTINGS_KEY, normalizeAIWebSettings, validateAIWebSettings, lis
 import { PROMPT_TEMPLATES_KEY, LEGACY_UNIFIED_TEMPLATES_KEY, UNIFIED_TEMPLATES_KEY, validatePromptTemplates, validateTemplates, migrateTemplates, migrateUnifiedTemplates } from './prompt-templates.js';
 import { parseAttachmentRegion } from './attachment-region.js';
 import { LAUNCHER_SETTINGS_KEY, normalizeLauncherSettings, validateLauncherSettings } from './launcher-settings.js';
+import { FONT_SETTINGS_KEY, normalizeFontSettings, validateFontSettings, fontLabel } from './font-settings.js';
 
 export const ENABLED_ORIGINS_KEY = 'siderEnabledOrigins';
-export const CONFIGURATION_KEYS = [UNIFIED_TEMPLATES_KEY, LEGACY_UNIFIED_TEMPLATES_KEY, CONTEXT_SETTINGS_KEY, AI_WEB_SETTINGS_KEY, PROMPT_TEMPLATES_KEY, ENABLED_ORIGINS_KEY, LAUNCHER_SETTINGS_KEY];
+export const CONFIGURATION_KEYS = [UNIFIED_TEMPLATES_KEY, LEGACY_UNIFIED_TEMPLATES_KEY, CONTEXT_SETTINGS_KEY, AI_WEB_SETTINGS_KEY, PROMPT_TEMPLATES_KEY, ENABLED_ORIGINS_KEY, LAUNCHER_SETTINGS_KEY, FONT_SETTINGS_KEY];
 const object = value => Boolean(value && typeof value === 'object' && !Array.isArray(value));
 
 export function validateOrigins(origins) {
@@ -43,26 +44,28 @@ export function validateConfiguration(raw, document) {
     try { parse(selector, { context: 'selectorList' }); document?.querySelector(selector); }
     catch { throw new Error(`${site.name} 的 CSS 选择器无效：${selector}`); }
   }
-  return { format: 'sider-configuration', version: 3, configuration: { aiWeb, templates, enabledOrigins: validateOrigins(config.enabledOrigins), launcher: config.launcher === undefined ? normalizeLauncherSettings() : validateLauncherSettings(config.launcher) } };
+  return { format: 'sider-configuration', version: 3, configuration: { aiWeb, templates, enabledOrigins: validateOrigins(config.enabledOrigins), launcher: config.launcher === undefined ? normalizeLauncherSettings() : validateLauncherSettings(config.launcher), font: config.font === undefined ? normalizeFontSettings() : validateFontSettings(config.font) } };
 }
 
 export function exportConfiguration(stored) {
   return { format: 'sider-configuration', version: 3, exportedAt: new Date().toISOString(), configuration: {
     aiWeb: normalizeAIWebSettings(stored[AI_WEB_SETTINGS_KEY]),
     launcher: normalizeLauncherSettings(stored[LAUNCHER_SETTINGS_KEY]),
+    font: normalizeFontSettings(stored[FONT_SETTINGS_KEY]),
     templates: stored[UNIFIED_TEMPLATES_KEY] !== undefined ? validateTemplates(stored[UNIFIED_TEMPLATES_KEY]) : stored[LEGACY_UNIFIED_TEMPLATES_KEY] !== undefined ? migrateUnifiedTemplates(stored[LEGACY_UNIFIED_TEMPLATES_KEY]) : migrateTemplates(stored[CONTEXT_SETTINGS_KEY] === undefined ? undefined : normalizeContextSettings(stored[CONTEXT_SETTINGS_KEY]), stored[PROMPT_TEMPLATES_KEY] || []), enabledOrigins: validateOrigins(stored[ENABLED_ORIGINS_KEY] || []),
   } };
 }
 
 export function configurationStorage(config) {
   const value = validateConfiguration(config).configuration;
-  return { [UNIFIED_TEMPLATES_KEY]: value.templates, [AI_WEB_SETTINGS_KEY]: value.aiWeb, [ENABLED_ORIGINS_KEY]: value.enabledOrigins, [LAUNCHER_SETTINGS_KEY]: value.launcher };
+  return { [UNIFIED_TEMPLATES_KEY]: value.templates, [AI_WEB_SETTINGS_KEY]: value.aiWeb, [ENABLED_ORIGINS_KEY]: value.enabledOrigins, [LAUNCHER_SETTINGS_KEY]: value.launcher, [FONT_SETTINGS_KEY]: value.font };
 }
 
 export function configurationSummary(before, after) {
   const old = validateConfiguration(before).configuration, next = validateConfiguration(after).configuration;
   const names = sites => sites.map(site => site.name).join('、') || '无';
   const defaults = items => names(items.filter(item => item.defaultIncluded));
+  const font = `扩展字体：${fontLabel(old.font)} → ${fontLabel(next.font)}\n`;
   const details = [`悬浮球：${next.launcher.floating ? '开启' : '关闭'}，${next.launcher.side === 'left' ? '左侧' : '右侧'}，高度 ${Math.round(next.launcher.y * 100)}%，${next.launcher.mode === 'whitelist' ? '白名单模式' : '黑名单模式'}\n悬浮球黑名单：${next.launcher.blacklist.join('、') || '无'}\n悬浮球白名单：${next.launcher.whitelist.join('、') || '无'}`, ...next.templates.map(item => `${item.name}：${item.position === 'prepend' ? '问题前' : '问题后'}，${({ replace: '替换', append: '追加', send: '直接发送' })[item.action]}，${item.delivery === 'text' ? '文本' : item.delivery === 'file' ? '附件' : `超过 ${item.threshold} 字符转附件`}，${parseAttachmentRegion(item.text).marked ? '指定附件区域' : '整条内容'}\n附件说明：${item.attachmentText}`)].join('\n');
-  return `将完整替换以下配置：\n自定义网站：${names(old.aiWeb.customSites)} → ${names(next.aiWeb.customSites)}\n选用网站：${listAISites(next.aiWeb).find(site => site.id === next.aiWeb.activeSiteId).name}\n默认勾选：${defaults(old.templates)} → ${defaults(next.templates)}\n预设：${names(old.templates)} → ${names(next.templates)}\n${details}\n自动划词网站：${next.enabledOrigins.join('、') || '无'}\nGemini 界面、模型、思考选项及网站控件配置也按文件替换。\n旧网站和旧预设不会合并。权限须在使用时授权，当前会话和草稿保留。`;
+  return `将完整替换以下配置：\n自定义网站：${names(old.aiWeb.customSites)} → ${names(next.aiWeb.customSites)}\n选用网站：${listAISites(next.aiWeb).find(site => site.id === next.aiWeb.activeSiteId).name}\n默认勾选：${defaults(old.templates)} → ${defaults(next.templates)}\n预设：${names(old.templates)} → ${names(next.templates)}\n${font}${details}\n自动划词网站：${next.enabledOrigins.join('、') || '无'}\nGemini 界面、模型、思考选项及网站控件配置也按文件替换。\n旧网站和旧预设不会合并。权限须在使用时授权，当前会话和草稿保留。`;
 }

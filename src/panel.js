@@ -2,6 +2,7 @@ import { AI_WEB_SETTINGS_KEY, BUILTIN_AI_SITES, aiSiteURL, normalizeAIWebSetting
 import { installAIWebSettings } from './ai-web-settings.js';
 import { installConfigurationUI } from './configuration-ui.js';
 import { installLauncherSettingsUI } from './launcher-settings-ui.js';
+import { installFontSettingsUI } from './font-settings-ui.js';
 import { createMotion, installDialogMotion } from './motion.js';
 
 const $ = selector => document.querySelector(selector);
@@ -358,6 +359,7 @@ function settingsUpdated(settings) {
 installAIWebSettings({ document, chrome: globalThis.chrome, pickSendButton: pickNativeSendButton, onSaved(settings) { settingsUpdated(settings); showToast('AI 网站设置已保存，重新加载侧栏后生效。'); } });
 installConfigurationUI({ document, chrome: globalThis.chrome, onImported(settings) { $('#ai-settings-dialog').close(); settingsUpdated(settings); } });
 installLauncherSettingsUI({ document, chrome: globalThis.chrome, sourceTabId });
+installFontSettingsUI({ document, chrome: globalThis.chrome });
 const disposeDialogs = installDialogMotion(document, motion);
 window.addEventListener('pagehide', () => { clearTimeout(toastTimer); motion.dispose(); disposeDialogs(); });
 const settingsChanged = (changes, area) => { if (area === 'local' && changes[AI_WEB_SETTINGS_KEY]) settingsUpdated(normalizeAIWebSettings(changes[AI_WEB_SETTINGS_KEY].newValue)); };
