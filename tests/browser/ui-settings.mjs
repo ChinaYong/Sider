@@ -42,10 +42,15 @@ try {
     await page.emulateMedia({ colorScheme, reducedMotion: 'reduce' });
     await page.locator('#ai-settings-toggle').click();
     await page.locator('#ai-save-settings').waitFor({ state: 'visible' });
+    await page.locator('#reference-hide-unavailable-tabs').scrollIntoViewIfNeeded();
+    assert.equal(await page.locator('#reference-hide-unavailable-tabs').isChecked(), false);
     await page.screenshot({ path: `tmp/browser/ui-settings-${width}-${colorScheme}.png` });
     await page.locator('#ai-site-settings > summary').click();
     await page.locator('[data-site-id="gemini"] > summary').click();
     await page.locator('#ai-gemini-spark').check();
+    await page.locator('#ai-gemini-model').selectOption('argon');
+    await page.locator('#ai-gemini-thinking').selectOption('medium');
+    assert.equal(await page.locator('#ai-settings-dialog').evaluate(node => node.scrollWidth > node.clientWidth), false);
     await page.locator('[data-site-id="gemini"] > summary').scrollIntoViewIfNeeded();
     await page.screenshot({ path: `tmp/browser/ui-gemini-${width}-${colorScheme}.png` });
     await page.locator('[data-site-id="claude"] > summary').click();
@@ -74,11 +79,21 @@ try {
   }
   await page.locator('#ai-settings-toggle').click();
   await page.locator('#ai-active-site').selectOption('gemini');
+  await page.locator('#ai-site-settings > summary').click();
+  await page.locator('[data-site-id="gemini"] > summary').click();
+  await page.locator('#ai-gemini-model').selectOption('argon');
+  await page.locator('#ai-gemini-thinking').selectOption('medium');
+  await page.locator('#reference-hide-unavailable-tabs').check();
   await page.locator('#ai-save-settings').click();
   assert.equal(await page.locator('#ai-save-settings').getAttribute('aria-busy'), 'true');
   await page.waitForFunction(() => !document.querySelector('#ai-settings-dialog').open);
   await page.locator('#ai-settings-toggle').click();
   assert.equal(await page.locator('#ai-active-site').inputValue(), 'gemini');
+  assert.equal(await page.locator('#reference-hide-unavailable-tabs').isChecked(), true);
+  await page.locator('#ai-site-settings > summary').click();
+  await page.locator('[data-site-id="gemini"] > summary').click();
+  assert.equal(await page.locator('#ai-gemini-model').inputValue(), 'argon');
+  assert.equal(await page.locator('#ai-gemini-thinking').inputValue(), 'medium');
   assert.equal(await page.evaluate(() => saved.length), 1);
   console.log('PASS saving feedback and a single persisted change survive reopening');
   assert.deepEqual(errors, []);

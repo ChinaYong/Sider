@@ -32,8 +32,8 @@
     <button id="copy-diagnostics">复制连接信息</button>
   </dialog>
   <dialog id="ai-settings-dialog" aria-labelledby="ai-settings-title">
-    <div class="dialog-title"><strong id="ai-settings-title">AI 网站设置</strong><button id="ai-close-settings" aria-label="关闭 AI 网站设置">×</button></div>
-    <p class="dialog-intro">选择常用 AI，管理网站偏好与侧栏入口。</p>
+    <div class="dialog-title"><strong id="ai-settings-title">AI 网站设置</strong><button id="ai-close-settings" aria-label="关闭 AI 网站设置"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <p class="dialog-intro">选择常用 AI，管理网站偏好、引用列表与侧栏入口。</p>
     <section class="settings-card" aria-labelledby="ai-preferences-title">
       <div class="settings-card-heading"><h2 id="ai-preferences-title">AI 网站</h2><span class="scope-badge">保存后生效</span></div>
       <div class="settings-card-body">
@@ -52,12 +52,19 @@
             <section class="setting-block" aria-labelledby="gemini-response-title">
               <h3 id="gemini-response-title">模型与思考</h3>
               <label for="ai-gemini-model">默认模型</label><select id="ai-gemini-model"></select>
-              <div class="setting-toggle"><label for="ai-gemini-thinking">开启扩展思考</label><input id="ai-gemini-thinking" type="checkbox" role="switch" aria-label="开启 Gemini 扩展思考" aria-describedby="ai-gemini-model-help"></div>
+              <label for="ai-gemini-thinking">思考等级</label><select id="ai-gemini-thinking" aria-describedby="ai-gemini-model-help"></select>
               <p id="ai-gemini-model-help" class="setting-help">加载后尝试应用，是否可用取决于账号和原站版本。</p>
             </section>
           </div>
         </details>
         <div id="ai-editor-home"></div>
+      </div>
+    </section>
+    <section class="settings-card" aria-labelledby="reference-preferences-title">
+      <div class="settings-card-heading"><h2 id="reference-preferences-title">引用</h2><span class="scope-badge">保存后生效</span></div>
+      <div class="settings-card-body">
+        <div class="setting-toggle"><label for="reference-hide-unavailable-tabs">隐藏不可用的引用标签页</label><input id="reference-hide-unavailable-tabs" type="checkbox" role="switch" aria-describedby="reference-hide-unavailable-tabs-help"></div>
+        <p id="reference-hide-unavailable-tabs-help" class="setting-help">隐藏浏览器内部页和 AI 网站页。未授权的普通网页仍会显示，选择后可授权。所有侧栏共用，保存后更新引用来源列表。</p>
       </div>
     </section>
     <details id="launcher-settings" class="settings-card">

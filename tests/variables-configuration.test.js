@@ -7,6 +7,7 @@ import { CONTEXT_SETTINGS_KEY, composeContextPrompt, normalizeContextSettings } 
 import { PROMPT_TEMPLATES_KEY, validatePromptTemplates, pageAlreadyInline } from '../src/prompt-templates.js';
 import { captureComposerSelection } from '../src/content/composer.js';
 import { LAUNCHER_SETTINGS_KEY, normalizeLauncherSettings } from '../src/launcher-settings.js';
+import { AI_WEB_SETTINGS_KEY, normalizeAIWebSettings } from '../src/ai-web.js';
 
 const context = { tabId: 1, url: 'https://example.test/article', title: '标题 {{url}}', selection: { content: '词', context: '段落' }, attachments: { page: { url: 'https://example.test/article', title: '标题', content: '# 原文\n包含 {{filename}}\n尾标记', capturedAt: '2026-10-05T06:00:00Z', metadata: { author: '作者', publishedAt: '2026-10-01' } } } };
 
@@ -36,12 +37,36 @@ test('configuration roundtrip replaces every supported key and excludes cached p
   assert.equal(JSON.stringify(backup).includes('私有草稿'), false); assert.equal(JSON.stringify(backup).includes('尾标记'), false);
   assert.deepEqual(validateConfiguration(JSON.parse(JSON.stringify(backup))).configuration, backup.configuration);
   assert.equal(Object.keys(configurationStorage(backup)).length, 4);
+  stored[AI_WEB_SETTINGS_KEY] = normalizeAIWebSettings({ hideUnavailableTabs: true });
+  const visibilityBackup = exportConfiguration(stored);
+  assert.equal(configurationStorage(visibilityBackup)[AI_WEB_SETTINGS_KEY].hideUnavailableTabs, true);
+  delete visibilityBackup.configuration.aiWeb.hideUnavailableTabs;
+  assert.equal(validateConfiguration(visibilityBackup).configuration.aiWeb.hideUnavailableTabs, false);
+  visibilityBackup.configuration.aiWeb.hideUnavailableTabs = 'true';
+  assert.throws(() => validateConfiguration(visibilityBackup), /引用标签页设置无效/);
   stored[LAUNCHER_SETTINGS_KEY] = { floating: false, side: 'left', y: 0.25 };
   assert.deepEqual(configurationStorage(exportConfiguration(stored))[LAUNCHER_SETTINGS_KEY], normalizeLauncherSettings(stored[LAUNCHER_SETTINGS_KEY]));
   delete backup.configuration.launcher;
   assert.deepEqual(validateConfiguration(backup).configuration.launcher, normalizeLauncherSettings());
   backup.configuration.launcher = { floating: true, side: 'right', y: 2 };
   assert.throws(() => validateConfiguration(backup), /悬浮球设置/);
+});
+
+test('Gemini backup roundtrips levels and migrates legacy booleans without exporting them', () => {
+  for (const level of ['low', 'medium', 'high']) {
+    const backup = exportConfiguration({ [AI_WEB_SETTINGS_KEY]: { activeSiteId: 'gemini', customSites: [], geminiModel: 'argon', geminiThinkingLevel: level } });
+    const restored = configurationStorage(validateConfiguration(JSON.parse(JSON.stringify(backup))))[AI_WEB_SETTINGS_KEY];
+    assert.equal(restored.geminiModel, 'argon'); assert.equal(restored.geminiThinkingLevel, level);
+    assert.equal(Object.hasOwn(restored, 'geminiExtendedThinking'), false);
+  }
+  for (const enabled of [false, true]) {
+    const backup = exportConfiguration({});
+    delete backup.configuration.aiWeb.geminiThinkingLevel;
+    backup.configuration.aiWeb.geminiExtendedThinking = enabled;
+    assert.equal(validateConfiguration(backup).configuration.aiWeb.geminiThinkingLevel, enabled ? 'high' : 'low');
+    backup.configuration.aiWeb.geminiThinkingLevel = 'invalid';
+    assert.throws(() => validateConfiguration(backup), /思考等级设置无效/);
+  }
 });
 
 test('malformed and incomplete configuration cannot normalize into an implicit merge', () => {

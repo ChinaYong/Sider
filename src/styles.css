@@ -97,7 +97,8 @@ dialog::backdrop { background: #141a2a66; opacity: 1; transition: opacity 120ms 
   border-bottom: 1px solid var(--line); margin: 0 -16px 14px; padding: 0 16px;
 }
 .dialog-title strong { font-size: 17px; letter-spacing: -.3px; font-weight: 650; }
-.dialog-title button { font-size: 23px; width: 30px; height: 30px; padding: 0; flex: none; color: var(--muted); }
+.dialog-title button { display: grid; place-items: center; font-size: 23px; line-height: 1; width: 30px; height: 30px; padding: 0; flex: none; color: var(--muted); }
+.dialog-title button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
 dialog p { font-size: 12px; color: var(--muted); line-height: 1.75; overflow-wrap: anywhere; }
 dialog .dialog-intro { margin: 0 0 16px; }
 dialog pre { font-size: 11px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--inset); padding: 12px; border: 1px solid var(--line); border-radius: 8px; }

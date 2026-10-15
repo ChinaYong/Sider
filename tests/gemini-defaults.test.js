@@ -2,9 +2,130 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { applyGeminiDefaults, installGeminiDefaults } from '../src/content/gemini-defaults.js';
+import { mountGeminiMenu } from './fixtures/gemini-menu.js';
 
 const defaults = { geminiModel: 'pro', geminiExtendedThinking: true };
 const labels = { 'flash-lite': '3.5 Flash-Lite', flash: '3.8 Flash', pro: '3.1 Pro' };
+
+function modernFixture(t, options = {}) {
+  const { window } = new JSDOM('<textarea id="draft">保留我的问题</textarea>', { url: 'https://gemini.google.com/app', pretendToBeVisual: true });
+  t.after(() => window.close());
+  return Object.assign(mountGeminiMenu(window.document, options), { window, document: window.document });
+}
+
+for (const compact of [false, true]) for (const model of ['flash-lite', 'flash', 'pro', 'argon']) for (const thinkingLevel of ['low', 'medium', 'high']) {
+  test(`new Gemini ${compact ? 'inline compact' : 'desktop submenu'} selects ${model}/${thinkingLevel} and verifies rebuilt menus`, async t => {
+    const f = modernFixture(t, { compact, inline: compact, english: !compact, changeDelay: 20, submenuDelay: 20 });
+    const draft = f.document.querySelector('#draft'); draft.focus(); draft.setSelectionRange(1, 3);
+    const settings = { geminiModel: model, geminiThinkingLevel: thinkingLevel };
+    assert.equal((await apply(f, settings, { timeoutMs: 1600 })).complete, true);
+    assert.deepEqual(f.state, { model, thinkingLevel });
+    assert.equal(f.counts.models, model === 'flash-lite' ? 0 : 1);
+    assert.equal(f.counts.thinking, thinkingLevel === 'low' ? 0 : 1);
+    const counts = { ...f.counts };
+    assert.equal((await apply(f, settings, { timeoutMs: 1600 })).complete, true);
+    assert.equal(f.counts.models, counts.models); assert.equal(f.counts.thinking, counts.thinking);
+    assert.equal(f.document.querySelector('[role="menu"]'), null);
+    assert.equal(f.document.documentElement.hasAttribute('data-sider-gemini-auto'), false);
+    assert.equal(draft.value, '保留我的问题'); assert.equal(f.document.activeElement, draft);
+    assert.equal(draft.selectionStart, 1); assert.equal(draft.selectionEnd, 3);
+  });
+}
+
+test('a checked nested thinking option cannot pollute model or thinking trigger recognition', async t => {
+  const f = modernFixture(t, { rebuild: false, thinkingLevel: 'high' });
+  // Move the submenu inside its trigger to model an accordion DOM hierarchy.
+  f.picker.addEventListener('click', () => {
+    if (f.menu) f.menu.querySelector('[value="thinking_level"]').append(f.submenu);
+  });
+  const result = await apply(f, { geminiModel: 'argon', geminiThinkingLevel: 'medium' });
+  assert.equal(result.complete, true); assert.deepEqual(f.state, { model: 'argon', thinkingLevel: 'medium' });
+});
+
+test('compact inline choices are recognized without clicking their nested implementation buttons', async t => {
+  const f = modernFixture(t, { compact: true, inline: true, model: 'argon' });
+  let innerClicks = 0;
+  f.picker.addEventListener('click', () => {
+    if (!f.submenu) return;
+    for (const choice of f.submenu.querySelectorAll('[data-level]')) {
+      const button = f.document.createElement('button');
+      button.textContent = choice.querySelector('.label').textContent;
+      button.addEventListener('click', () => { innerClicks++; });
+      choice.append(button);
+    }
+  });
+  const result = await apply(f, { geminiModel: 'argon', geminiThinkingLevel: 'high' });
+  assert.equal(result.complete, true);
+  assert.equal(f.state.thinkingLevel, 'high'); assert.equal(f.counts.thinking, 1); assert.equal(innerClicks, 0);
+  assert.equal(f.document.querySelector('[role="menu"]'), null);
+});
+
+for (const kind of ['disabled', 'duplicate', 'missing']) test('unavailable new thinking choices stop without a click: ' + kind, async t => {
+  const f = modernFixture(t);
+  f.picker.addEventListener('click', () => {
+    const target = f.submenu?.querySelector('[data-level="medium"]');
+    if (!target) return;
+    if (kind === 'disabled') target.setAttribute('aria-disabled', 'true');
+    else if (kind === 'duplicate') target.after(target.cloneNode(true));
+    else target.remove();
+  });
+  const result = await apply(f, { geminiModel: 'flash-lite', geminiThinkingLevel: 'medium' });
+  assert.equal(result.reason, 'thinking-unavailable'); assert.equal(f.counts.thinking, 0);
+  assert.equal(f.document.querySelector('[role="menu"]'), null);
+});
+
+test('an ignored new level click reports failure without repeating the mutation', async t => {
+  const f = modernFixture(t, { ignoreThinking: true });
+  assert.equal((await apply(f, { geminiModel: 'flash-lite', geminiThinkingLevel: 'high' }, { timeoutMs: 180 })).reason, 'thinking-unconfirmed');
+  assert.equal(f.counts.thinking, 1);
+});
+
+for (const kind of ['disabled', 'duplicate', 'missing']) test('unavailable Argon model stops without choosing another model: ' + kind, async t => {
+  const f = modernFixture(t);
+  f.picker.addEventListener('click', () => {
+    const target = f.menu?.querySelector('[data-model="argon"]');
+    if (!target) return;
+    if (kind === 'disabled') target.setAttribute('aria-disabled', 'true');
+    else if (kind === 'duplicate') target.after(target.cloneNode(true));
+    else target.remove();
+  });
+  const result = await apply(f, { geminiModel: 'argon', geminiThinkingLevel: 'medium' }, { timeoutMs: 180 });
+  assert.equal(result.reason, 'model-unavailable'); assert.equal(f.counts.models, 0); assert.equal(f.counts.thinking, 0);
+  assert.equal(f.state.model, 'flash-lite'); assert.equal(f.document.querySelector('[role="menu"]'), null);
+});
+
+test('Medium cannot silently approximate an old Extended toggle', async t => {
+  const f = fixture(t, { native: true, model: 'pro' });
+  assert.equal((await apply(f, { geminiModel: 'pro', geminiThinkingLevel: 'medium' })).reason, 'thinking-unavailable');
+  assert.equal(f.counts.thinking, 0); clean(f);
+});
+
+test('a legacy toggle with unknown state is never clicked', async t => {
+  const f = fixture(t, { model: 'pro' });
+  f.thinkingControl.removeAttribute('aria-checked');
+  assert.equal((await apply(f)).reason, 'thinking-state-unknown');
+  assert.equal(f.counts.thinking, 0); clean(f);
+});
+
+test('the installer does not replay an unconfirmed thinking mutation', async t => {
+  const f = fixture(t, { native: true, model: 'pro', ignoreThinking: true });
+  let finish;
+  const done = new Promise(resolve => { finish = resolve; });
+  const manager = installGeminiDefaults({ document: f.document, settings: defaults, applyTimeoutMs: 180, retryDelayMs: 10, onResult: finish });
+  t.after(() => manager.dispose()); manager.start();
+  assert.equal((await done).reason, 'thinking-unconfirmed');
+  assert.equal(f.counts.thinking, 1); clean(f);
+});
+
+test('cancellation during submenu hydration preserves the existing level and clears owned overlays', async t => {
+  const f = modernFixture(t, { submenuDelay: 400 });
+  const controller = new f.window.AbortController();
+  f.window.setTimeout(() => controller.abort('user-interaction'), 60);
+  const result = await apply(f, { geminiModel: 'flash-lite', geminiThinkingLevel: 'high' }, { signal: controller.signal });
+  assert.equal(result.reason, 'user-interaction'); assert.equal(f.state.thinkingLevel, 'low');
+  assert.equal(f.counts.thinking, 0); assert.equal(f.document.querySelector('[role="menu"]'), null);
+  assert.equal(f.document.documentElement.hasAttribute('data-sider-gemini-auto'), false);
+});
 
 function fixture(t, { model = 'flash-lite', thinking = false, native = false, compact = false, url = 'https://gemini.google.com/app', toggleDelay = 0, ignoreThinking = false } = {}) {
   const { window } = new JSDOM('<textarea id="draft">保留我的问题</textarea><button id="picker" aria-controls="menu" aria-expanded="false"></button><div id="menu" role="menu" hidden></div>', { url, pretendToBeVisual: true });

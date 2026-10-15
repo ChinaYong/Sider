@@ -331,15 +331,18 @@ async function capturePageSnapshot(tabId) {
 }
 
 async function sourceTabsList(ownerTabId) {
+  await aiSettingsInitialization;
   const owner = await chrome.tabs.get(ownerTabId);
   const session = await referenceSessions.get(ownerTabId);
   const tabs = (await chrome.tabs.query({})).filter(tab => Number.isSafeInteger(tab.id));
   tabs.sort((a, b) => Number(b.windowId === owner.windowId) - Number(a.windowId === owner.windowId)
     || a.windowId - b.windowId || (a.index || 0) - (b.index || 0));
-  return { ok: true, ownerTabId, ownerWindowId: owner.windowId, sourceTabId: session?.sourceTabId ?? ownerTabId, tabs: tabs.map(tab => ({
+  const choices = tabs.map(tab => ({
     tabId: tab.id, windowId: tab.windowId, title: tab.title || tab.url || '未命名标签页', url: tab.url || '',
     disabledReason: !isWebURL(tab.url) ? '浏览器内部页面不支持引用' : isChatURL(tab.url) ? 'AI 网站页面不支持引用' : '',
-  })) };
+  }));
+  return { ok: true, ownerTabId, ownerWindowId: owner.windowId, sourceTabId: session?.sourceTabId ?? ownerTabId,
+    tabs: aiWebSettings.hideUnavailableTabs ? choices.filter(tab => !tab.disabledReason) : choices };
 }
 
 async function ownedContextResponse(tabId, options) {
@@ -1164,7 +1167,7 @@ async function handleMessage(message, sender) {
     case 'SIDER_AI_WEB_SETTINGS_SAVE': return saveAISettings(message.settings);
     case 'SIDER_CONFIGURATION_EXPORT': await getTemplates(); return { ok: true, backup: exportConfiguration(await chrome.storage.local.get(CONFIGURATION_KEYS)) };
     case 'SIDER_CONFIGURATION_IMPORT': return importConfiguration(message);
-    case 'SIDER_GEMINI_DEFAULTS_GET': return { ok: true, settings: { geminiModel: aiWebSettings.geminiModel, geminiExtendedThinking: aiWebSettings.geminiExtendedThinking } };
+    case 'SIDER_GEMINI_DEFAULTS_GET': return { ok: true, settings: { geminiModel: aiWebSettings.geminiModel, geminiThinkingLevel: aiWebSettings.geminiThinkingLevel } };
     case 'SIDER_ENHANCEMENT_REQUEST': return enhancementRequest(message, sender);
     case 'SIDER_SELECTION_CHANGED': return receiveSelection(message, sender);
     case 'SIDER_OPEN_SOURCE_PANEL': return changeTabAttachment(sender.tab.id, 'selection', true);

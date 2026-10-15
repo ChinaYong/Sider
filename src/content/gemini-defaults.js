@@ -1,4 +1,4 @@
-import { GEMINI_MODEL_FLASH, GEMINI_MODEL_FLASH_LITE, GEMINI_MODEL_PRO, normalizeGeminiDefaults } from '../ai-web.js';
+import { GEMINI_MODEL_FLASH, GEMINI_MODEL_FLASH_LITE, GEMINI_MODEL_PRO, GEMINI_MODEL_ARGON, normalizeGeminiDefaults } from '../ai-web.js';
 
 const PICKER_LABEL = /(?:mode|model)\s*picker|(?:打开|开启).*(?:模型|模式)|(?:模型|模式).*(?:选择|切换)/i;
 const EXTENDED = /extended|扩展|延伸/i;
@@ -30,11 +30,29 @@ function enabled(node) {
 }
 
 function modelOf(text) {
-  text = String(text).replace(/Gemini(?=Flash|Pro)/gi, 'Gemini ');
+  text = String(text).replace(/Gemini(?=Flash|Pro|Argon)/gi, 'Gemini ');
   if (/flash\s*[- ]?\s*lite/i.test(text)) return GEMINI_MODEL_FLASH_LITE;
   if (/\bflash\b/i.test(text)) return GEMINI_MODEL_FLASH;
   if (/\bpro\b/i.test(text)) return GEMINI_MODEL_PRO;
+  if (/\bargon\b/i.test(text)) return GEMINI_MODEL_ARGON;
   return null;
+}
+
+function levelOf(text) {
+  if (/\blow\b|低点|低點|^(?:低|低等)(?:\s|$)/i.test(text)) return 'low';
+  if (/\bmedium\b|中等/i.test(text)) return 'medium';
+  if (/\bhigh\b|高点|高點|^(?:高|高等)(?:\s|$)/i.test(text)) return 'high';
+  return null;
+}
+
+// A compact accordion can contain its submenu inside the parent item. Its
+// descendants must not become the parent's label or selection evidence.
+function itemText(node) {
+  const label = [...node.querySelectorAll('.label')].find(part => part.closest(ITEM) === node);
+  if (label) return textOf(label);
+  const copy = node.cloneNode(true);
+  for (const menu of copy.querySelectorAll(MENU)) menu.remove();
+  return textOf(copy);
 }
 
 function findPicker(document) {
@@ -50,7 +68,15 @@ function findPicker(document) {
 }
 
 function items(document, menu) {
-  return [...menu.querySelectorAll(ITEM)].filter(node => visible(document, node) && !node.parentElement?.closest(ITEM));
+  return [...menu.querySelectorAll(ITEM)].filter(node => {
+    const parent = node.parentElement?.closest(ITEM);
+    // Compact Gemini renders the three native choices inside an expandable
+    // menuitem, with no nested role=menu. Keep those choices while excluding
+    // implementation buttons inside an ordinary menuitem.
+    const inlineChoice = parent?.matches('gem-menu-item[value="thinking_level"][aria-expanded="true"]')
+      && node.matches('gem-menu-item[role="menuitem"]');
+    return node.closest(MENU) === menu && visible(document, node) && (!parent || !menu.contains(parent) || inlineChoice);
+  });
 }
 
 function menus(document) {
@@ -66,7 +92,7 @@ function selected(node) {
     if (['true', 'checked', 'on', 'selected'].includes(value)) return true;
     if (['false', 'unchecked', 'off', 'unselected'].includes(value)) return false;
   }
-  if (node.matches('.selected') || node.querySelector('gem-menu-item-content.selected,[aria-label="Selected"],[aria-label="已选中"],[fonticon="check"],[data-mat-icon-name="check"]')) return true;
+  if (node.matches('.selected') || [...node.querySelectorAll('gem-menu-item-content.selected,[aria-label="Selected"],[aria-label="已选中"],[fonticon="check"],[data-mat-icon-name="check"]')].some(part => part.closest(ITEM) === node)) return true;
   if (node.matches('gem-menu-item') && node.querySelector('gem-menu-item-content.checkmark-only')) return false;
   return null;
 }
@@ -77,20 +103,18 @@ function pickerModel(picker, document) {
   const explicit = modelOf(picker.getAttribute('aria-label') || '');
   if (explicit) return explicit;
   const menu = boundMenu(document, picker);
-  const checked = menu && items(document, menu).filter(node => modelOf(textOf(node)) && selected(node) === true);
-  if (checked?.length === 1) return modelOf(textOf(checked[0]));
+  const checked = menu && items(document, menu).filter(node => modelOf(itemText(node)) && selected(node) === true);
+  if (checked?.length === 1) return modelOf(itemText(checked[0]));
   return modelOf(textOf(picker));
 }
 
 function pickerThinking(picker) {
   const text = textOf(picker);
-  if (EXTENDED.test(text)) return true;
-  if (STANDARD.test(text)) return false;
-  // Desktop: primary=Pro, secondary=Extended. Compact: primary=Gemini,
-  // secondary=Pro. The latter badge says nothing about extended thinking.
-  if (picker.closest('gem-button[data-test-id="bard-mode-menu-button"]') || /^gemini$/i.test(picker.querySelector('.picker-primary-text')?.textContent.trim() || '')) return null;
-  if (picker.matches('[data-test-id="bard-mode-menu-button"],button.input-area-switch')) return false;
-  return null;
+  if (EXTENDED.test(text)) return 'high';
+  if (STANDARD.test(text)) return 'low';
+  // Absence of an Extended badge no longer implies Low. New pickers display
+  // only the model, so consult the actual thinking menu in that case.
+  return levelOf(picker.querySelector('.picker-secondary-text')?.textContent || '');
 }
 
 function boundMenu(document, trigger) {
@@ -99,7 +123,7 @@ function boundMenu(document, trigger) {
     const found = ids.map(id => document.getElementById(id)).filter(node => node && visible(document, node));
     return found.length === 1 ? found[0] : null;
   }
-  const candidates = menus(document).filter(menu => menu.matches('[data-test-id="gem-mode-menu"]') || items(document, menu).some(node => modelOf(textOf(node))));
+  const candidates = menus(document).filter(menu => menu.matches('[data-test-id="gem-mode-menu"]') || items(document, menu).some(node => modelOf(itemText(node))));
   return candidates.length === 1 ? candidates[0] : null;
 }
 
@@ -221,66 +245,70 @@ export async function applyGeminiDefaults(document, rawSettings, { signal, timeo
       return menu && items(document, menu).length ? menu : null;
     }, 'model-menu-missing');
   };
-  const confirmThinking = async (choice, radio) => {
-    let verificationOpened = false;
-    await wait(async () => {
-      let next = choice.isConnected && visible(document, choice) ? selected(choice) : null;
-      const inline = pickerThinking(currentPicker);
-      if (next === null && inline === null && !verificationOpened) {
-        // The compact header has no thinking indicator and the native click
-        // dismisses its menu. Reopen invisibly once to read the actual checkmark.
-        verificationOpened = true;
-        const menu = await open();
-        const options = items(document, menu).filter(node => radio && !settings.extendedThinking ? STANDARD.test(textOf(node)) : EXTENDED.test(textOf(node)) && !LEVEL.test(textOf(node)));
-        if (options.length !== 1) throw new Error('thinking-unconfirmed');
-        choice = options[0]; next = selected(choice);
+  const thinkingItems = menu => items(document, menu).filter(node => {
+    const text = itemText(node);
+    return !modelOf(text) && !LEVEL.test(text) && (levelOf(text) || EXTENDED.test(text) || STANDARD.test(text));
+  });
+  const thinkingChoice = async () => {
+    let menu = await open();
+    let candidates = thinkingItems(menu);
+    if (!candidates.length) {
+      const triggers = items(document, menu).filter(node => LEVEL.test(itemText(node)));
+      if (triggers.length !== 1 || !enabled(triggers[0])) throw new Error('thinking-unavailable');
+      const trigger = triggers[0];
+      const ids = ((trigger.getAttribute('aria-controls') || '') + ' ' + (trigger.getAttribute('aria-owns') || '')).trim().split(/\s+/).filter(Boolean);
+      const previous = new Set(menus(document));
+      const readSubmenu = () => {
+        const main = boundMenu(document, currentPicker);
+        const controlled = ids.map(id => document.getElementById(id)).filter(node => node && visible(document, node) && thinkingItems(node).length);
+        if (controlled.length > 1) throw new Error('thinking-unavailable');
+        if (controlled.length === 1) return controlled[0];
+        if (main && thinkingItems(main).length) return main;
+        const found = menus(document).filter(node => !previous.has(node) && thinkingItems(node).length);
+        if (found.length > 1) throw new Error('thinking-unavailable');
+        return found[0];
+      };
+      menu = readSubmenu();
+      if (!menu) {
+        check(); trigger.click();
+        menu = await wait(readSubmenu, 'thinking-menu-missing');
       }
-      return radio ? next === true || next === null && inline === settings.extendedThinking : (next ?? inline) === settings.extendedThinking;
-    }, 'thinking-unconfirmed', stableMs);
+      candidates = thinkingItems(menu);
+    }
+    const radio = candidates.some(node => levelOf(itemText(node)) || STANDARD.test(itemText(node)));
+    if (!radio && settings.thinkingLevel === 'medium') throw new Error('thinking-unavailable');
+    const targets = candidates.filter(node => {
+      const text = itemText(node);
+      if (!radio) return EXTENDED.test(text);
+      return (levelOf(text) || (STANDARD.test(text) ? 'low' : EXTENDED.test(text) ? 'high' : null)) === settings.thinkingLevel;
+    });
+    if (targets.length !== 1 || !enabled(targets[0])) throw new Error('thinking-unavailable');
+    return { node: targets[0], radio, expected: radio || settings.thinkingLevel === 'high' };
   };
   try {
     check();
     if (pickerModel(currentPicker, document) !== settings.model) {
-      const menu = await open();
+      await open();
       const options = await wait(() => {
-        const found = items(document, menu).filter(node => modelOf(textOf(node)) === settings.model);
+        const menu = boundMenu(document, currentPicker);
+        const found = menu ? items(document, menu).filter(node => modelOf(itemText(node)) === settings.model) : [];
         return found.length ? found : null;
       }, 'model-unavailable');
       if (options.length !== 1 || !enabled(options[0])) throw new Error('model-unavailable');
       options[0].click();
       await wait(() => pickerModel(currentPicker, document) === settings.model, 'model-unconfirmed', stableMs);
     }
-    if (pickerThinking(currentPicker) !== settings.extendedThinking) {
-      let menu = await open();
-      let candidates = items(document, menu);
-      let extended = candidates.filter(node => EXTENDED.test(textOf(node)) && !LEVEL.test(textOf(node)));
-      const level = candidates.filter(node => LEVEL.test(textOf(node)));
-      let radio = candidates.some(node => STANDARD.test(textOf(node)));
-      if (extended.length !== 1 && level.length === 1 && enabled(level[0])) {
-        const previous = new Set(menus(document));
-        level[0].click();
-        menu = await wait(() => {
-          const controlled = boundMenu(document, level[0]);
-          if (controlled && controlled !== menu) return controlled;
-          const submenus = menus(document).filter(node => !previous.has(node));
-          return submenus.length === 1 ? submenus[0] : null;
-        }, 'thinking-menu-missing');
-        candidates = items(document, menu);
-        extended = candidates.filter(node => EXTENDED.test(textOf(node)));
-        radio = true;
-      }
-      const targets = radio && !settings.extendedThinking ? candidates.filter(node => STANDARD.test(textOf(node))) : extended;
-      if (targets.length !== 1 || !enabled(targets[0])) throw new Error('thinking-unavailable');
-      const choice = targets[0];
-      if (radio) {
-        if (selected(choice) !== true) choice.click();
-        await confirmThinking(choice, true);
-      } else {
-        const state = selected(choice) ?? pickerThinking(currentPicker);
-        if (state === null) throw new Error('thinking-state-unknown');
-        if (state !== settings.extendedThinking) choice.click();
-        await confirmThinking(choice, false);
-      }
+    if (pickerThinking(currentPicker) !== settings.thinkingLevel) {
+      let choice = await thinkingChoice();
+      const state = selected(choice.node);
+      if (!choice.radio && state === null) throw new Error('thinking-state-unknown');
+      if (state !== choice.expected) { check(); choice.node.click(); }
+      await wait(async () => {
+        // Native choices can dismiss and destroy both menus. Reacquire the
+        // model menu and its thinking submenu; never repeat the choice click.
+        if (!choice.node.isConnected || !visible(document, choice.node)) choice = await thinkingChoice();
+        return selected(choice.node) === choice.expected;
+      }, 'thinking-unconfirmed', stableMs);
     }
     await wait(() => pickerModel(currentPicker, document) === settings.model, 'model-unconfirmed', stableMs);
     return { complete: true, model: true, thinking: true };
@@ -334,7 +362,7 @@ export function installGeminiDefaults({ document, settings, getSettings, timeout
         for (const type of ['pointerdown', 'keydown', 'input']) document.addEventListener(type, interrupt, true);
         try {
           const defaults = getSettings ? await getSettings() : settings;
-          const retryable = new Set(['model-picker-missing', 'model-picker-replaced', 'model-menu-missing', 'model-unconfirmed', 'thinking-menu-missing', 'thinking-unconfirmed']);
+          const retryable = new Set(['model-picker-missing', 'model-picker-replaced', 'model-menu-missing', 'model-unconfirmed', 'thinking-menu-missing']);
           let result;
           // A rendered trigger can precede its native popover's hydration. Retry
           // only transient failures, always re-reading selection before clicking.

@@ -22,6 +22,35 @@ test('source picker lists all accessible windows and marks unsupported pages wit
   assert.equal((await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: -1 })).ok, false);
 });
 
+test('saved reference visibility filters unsupported tabs across windows and survives worker restart without changing the source', async () => {
+  const f = await fixture(); await f.register(1);
+  f.tabs.get(2).windowId = 27;
+  f.tabs.set(4, { id: 4, windowId: 27, index: 2, url: 'chrome://settings/', title: '设置' });
+  f.tabs.set(5, { id: 5, windowId: 9, index: 3, url: 'https://chatgpt.com/', title: 'ChatGPT' });
+  f.tabs.set(6, { id: 6, windowId: 27, index: 3, url: 'https://ungranted.test/', title: '待授权网页' });
+  const before = await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 2 });
+  const settings = (await f.send({ type: 'SIDER_AI_WEB_SETTINGS_GET' })).settings;
+  const save = hideUnavailableTabs => f.send({ type: 'SIDER_AI_WEB_SETTINGS_SAVE', settings: { ...settings, hideUnavailableTabs } });
+  assert.equal((await save(true)).ok, true);
+  f.api.permissions.contains = async request => !request.origins?.includes('https://ungranted.test/*');
+  let result = await f.wrapped(1, { type: 'SIDER_SOURCE_TABS_LIST' });
+  assert.deepEqual(result.tabs.map(tab => tab.tabId), [1, 3, 2, 6]);
+  assert.equal(result.sourceTabId, 2);
+  assert.deepEqual((await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' })).context, before.context);
+  assert.equal((await save('true')).ok, false);
+  assert.equal(f.local[AI_WEB_SETTINGS_KEY].hideUnavailableTabs, true);
+  await f.restart();
+  result = await f.wrapped(1, { type: 'SIDER_SOURCE_TABS_LIST' });
+  assert.deepEqual(result.tabs.map(tab => tab.tabId), [1, 3, 2, 6]);
+  assert.equal(result.sourceTabId, 2);
+  assert.equal((await save(false)).ok, true);
+  result = await f.wrapped(1, { type: 'SIDER_SOURCE_TABS_LIST' });
+  assert.deepEqual(result.tabs.map(tab => tab.tabId), [1, 3, 5, 2, 4, 6]);
+  assert.match(result.tabs.find(tab => tab.tabId === 4).disabledReason, /内部/);
+  assert.match(result.tabs.find(tab => tab.tabId === 5).disabledReason, /AI/);
+  assert.equal(f.tabs.get(1).active, true); assert.equal(f.opened.length, 0);
+});
+
 test('borrowing a cross-window source keeps sidebar choices and does not mutate the borrowed sidebar context', async () => {
   const f = await fixture(); await f.register(1); await f.register(2);
   await f.select(1, 'A 的划词'); await f.select(2, 'B 的划词');

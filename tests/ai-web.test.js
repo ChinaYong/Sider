@@ -132,7 +132,11 @@ test('AI website settings default to ChatGPT and isolate site origins exactly', 
   assert.equal(normalizeAIWebSettings().activeSiteId, 'chatgpt');
   assert.equal(normalizeAIWebSettings().geminiMode, 'normal');
   assert.equal(normalizeAIWebSettings().geminiModel, 'flash-lite');
-  assert.equal(normalizeAIWebSettings().geminiExtendedThinking, false);
+  assert.equal(normalizeAIWebSettings().geminiThinkingLevel, 'low');
+  assert.equal(normalizeAIWebSettings().hideUnavailableTabs, false);
+  assert.equal(normalizeAIWebSettings({ hideUnavailableTabs: 'true' }).hideUnavailableTabs, false);
+  assert.equal(validateAIWebSettings({ activeSiteId: 'chatgpt', customSites: [], hideUnavailableTabs: true }).hideUnavailableTabs, true);
+  assert.throws(() => validateAIWebSettings({ activeSiteId: 'chatgpt', customSites: [], hideUnavailableTabs: 'true' }), /引用标签页设置无效/);
   assert.deepEqual(listAISites().map(site => site.id), ['chatgpt', 'gemini', 'claude']);
   assert.equal(siteForURL('https://chatgpt.com.evil.test/'), null);
   assert.equal(siteForURL('http://chatgpt.com/'), null);
@@ -152,10 +156,25 @@ test('Gemini interface mode resolves the normal and Spark entry URLs without cha
   assert.equal(normalizeAIWebSettings({ activeSiteId: 'gemini', customSites: [], geminiMode: 'invalid' }).geminiMode, 'normal');
   assert.throws(() => validateAIWebSettings({ activeSiteId: 'gemini', customSites: [], geminiMode: 'invalid' }), /界面设置无效/);
   const defaults = validateAIWebSettings({ activeSiteId: 'gemini', customSites: [], geminiModel: GEMINI_MODEL_PRO, geminiExtendedThinking: true });
-  assert.deepEqual(normalizeGeminiDefaults(defaults), { model: GEMINI_MODEL_PRO, extendedThinking: true });
+  assert.deepEqual(normalizeGeminiDefaults(defaults), { model: GEMINI_MODEL_PRO, thinkingLevel: 'high' });
   assert.equal(normalizeAIWebSettings({ activeSiteId: 'gemini', customSites: [], geminiModel: 'unknown' }).geminiModel, 'flash-lite');
   assert.throws(() => validateAIWebSettings({ activeSiteId: 'gemini', customSites: [], geminiModel: 'unknown' }), /默认模型设置无效/);
   assert.throws(() => validateAIWebSettings({ activeSiteId: 'gemini', customSites: [], geminiExtendedThinking: 'yes' }), /扩展思考设置无效/);
+});
+
+test('Gemini thinking migration preserves model families and gives explicit levels precedence', () => {
+  for (const model of ['flash-lite', 'flash', 'pro', 'argon']) for (const level of ['low', 'medium', 'high']) {
+    const saved = validateAIWebSettings({ activeSiteId: 'gemini', customSites: [], geminiModel: model, geminiThinkingLevel: level, geminiExtendedThinking: true });
+    assert.deepEqual(normalizeGeminiDefaults(saved), { model, thinkingLevel: level });
+    assert.equal(Object.hasOwn(saved, 'geminiExtendedThinking'), false);
+  }
+  assert.equal(normalizeAIWebSettings({ geminiExtendedThinking: false }).geminiThinkingLevel, 'low');
+  assert.equal(normalizeAIWebSettings({ geminiExtendedThinking: true }).geminiThinkingLevel, 'high');
+  assert.deepEqual(normalizeGeminiDefaults({ model: 'argon', thinkingLevel: 'medium' }), { model: 'argon', thinkingLevel: 'medium' });
+  for (const value of ['unknown', '', true, null, 2]) {
+    assert.throws(() => validateAIWebSettings({ activeSiteId: 'gemini', customSites: [], geminiThinkingLevel: value, geminiExtendedThinking: true }), /思考等级设置无效/);
+    assert.equal(normalizeAIWebSettings({ geminiThinkingLevel: value, geminiExtendedThinking: true }).geminiThinkingLevel, 'low');
+  }
 });
 
 test('custom website validation rejects unsafe addresses, duplicate origins, reserved sites and corrupt persisted entries', () => {
@@ -166,7 +185,7 @@ test('custom website validation rejects unsafe addresses, duplicate origins, res
 });
 
 test('builtin selector overrides keep immutable site identity and preserve old settings without migration', () => {
-  assert.deepEqual(normalizeAIWebSettings(), { activeSiteId: 'chatgpt', customSites: [], geminiMode: 'normal', geminiModel: 'flash-lite', geminiExtendedThinking: false });
+  assert.deepEqual(normalizeAIWebSettings(), { activeSiteId: 'chatgpt', customSites: [], geminiMode: 'normal', geminiModel: 'flash-lite', geminiThinkingLevel: 'low', hideUnavailableTabs: false });
   const settings = validateAIWebSettings({ activeSiteId: 'claude', customSites: [custom()], builtinOverrides: { claude: { url: 'https://evil.test', adapter: 'generic', selectors: { send: ' #picked ' } } } });
   const site = selectedAISite(settings);
   assert.equal(site.origin, 'https://claude.ai'); assert.equal(site.adapter, 'claude'); assert.equal(site.selectors.send, '#picked');

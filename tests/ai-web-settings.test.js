@@ -15,7 +15,7 @@ async function fixture(t, settings = normalizeAIWebSettings(), pickSendButton = 
   dialog.showModal = () => { dialog.open = true; }; dialog.close = () => { dialog.open = false; };
   const messages = [], picked = [];
   const chrome = {
-    runtime: { id: 'settings-test', async sendMessage(message) { messages.push(message); return message.type === 'SIDER_AI_WEB_SETTINGS_GET' ? { ok: true, settings } : { ok: true, settings: message.settings }; } },
+    runtime: { id: 'settings-test', async sendMessage(message) { messages.push(message); if (message.type === 'SIDER_AI_WEB_SETTINGS_SAVE') settings = message.settings; return { ok: true, settings }; } },
     permissions: { async request() { return true; } },
   };
   installAIWebSettings({ document, chrome, pickSendButton: async site => { picked.push(site); return pickSendButton(site); } });
@@ -23,20 +23,49 @@ async function fixture(t, settings = normalizeAIWebSettings(), pickSendButton = 
   return { window, document, dialog, messages, picked, $: selector => document.querySelector(selector) };
 }
 
+test('reference visibility defaults to showing unavailable tabs, cancels unsaved edits and persists after saving', async t => {
+  const f = await fixture(t);
+  const toggle = f.$('#reference-hide-unavailable-tabs');
+  assert.equal(toggle.checked, false);
+  toggle.click(); f.$('#ai-close-settings').click();
+  f.$('#ai-settings-toggle').click(); await settle();
+  assert.equal(toggle.checked, false);
+  toggle.click(); f.$('#ai-save-settings').click(); await settle();
+  assert.equal(f.messages.at(-1).settings.hideUnavailableTabs, true);
+  f.$('#ai-settings-toggle').click(); await settle();
+  assert.equal(toggle.checked, true);
+  toggle.click(); f.$('#ai-save-settings').click(); await settle();
+  assert.equal(f.messages.at(-1).settings.hideUnavailableTabs, false);
+});
+
 test('Gemini Spark switch is persisted and defaults to the normal interface', async t => {
   const f = await fixture(t);
   const toggle = f.$('#ai-gemini-spark');
   assert.equal(toggle.checked, false);
   assert.equal(f.$('#ai-gemini-model').value, 'flash-lite');
-  assert.equal(f.$('#ai-gemini-thinking').checked, false);
+  assert.equal(f.$('#ai-gemini-thinking').value, 'low');
+  assert.deepEqual([...f.$('#ai-gemini-model').options].map(option => option.value), ['flash-lite', 'flash', 'pro', 'argon']);
   toggle.click();
   f.$('#ai-gemini-model').value = 'pro'; f.$('#ai-gemini-model').dispatchEvent(new f.window.Event('change'));
-  f.$('#ai-gemini-thinking').click();
+  f.$('#ai-gemini-thinking').value = 'medium'; f.$('#ai-gemini-thinking').dispatchEvent(new f.window.Event('change'));
   f.$('#ai-save-settings').click(); await settle();
   assert.equal(f.messages.at(-1).settings.geminiMode, 'spark');
   assert.equal(f.messages.at(-1).settings.geminiModel, 'pro');
-  assert.equal(f.messages.at(-1).settings.geminiExtendedThinking, true);
+  assert.equal(f.messages.at(-1).settings.geminiThinkingLevel, 'medium');
+  assert.equal(Object.hasOwn(f.messages.at(-1).settings, 'geminiExtendedThinking'), false);
   assert.equal(toggle.checked, true);
+  f.$('#ai-settings-toggle').click(); await settle();
+  assert.equal(f.$('#ai-gemini-thinking').value, 'medium');
+});
+
+test('legacy extended thinking is shown as High and Argon persists with the new field', async t => {
+  const f = await fixture(t, { activeSiteId: 'gemini', customSites: [], geminiExtendedThinking: true });
+  assert.equal(f.$('#ai-gemini-thinking').value, 'high');
+  f.$('#ai-gemini-model').value = 'argon'; f.$('#ai-gemini-model').dispatchEvent(new f.window.Event('change'));
+  f.$('#ai-save-settings').click(); await settle();
+  f.$('#ai-settings-toggle').click(); await settle();
+  assert.equal(f.$('#ai-gemini-model').value, 'argon');
+  assert.equal(f.$('#ai-gemini-thinking').value, 'high');
 });
 
 test('per-site settings collapse independently and configuring another site preserves the active website', async t => {

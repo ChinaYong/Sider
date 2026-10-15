@@ -64,7 +64,10 @@ test('Gemini default changes offer a reload without replacing the current conver
   const f = await fixture(t, { aiSettings: { activeSiteId: 'gemini', customSites: [] } });
   await f.resolve(0, { ok: true, compatibility: true, site: BUILTIN_AI_SITES[1] });
   const before = f.document.querySelector('iframe').src;
-  f.updateAI({ activeSiteId: 'gemini', customSites: [], geminiModel: 'pro', geminiExtendedThinking: true });
+  f.updateAI({ activeSiteId: 'gemini', customSites: [], geminiModel: 'flash-lite', geminiThinkingLevel: 'medium' });
+  assert.equal(f.document.querySelector('iframe').src, before);
+  assert.equal(f.document.querySelector('#ai-settings-updated').hidden, false);
+  f.updateAI({ activeSiteId: 'gemini', customSites: [], geminiModel: 'pro', geminiThinkingLevel: 'high' });
   assert.equal(f.document.querySelector('iframe').src, before);
   assert.equal(f.document.querySelector('#ai-settings-updated').hidden, false);
 });

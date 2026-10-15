@@ -351,11 +351,11 @@ function settingsUpdated(settings) {
   const next = selectedAISite(normalized);
   const nextWithURL = { ...next, url: aiSiteURL(next, normalized) };
   const geminiDefaultsChanged = next.id === 'gemini' && loadedSite?.id === 'gemini' &&
-    (normalized.geminiModel !== loadedAISettings?.geminiModel || normalized.geminiExtendedThinking !== loadedAISettings?.geminiExtendedThinking);
+    (normalized.geminiModel !== loadedAISettings?.geminiModel || normalized.geminiThinkingLevel !== loadedAISettings?.geminiThinkingLevel);
   $('#ai-settings-updated').hidden = !loadedSite || (!geminiDefaultsChanged && JSON.stringify(nextWithURL) === JSON.stringify(loadedSite));
   if (!$('#ai-settings-updated').hidden) $('#ai-settings-updated').textContent = `AI 网站设置已更新，点击加载 ${next.name}`;
 }
-installAIWebSettings({ document, chrome: globalThis.chrome, pickSendButton: pickNativeSendButton, onSaved(settings) { settingsUpdated(settings); showToast('AI 网站设置已保存，重新加载侧栏后生效。'); } });
+installAIWebSettings({ document, chrome: globalThis.chrome, pickSendButton: pickNativeSendButton, onSaved(settings) { settingsUpdated(settings); showToast('设置已保存。'); } });
 installConfigurationUI({ document, chrome: globalThis.chrome, onImported(settings) { $('#ai-settings-dialog').close(); settingsUpdated(settings); } });
 installLauncherSettingsUI({ document, chrome: globalThis.chrome, sourceTabId });
 const disposeDialogs = installDialogMotion(document, motion);

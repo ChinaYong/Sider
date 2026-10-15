@@ -108,7 +108,8 @@ try {
   assert.equal(await panel.locator('#ai-site-groups > details').count(),4);
   await panel.locator('[data-site-id="gemini"] > summary').click();
   assert.equal(await panel.locator('#ai-gemini-spark').isVisible(),true);
-  await panel.locator('#ai-gemini-model').selectOption('pro');
+  await panel.locator('#ai-gemini-model').selectOption('argon');
+  await panel.locator('#ai-gemini-thinking').selectOption('medium');
   await panel.locator('[data-site-id="gemini"] > summary').click();
   assert.equal(await panel.locator('#ai-gemini-spark').isVisible(),false);
   await panel.getByRole('button',{name:'编辑网站',exact:true}).click();await panel.locator('#ai-custom-fields summary').click();
@@ -119,7 +120,7 @@ try {
   await send({type:'SIDER_TAB_ATTACHMENT_SET',tabId:sourceTab.id,kind:'page',enabled:true});await chat.locator('#question').fill('Custom question');await chat.locator('#question').press('Control+Enter');
   await chat.locator('body').evaluate(()=>new Promise(resolve=>{const timer=setInterval(()=>{if(sent.length){clearInterval(timer);resolve()}},20)}));
   assert.ok((await waitSent())[0].includes(marker));assert.equal(await chat.locator('body').evaluate(()=>uploaded.length),0);assert.match(await chat.locator('.status').innerText(),/完整文本/);passed('custom configured shortcut and complete-text fallback');
-  const saved=(await send({type:'SIDER_AI_WEB_SETTINGS_GET'})).settings;assert.equal(saved.activeSiteId,customId);assert.equal(saved.customSites[0].selectors.composer,'#question');assert.equal(saved.geminiModel,'pro');
+  const saved=(await send({type:'SIDER_AI_WEB_SETTINGS_GET'})).settings;assert.equal(saved.activeSiteId,customId);assert.equal(saved.customSites[0].selectors.composer,'#question');assert.equal(saved.geminiModel,'argon');assert.equal(saved.geminiThinkingLevel,'medium');
   passed('per-site settings stay hidden until expanded and preserve changes after collapsing');
   await worker.evaluate(()=>{globalThis.originalTabsSend=chrome.tabs.sendMessage.bind(chrome.tabs);});
   assert.deepEqual(errors,[]);passed('no panel page errors');

@@ -295,7 +295,7 @@ test('Gemini pages can read only the saved default model settings', async t => {
   assert.equal(saved.ok, true);
   const source = { id: f.api.runtime.id, url: 'https://gemini.google.com/app', frameId: 0 };
   const result = await f.send({ type: 'SIDER_GEMINI_DEFAULTS_GET' }, source);
-  assert.deepEqual(result, { ok: true, settings: { geminiModel: 'pro', geminiExtendedThinking: true } });
+  assert.deepEqual(result, { ok: true, settings: { geminiModel: 'pro', geminiThinkingLevel: 'high' } });
 });
 
 test('opening Gemini uses the persisted Spark entry URL', async t => {

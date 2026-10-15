@@ -1,3 +1,24 @@
+# Gemini 窄侧栏思考等级修复（0.6.0）
+
+2026-10-15（Asia/Shanghai）。用户反馈 4 Argon 模型切换正常，但高点未应用。真实 320px Gemini 页面的已安装扩展可复现：Argon 已勾选，思考等级仍为低点，自动设置最终报告 `thinking-menu-missing`。
+
+- 根因：窄屏把三级 `gem-menu-item[role="menuitem"]` 放在“思考等级”父菜单项的 `.expand-content` 内部，没有额外的 `role="menu"`。原过滤器把它们当成父项内部控件排除。之前的紧凑 fixture 将三级选项放成父项的同级节点，未覆盖真实结构。
+- 修复只放行已展开思考等级项内部的原生等级菜单项，继续排除内部实现按钮。fixture 改为真实嵌套关系；原逻辑在 Argon／高点回归中失败，修复后通过，并补充内部按钮不会误点击的测试。
+- 最终 `npm test` 730 项通过；Gemini 专项 56 项通过；构建完成。隔离 Chromium 的 `gemini-defaults` 和 `ai-web` 共 20 条浏览器检查通过，覆盖修正后的紧凑 DOM 与完整扩展集成。
+- 在刚复现失败的真实 320px 临时 Gemini 标签页载入修复后的适配模块，连续应用 Argon 的 **高点→中等→低点→高点**，每次均独立展开原站菜单核对模型与等级实际勾选。草稿保留、自动菜单清理、未发送消息；诊断页已关闭，用户原会话保留。
+- 新构建已写入 `dist`。浏览器中已安装的扩展需重新加载，再刷新 Gemini 页面或关闭重开旧侧栏。本轮真实验证为窄屏适配模块验证；已安装扩展的启动失败属于修复前状态。
+- 记录：`tmp/gemini-thinking-fix-all-unit.log`、`tmp/gemini-thinking-fix-browser.log`、`tmp/gemini-thinking-fix-live.json`。
+
+# Gemini 新版模型与思考等级（0.6.0）
+
+2026-10-15（Asia/Shanghai）。设置支持 3.5 Flash-Lite、3.8 Flash、3.1 Pro、4 Argon，以及低点／中等／高点三级思考。默认仍为 Flash-Lite／低点；旧扩展思考关闭迁移为低点，开启迁移为高点。旧字段只用于兼容读取，新保存与导出使用 `geminiThinkingLevel`，备份版本仍为 3。
+
+- 最终 `npm test` 729 项全部通过，构建完成，`git diff --check` 通过。覆盖配置迁移、非法值拒绝、导出再导入、后台消息、等级单独变化的重载提示，以及四模型×三级等级的桌面／窄屏菜单。加载重试仍有上限，无法确认的思考点击不自动重放。
+- 隔离 Chromium 的 `gemini-defaults`、`ui-settings`、`ai-web` 三组通过，共 25 条检查。验证真实点击、菜单销毁重建后的实际勾选、重复应用、可信键盘操作取消、草稿／焦点／选区恢复，及设置保存后重开回显。检查了 320px 深色与 420px 浅色 Gemini 设置截图；四种尺寸和配色组合均无横向溢出。
+- 在 Tabbit 的真实普通 Gemini 标签页临时载入本次适配模块，确认 **4 Argon／中等、3.1 Pro／高点、3.5 Flash-Lite／低点** 的实际菜单勾选；完成后恢复原来的 **3.8 Flash／高点**，再次核对模型与等级勾选。原 URL、会话和草稿保持不变，自动菜单与临时函数已清理，未发送消息。连续手动验收等待原站菜单关闭动画结束，避免将正在关闭的菜单误作可立即再次打开的控件。
+- 真实验证覆盖普通 Gemini 标签页的当前账号菜单；窄屏菜单与完整扩展消息／保存链由隔离 fixture 验证。本轮没有替用户重新加载浏览器中已安装的扩展，也未重新验证真实 Spark 页面。构建产物在 `dist`，更新扩展后需刷新 Gemini 页面并关闭重开旧侧栏。
+- 记录：`tmp/gemini-all-unit-final.log`、`tmp/gemini-browser-final.log`、`tmp/browser/gemini-defaults-result.json`、`tmp/gemini-live-result.json`；截图为 `tmp/browser/ui-gemini-{320,420}-{light,dark}.png`。
+
 # 预设引用来源切换（0.6.0）
 
 2026-10-10（Asia/Shanghai）。预设顶部的来源标题可展开标签页搜索与下拉列表，按窗口分组显示当前浏览器可访问的标签页；引用其他页时提供快速切回所属标签页的入口。

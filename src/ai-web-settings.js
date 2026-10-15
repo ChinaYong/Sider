@@ -1,4 +1,4 @@
-import { GEMINI_MODE_NORMAL, GEMINI_MODE_SPARK, GEMINI_MODEL_OPTIONS, normalizeAIWebSettings, listAISites, selectedAISite, normalizeCustomAISite, validateAIWebSettings, aiSitePattern } from './ai-web.js';
+import { GEMINI_MODE_NORMAL, GEMINI_MODE_SPARK, GEMINI_MODEL_OPTIONS, GEMINI_THINKING_OPTIONS, normalizeAIWebSettings, listAISites, selectedAISite, normalizeCustomAISite, validateAIWebSettings, aiSitePattern } from './ai-web.js';
 
 export function installAIWebSettings({ document, chrome, onSaved, pickSendButton }) {
   const $ = selector => document.querySelector(selector);
@@ -63,7 +63,10 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
     const model = $('#ai-gemini-model'); model.replaceChildren();
     for (const optionData of GEMINI_MODEL_OPTIONS) { const option = document.createElement('option'); option.value = optionData.value; option.textContent = optionData.label; model.append(option); }
     model.value = draft.geminiModel;
-    $('#ai-gemini-thinking').checked = draft.geminiExtendedThinking;
+    const thinking = $('#ai-gemini-thinking'); thinking.replaceChildren();
+    for (const optionData of GEMINI_THINKING_OPTIONS) { const option = document.createElement('option'); option.value = optionData.value; option.textContent = optionData.label; thinking.append(option); }
+    thinking.value = draft.geminiThinkingLevel;
+    $('#reference-hide-unavailable-tabs').checked = draft.hideUnavailableTabs;
     const custom = !selectedAISite(draft).builtin;
     $('#ai-edit-site').hidden = false; $('#ai-edit-site').textContent = custom ? '编辑网站' : '配置网站'; $('#ai-remove-site').hidden = !custom;
     renderSiteGroups();
@@ -115,7 +118,8 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
   });
   $('#ai-gemini-spark').addEventListener('change', () => { draft.geminiMode = $('#ai-gemini-spark').checked ? GEMINI_MODE_SPARK : GEMINI_MODE_NORMAL; error(''); });
   $('#ai-gemini-model').addEventListener('change', () => { draft.geminiModel = $('#ai-gemini-model').value; error(''); });
-  $('#ai-gemini-thinking').addEventListener('change', () => { draft.geminiExtendedThinking = $('#ai-gemini-thinking').checked; error(''); });
+  $('#ai-gemini-thinking').addEventListener('change', () => { draft.geminiThinkingLevel = $('#ai-gemini-thinking').value; error(''); });
+  $('#reference-hide-unavailable-tabs').addEventListener('change', () => { draft.hideUnavailableTabs = $('#reference-hide-unavailable-tabs').checked; error(''); });
   $('#ai-add-site').addEventListener('click', () => { error(''); edit(); });
   $('#ai-edit-site').addEventListener('click', () => { error(''); edit(selectedAISite(draft)); });
   $('#ai-cancel-edit').addEventListener('click', () => { finishEdit(); status('已取消本次网站编辑。'); });
