@@ -1,4 +1,5 @@
 import { captureReference, captureSelection, highlightReference, isEditable, isSupportedDocument } from './extract.js';
+import { DEFAULT_FONT_FAMILY, installFontSettings } from '../font-settings.js';
 
 const INSTALL_KEY = '__siderPageCaptureInstalled';
 
@@ -14,15 +15,19 @@ if (isSupportedDocument(document) && !globalThis[INSTALL_KEY]) {
   let button;
   let toast;
   let toastTimer;
+  let fontSettings;
 
   function ensureOverlay() {
     if (host?.isConnected) return;
+    fontSettings?.dispose();
     host = document.createElement('div');
     host.id = 'sider-selection-tools';
     host.style.cssText = 'all:initial;position:fixed;left:0;top:0;z-index:2147483647;';
     const shadow = host.attachShadow({ mode: 'closed' });
+    fontSettings = installFontSettings({ element: host, chrome });
     const style = document.createElement('style');
     style.textContent = ':host{all:initial}button{display:none;position:fixed;padding:8px 12px;border:1px solid #5663cf;border-radius:9px;background:#303f9f;color:white;box-shadow:0 3px 12px #0003;font:13px system-ui;cursor:pointer;white-space:nowrap}button:hover{background:#25317f}button:focus-visible{outline:3px solid #bac5ff;outline-offset:2px}button:disabled{opacity:.7;cursor:wait}.toast{display:none;position:fixed;right:18px;bottom:18px;max-width:320px;padding:10px 14px;border-radius:9px;background:#20243b;color:white;font:13px system-ui;box-shadow:0 3px 12px #0003;}';
+    style.textContent += `button,.toast{font-family:var(--sider-font-family,${DEFAULT_FONT_FAMILY})}`;
     button = document.createElement('button');
     button.type = 'button';
     button.textContent = '在侧栏提问';

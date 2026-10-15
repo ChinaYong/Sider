@@ -637,9 +637,12 @@ test('settings changed during preparation block stale formatting and keep questi
     if (message.request.type === 'SIDER_TAB_CONTEXT_GET' && ++checks === 2) f.localSettings({ selectionTemplate: '新格式：{{selection}}' });
     return original(message);
   };
-  f.editor.value = '解释一下'; f.send(); await pause();
+  f.editor.value = '解释一下'; f.send();
+  await waitUntil(() => f.root.querySelector('.status').classList.contains('error'));
+  assert.match(f.root.querySelector('.status').textContent, /已变化，请重新发送/);
   assert.equal(f.editor.value, '解释一下'); assert.equal(f.submitted.length, 0);
-  f.send(); await pause(); assert.equal(f.submitted[0], '新格式：当前选中的词汇\n\n解释一下');
+  f.send(); await waitUntil(() => f.submitted.length === 1);
+  assert.equal(f.submitted[0], '新格式：当前选中的词汇\n\n解释一下');
 });
 
 function attachmentFixture({ pending = false, failure = null, nativeName = null } = {}) {

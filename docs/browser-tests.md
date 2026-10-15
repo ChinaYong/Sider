@@ -8,7 +8,7 @@ npx playwright install chromium --no-shell
 npm run test:browser
 ```
 
-Linux CI 安装系统依赖可用 `npx playwright install --with-deps chromium --no-shell`。脚本使用完整 Chromium 通道，以支持扩展；不使用无头 shell。浏览器缺失时，失败信息会给出安装命令。
+Linux CI 安装系统依赖可用 `npx --no-install playwright install --with-deps chromium --no-shell`。项目固定 Playwright 1.60.0，随包安装 Chromium 148.0.7778.96，以支持权限用例使用的 `Extensions.triggerAction` 调试接口；安装前先执行 `npm ci`，避免沿用旧依赖下载 Chromium 145。脚本使用完整 Chromium 通道，以支持扩展；不使用无头 shell。浏览器缺失时，失败信息会给出安装命令。
 
 可以设置 `SIDER_CHROMIUM` 指定支持扩展调试的 Chromium 可执行文件。它仍使用新建的隔离配置，不能指向用户的浏览器配置目录。也可设置 `PLAYWRIGHT_BROWSERS_PATH` 指定下载位置；安装和运行时必须使用同一值。
 
@@ -33,6 +33,7 @@ node scripts/test-browser.mjs fresh-send
 | `reference-source` | 所有窗口的来源选择、标题／网址搜索、键盘操作、320／420px 浅深色布局、勾选与原站文字／生成附件／用户附件／页面实例保留、新来源变量与正文、发送期间禁止切换、发送后保持来源、授权对象、来源关闭提示与快速返回 |
 | `motion` | 70k 字正文下的输入／闲置差量更新、流式文本、滚动和 100 条预设排序计数及 DevTools 轨迹；快速重开、焦点、Esc、减少动态效果、销毁清理、视口定位合并，以及构建后原生弹窗的关闭和忙碌限制 |
 | `ui-settings` | 320／420px 浅色与深色设置页、展开的网站分组和悬浮球设置、长表单固定保存栏、编辑中切换网站保护、保存反馈、重新打开后的状态、Esc 与焦点恢复；使用实际 HTML／CSS 和模拟设置后台 |
+| `font-settings` | 真实扩展存储与 worker、跨侧栏和 iframe 预设控件即时同步、悬浮球字体、原站字体与草稿保留、自定义预览与空名称校验、Enter 保存、320／420px 浅深色布局、重载持久化、配置导出与旧备份默认值、恢复系统默认 |
 | `launcher` | 已授权网页自动注入、未授权网页／子框架不注入、真实鼠标点击开关原生标签页侧栏、再次点击关闭与第三次打开、页面刷新与工具栏／原生关闭事件同步、引用勾选和网页输入保持、拖动贴边且不误开关、位置保存与刷新、窄屏与深色、开关即时生效与脚本注册、配置备份 |
 | `side-panel-capabilities` | 单独的原生承载测试扩展：窗口实例与独立实例存活、同一 iframe 的草稿／文件输入／页面状态保留、同 URL 转换是否重建、跨域隐藏及用户手势过期后的恢复、原生 API 关闭事件；输出能力门槛，详见 [关联模型与能力结果](side-panel-modes.md) |
 
@@ -53,5 +54,7 @@ node scripts/test-browser.mjs fresh-send
 2026-10-10 引用来源切换验证：`npm test` 688 项通过，构建通过；隔离 Chromium 148.0.7778.96 的 `permissions`、`context`、`fresh-send`、`unified-templates` 和 `reference-source` 五组最终通过，分别完成 8、15、17、13 和 6 条检查。实际创建第二个浏览器窗口，验证标题／网址搜索、键盘选择、来源变量、按需正文、授权对象、关闭提示、快速返回，以及切换前后原站草稿、生成附件、用户附件、勾选和同一 AI 页面实例保留。已查看 320px 深色、420px 浅色与来源关闭截图。修复导航后首次来源元信息被误判为切换、导致发送取消的问题，并增加单测；预设测试等待动画结束、拖动开始和勾选响应完成后再断言，保留附件及冲突保护检查。日志为 `tmp/reference-unit-final.log`、`tmp/reference-browser-final.log` 和 `tmp/reference-browser-presets.log`，截图与来源切换结果为 `tmp/browser/reference-source-*.png`、`reference-source-result.json`。本轮使用本地 fixture，未验证真实账号网站。
 
 2026-10-10 配色与设置层级验证：`npm test` 688 项通过，构建通过；`ui-settings`、`motion`、`launcher`、`unified-templates`、`reference-source` 五组通过，共 47 条检查。人工查看了 320／420px 浅深色设置首页、Gemini 分组、打开方式和预设编辑截图，补充展开状态的截图覆盖。预设编辑返回列表时恢复顶部，避免沿用长表单的滚动位置影响拖动操作。浅色／深色各 8 组主要文字与背景配色的最低对比度分别为 5.02:1／6.58:1，此结果不代表完整无障碍审计。普通 Chrome 155 未加载测试扩展，扩展组改用已安装 Chromium 148 的隔离配置后通过；未使用现有账号配置，未验证真实 AI 网站。单测日志为 `tmp/ui-unit-tests-final.log`，配色计算为 `tmp/ui-contrast.json`，截图为 `tmp/browser/ui-*.png`、`motion-*.png` 和 `unified-editor-*.png`。
+
+2026-10-10 CI 浏览器版本修复验证：固定 Playwright 1.60.0 与配套 Chromium 148.0.7778.96，`npm ci`、688 项单元测试和构建通过；全量 13 组浏览器回归命令退出码为 0，原先因缺少 `Extensions.triggerAction` 失败的 `permissions` 组 8 项检查全部通过。发送期间设置变化的单测改为等待取消反馈和实际提交，保留草稿、发送次数及最终格式断言。`side-panel-capabilities` 仍记录部分原生能力不支持，其统一承载实现门槛未通过，与回归命令成功是不同结果。本轮使用 Windows 下新下载的配套浏览器与隔离 fixture；GitHub Ubuntu runner 需提交并推送后另行确认。日志为 `tmp/ci-check.log`、`tmp/ci-browser.log`。
 
 维护测试时，先检查 fixture 是否仍对应当前协议。页面上的按钮出现不等于成功：断言最终发送次数、采集次数、完整正文和草稿／附件保护。不要通过删掉安全断言来消除失败。

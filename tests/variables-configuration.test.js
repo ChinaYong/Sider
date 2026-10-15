@@ -36,7 +36,7 @@ test('configuration roundtrip replaces every supported key and excludes cached p
   const backup = exportConfiguration(stored);
   assert.equal(JSON.stringify(backup).includes('私有草稿'), false); assert.equal(JSON.stringify(backup).includes('尾标记'), false);
   assert.deepEqual(validateConfiguration(JSON.parse(JSON.stringify(backup))).configuration, backup.configuration);
-  assert.equal(Object.keys(configurationStorage(backup)).length, 4);
+  assert.equal(Object.keys(configurationStorage(backup)).length, 5);
   stored[AI_WEB_SETTINGS_KEY] = normalizeAIWebSettings({ hideUnavailableTabs: true });
   const visibilityBackup = exportConfiguration(stored);
   assert.equal(configurationStorage(visibilityBackup)[AI_WEB_SETTINGS_KEY].hideUnavailableTabs, true);

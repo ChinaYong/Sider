@@ -14,8 +14,11 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
-      - run: npx playwright install --with-deps chromium --no-shell
-      - run: npm run test:browser
+      # Pinned Playwright installs Chromium with the Extensions.triggerAction CDP command.
+      - name: Install Chromium for extension tests
+        run: npx --no-install playwright install --with-deps chromium --no-shell
+      - name: Build and run browser tests
+        run: npm run test:browser
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

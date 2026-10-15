@@ -1,4 +1,5 @@
 import { GENERIC_CONTROLS } from './generic-controls.js';
+import { DEFAULT_FONT_FAMILY, installFontSettings } from '../font-settings.js';
 
 const BUTTONS = GENERIC_CONTROLS;
 const ATTRIBUTE_KEYS = ['data-testid', 'data-test-id', 'data-test', 'id', 'name', 'aria-label', 'title'];
@@ -42,7 +43,7 @@ export function sendButtonSelector(document, button) {
 }
 
 /** The selection surface intercepts pointer events, including disabled buttons. */
-export function pickSendButton(document, { signal, timeoutMs = 60000 } = {}) {
+export function pickSendButton(document, { signal, timeoutMs = 60000, chrome = globalThis.chrome } = {}) {
   if (signal?.aborted) return Promise.resolve({ ok: false, cancelled: true });
   const view = document.defaultView;
   const previousFocus = document.activeElement;
@@ -50,11 +51,12 @@ export function pickSendButton(document, { signal, timeoutMs = 60000 } = {}) {
   host.setAttribute('data-sider-send-picker', '');
   host.style.cssText = 'all:initial!important;position:fixed!important;inset:0!important;z-index:2147483647!important;';
   const root = host.attachShadow({ mode: 'open' });
+  const fontSettings = installFontSettings({ element: host, chrome });
   const style = document.createElement('style');
   style.textContent = `
-    :host{font:13px system-ui,"Microsoft YaHei",sans-serif;color:#fff}
+    :host{font:13px var(--sider-font-family,${DEFAULT_FONT_FAMILY});color:#fff}
     .surface{position:fixed;inset:0;cursor:crosshair;outline:none}
-    .hint{position:fixed;top:8px;left:8px;right:8px;padding:10px 12px;color:#fff;font:13px system-ui,"Microsoft YaHei",sans-serif;background:#202525;border-radius:9px;box-shadow:0 3px 12px #0004;display:flex;align-items:center;gap:8px;line-height:1.6;pointer-events:auto}
+    .hint{position:fixed;top:8px;left:8px;right:8px;padding:10px 12px;color:#fff;font:13px var(--sider-font-family,${DEFAULT_FONT_FAMILY});background:#202525;border-radius:9px;box-shadow:0 3px 12px #0004;display:flex;align-items:center;gap:8px;line-height:1.6;pointer-events:auto}
     .hint span{flex:1}.hint button{color:#fff;background:#ffffff18;border:1px solid #ffffff40;border-radius:6px;padding:5px 9px;font:inherit;cursor:pointer}
     .outline{position:fixed;border:2px solid #10a37f;border-radius:5px;background:#10a37f20;pointer-events:none;box-sizing:border-box}
     [hidden]{display:none!important}
@@ -75,6 +77,7 @@ export function pickSendButton(document, { signal, timeoutMs = 60000 } = {}) {
       if (completed) return;
       completed = true;
       view.clearTimeout(timer);
+      fontSettings.dispose();
       document.removeEventListener('keydown', keyboard, true);
       document.removeEventListener('click', click, true);
       document.removeEventListener('pointerdown', stop, true);
