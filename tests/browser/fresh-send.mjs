@@ -202,6 +202,7 @@ try {
   await enableBody();
   async function settingsMode(mode, threshold) {
     await chat.getByRole('button', { name: '预设', exact: true }).click();
+    if (await chat.locator('#preset-manage').getAttribute('aria-pressed') !== 'true') await chat.locator('#preset-manage').click();
     await chat.getByRole('button', { name: '编辑预设 网页正文', exact: true }).click();
     await chat.locator('summary').filter({ hasText: '高级' }).click();
     const popup = chat.locator('.popover'), field = chat.locator('#template-delivery');

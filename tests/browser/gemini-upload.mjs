@@ -87,7 +87,7 @@ try{
  await chat.getByRole('button',{name:'预设',exact:true}).click();await chat.getByRole('button',{name:'空草稿附件 · 直接发送',exact:true}).click();await wait('sent.length===1');s=await state();
  assert.equal(s.uploads.length,2);for(const file of s.uploads){assert.ok(file.text.includes(body));assert.ok(s.sent[0].text.includes(file.name));}assert.equal(s.sent[0].text.includes(body),false);
  passed('empty-draft direct send uploads two complete files before writing their notes, then enables the native sender and sends once');
- await chat.getByRole('button',{name:'预设',exact:true}).click();await chat.getByRole('button',{name:'编辑预设 空草稿附件',exact:true}).click();await chat.locator('#template-action').selectOption('append');await chat.getByRole('button',{name:'保存预设',exact:true}).click();
+ await chat.getByRole('button',{name:'预设',exact:true}).click();if(await chat.locator('#preset-manage').getAttribute('aria-pressed')!=='true')await chat.locator('#preset-manage').click();await chat.getByRole('button',{name:'编辑预设 空草稿附件',exact:true}).click();await chat.locator('#template-action').selectOption('append');await chat.getByRole('button',{name:'保存预设',exact:true}).click();
  await chat.getByRole('button',{name:'空草稿附件 · 追加',exact:true}).waitFor();await chat.getByRole('button',{name:'关闭',exact:true}).click();await editor().fill('');
  await chat.getByRole('button',{name:'预设',exact:true}).click();await chat.getByRole('button',{name:'空草稿附件 · 追加',exact:true}).click();await status().filter({hasText:'已追加'}).waitFor();s=await state();
  assert.equal(s.uploads.length,3);assert.equal(s.sent.length,1);assert.ok((await editor().innerText()).includes(s.uploads[2].name));assert.equal(await chat.locator('[data-user=true]').count(),1);

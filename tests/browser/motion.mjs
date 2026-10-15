@@ -70,6 +70,7 @@ try {
   await page.locator('[data-pane="templates"]').click(); await page.waitForTimeout(250);
   await measure('scroll', () => page.locator('.popover').evaluate(async node => { for (let i = 0; i < 60; i++) { node.scrollTop += 3; await new Promise(requestAnimationFrame); } }));
   await page.locator('.popover').evaluate(node => { node.scrollTop = 0; });
+  await page.locator('#preset-manage').click();
   await measure('sort', async () => {
     const from = await page.locator('[data-sort-id="preset-selection"] [data-sort-handle]').boundingBox();
     await page.mouse.move(from.x + 5, from.y + 5); await page.mouse.down();

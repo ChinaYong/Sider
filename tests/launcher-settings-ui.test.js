@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { readFile } from 'node:fs/promises';
 import { installLauncherSettingsUI } from '../src/launcher-settings-ui.js';
+import { installSettingsNavigation } from '../src/settings-navigation.js';
 import { LAUNCHER_SETTINGS_KEY, normalizeLauncherSettings } from '../src/launcher-settings.js';
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
@@ -20,9 +21,10 @@ async function fixture(t, initial = {}) {
     tabs: { onUpdated, async create() {} },
   };
   installLauncherSettingsUI({ document, chrome, sourceTabId: 42 }); await settle();
+  const navigation = installSettingsNavigation(document);
   t.after(() => { window.dispatchEvent(new window.Event('pagehide')); dom.window.close(); });
   const selectMode = async value => { const input = document.querySelector('#launcher-mode'); input.value = value; input.dispatchEvent(new window.Event('change')); await settle(); };
-  const open = async () => { const details = document.querySelector('#launcher-settings'); details.open = true; details.dispatchEvent(new window.Event('toggle')); await settle(); };
+  const open = async () => { document.querySelector('#ai-settings-dialog').open = true; navigation.activate('launcher'); await settle(); };
   return { window, document, settings: () => settings, requests, reads, selectMode, open,
     changeURL(value) { url = value; onUpdated.emit(42, { url }, {}); },
     access(value, approved) { hasAccess = value; granted = approved; },

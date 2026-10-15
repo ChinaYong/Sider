@@ -57,6 +57,9 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   let insertion = null;
   let templateApplying = false;
   let sorting = null;
+  let managingTemplates = false;
+  let templateQuery = '';
+  let templateReturnId = null;
   const filled = new TemplateDraft();
   let previewTemplateId = null;
   const missingAttachments = new Set();
@@ -77,10 +80,10 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   };
   const bar = element('div', { class: 'bar', 'aria-label': '网页引用工具' });
   bar.append(
-    element('button', { type: 'button', 'data-pane': 'templates', title: '选择或编辑预设与引用' }, '预设'),
+    element('button', { type: 'button', 'data-pane': 'templates', 'aria-haspopup': 'dialog', 'aria-expanded': 'false', 'aria-controls': 'preset-popover', title: '选择或编辑预设与引用' }, '预设'),
     element('div', { class: 'chips', 'aria-label': '当前附加预设' }),
   );
-  const popup = element('section', { class: 'popover', popover: 'manual', role: 'dialog', 'aria-label': '网页引用', hidden: '' });
+  const popup = element('section', { id: 'preset-popover', class: 'popover', popover: 'manual', role: 'dialog', 'aria-label': '网页引用', hidden: '' });
   const heading = element('div', { class: 'heading' });
   heading.append(element('strong', { id: 'pane-title' }), element('button', { type: 'button', id: 'close-pane', 'aria-label': '关闭' }, '×'));
   popup.append(heading, element('div', { id: 'pane-body' }));
@@ -309,6 +312,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     if (name && !pane) paneOpener = root.activeElement || document.activeElement;
     pane = name;
     const popup = $('.popover');
+    $('[data-pane="templates"]').setAttribute('aria-expanded', String(name === 'templates'));
     if (!name) {
       sourcePicker?.close({ restoreFocus: false });
       if (positionFrame !== null) { view.cancelAnimationFrame(positionFrame); positionFrame = null; }
@@ -366,8 +370,9 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     const previousSort = sorting; sorting = null; previousSort?.dispose();
     sourcePicker?.dispose(); sourcePicker = null;
     const body = $('#pane-body'); body.replaceChildren();
-    $('#pane-title').textContent = edit ? '编辑预设' : '预设';
+    $('#pane-title').textContent = edit ? '编辑预设' : '预设与引用';
     if (edit) {
+      templateReturnId = edit.id;
       const expected = structuredClone(templates);
       const content = formSection(body, '预设内容', 'template-content-title');
       const name = field(content, '预设名称', 'text', edit.name, 'template-name'); name.maxLength = 80;
@@ -426,33 +431,73 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
         requestAccess: () => requestSitePermission('SIDER_SOURCE_ACCESS_REQUEST'),
       });
       body.append(element('p', { class: 'source-label' }, '引用来源'), sourcePicker.element);
+      const toolbar = element('div', { class: 'preset-toolbar' });
+      const search = element('input', { id: 'preset-search', type: 'search', placeholder: '搜索预设…', 'aria-label': '搜索预设', autocomplete: 'off' });
+      search.value = templateQuery;
+      search.addEventListener('input', () => {
+        if (sorting?.active) sorting.cancel();
+        templateQuery = search.value;
+        filterTemplateList();
+      });
+      const manage = button(managingTemplates ? '完成管理' : '管理', () => {
+        if (sorting?.active) return;
+        managingTemplates = !managingTemplates;
+        renderTemplates(); $('#preset-manage').focus({ preventScroll: true });
+      }, 'preset-manage');
+      manage.id = 'preset-manage'; manage.setAttribute('aria-pressed', String(managingTemplates));
+      toolbar.append(search, manage); body.append(toolbar);
       const listHeading = element('div', { class: 'preset-list-heading' });
-      listHeading.append(element('strong', {}, '消息预设'), element('span', {}, '勾选以随消息引用'));
+      listHeading.append(element('strong', {}, '消息预设'), element('span', { id: 'preset-count', role: 'status' }));
       body.append(listHeading);
-      const list = element('div', { class: 'preset-list', 'aria-label': '预设顺序' }); body.append(list);
+      const list = element('div', { class: 'preset-list', 'aria-label': '预设顺序' });
+      list.toggleAttribute('data-managing', managingTemplates); body.append(list);
       for (const template of templates) {
         const row = element('div', { class: 'template-row', 'data-sort-id': template.id });
+        row.dataset.search = template.name.toLocaleLowerCase();
         const handle = element('button', { type: 'button', 'data-sort-handle': '', 'aria-label': '拖动预设 ' + template.name, title: '拖动排序' }, '⠿');
+        handle.hidden = !managingTemplates;
         const actionLabel = ({ replace: '替换', append: '追加', send: '直接发送' })[template.action];
         const use = button('', () => useTemplate(template), 'template-use'); use.dataset.templateId = template.id;
         use.setAttribute('aria-label', template.name + ' · ' + actionLabel);
-        use.append(element('span', { class: 'template-name' }, template.name), element('span', { class: 'template-action' }, '点击' + actionLabel));
+        use.append(element('span', { class: 'template-name' }, template.name), element('span', { class: 'template-action', 'data-action': template.action }, ({ replace: '替换当前草稿', append: '追加到输入框', send: '直接发送 ↗' })[template.action]));
         const toggle = element('input', { type: 'checkbox', 'aria-label': '发送时引用 ' + template.name }); toggle.checked = Boolean(context?.templateSelections?.[template.id]); toggle.title = '发送时引用';
         toggle.addEventListener('change', () => run(toggle, () => toggleTemplate(template, toggle.checked)));
         const editButton = button('编辑', () => renderTemplates(template)); editButton.setAttribute('aria-label', '编辑预设 ' + template.name);
-        row.append(handle, use, toggle, editButton);
-        if (!template.preset) { const remove = button('删除', async () => { await removeTemplate(template.id); await saveTemplates(templates.filter(item => item.id !== template.id)); renderTemplates(); }, 'danger'); remove.setAttribute('aria-label', '删除预设 ' + template.name); row.append(remove); }
+        editButton.hidden = !managingTemplates;
+        row.append(toggle, handle, use, editButton);
+        if (!template.preset) { const remove = button('删除', async () => { await removeTemplate(template.id); await saveTemplates(templates.filter(item => item.id !== template.id)); renderTemplates(); }, 'danger'); remove.setAttribute('aria-label', '删除预设 ' + template.name); remove.hidden = !managingTemplates; row.append(remove); }
         list.append(row);
       }
       installSorting(list);
-      body.append(button('新增预设', () => renderTemplates(newTemplate({ id: view.crypto.randomUUID() })), 'preset-add'));
-      body.append(element('p', { class: 'note' }, '勾选仅影响下一条消息，发送后自动取消。拖动左侧手柄调整顺序。'));
-      variableDirectory(body);
+      body.append(element('p', { id: 'preset-empty', class: 'preset-empty', role: 'status', hidden: '' }, '没有匹配的预设，试试其他关键词。'));
+      const addTemplate = button('新增预设', () => renderTemplates(newTemplate({ id: view.crypto.randomUUID() })), 'preset-add');
+      addTemplate.setAttribute('aria-label', '新增预设'); body.append(addTemplate);
+      body.append(element('p', { class: 'note preset-help' }, managingTemplates ? '拖动手柄调整顺序；搜索时暂停排序。' : '勾选以随下一条消息附加；点击名称按标注方式执行。'));
+      filterTemplateList();
     }
     // Each view starts at its heading, even when the previous editor was scrolled to its footer.
     popup.scrollTop = 0;
     if (edit) $('#template-name').focus({ preventScroll: true });
+    else if (templateReturnId) {
+      const row = [...body.querySelectorAll('.template-row')].find(node => node.dataset.sortId === templateReturnId);
+      if (row && !row.hidden) row.querySelector(managingTemplates ? '[aria-label^="编辑预设"]' : '.template-use')?.focus({ preventScroll: true });
+      templateReturnId = null;
+    }
     schedulePosition(); motion.enter(body, { fadeOnly: true, duration: 120 });
+  }
+  function filterTemplateList() {
+    const query = templateQuery.trim().toLocaleLowerCase();
+    let visible = 0;
+    for (const row of root.querySelectorAll('.template-row')) {
+      setHidden(row, !row.dataset.search.includes(query));
+      if (!row.hidden) visible++;
+      const handle = row.querySelector('[data-sort-handle]');
+      if (handle.disabled !== Boolean(query)) handle.disabled = Boolean(query);
+    }
+    const count = $('#preset-count');
+    if (count) setText(count, `已选 ${templates.filter(item => context?.templateSelections?.[item.id]).length} / ${templates.length}`);
+    const empty = $('#preset-empty'); if (empty) setHidden(empty, visible > 0);
+    schedulePosition();
   }
   function installSorting(list) {
     sorting = installPresetSort(list, { scroller: popup, items: structuredClone(templates), save: saveTemplates,
@@ -477,6 +522,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
       const toggle = row.querySelector('input'), checked = Boolean(context?.templateSelections?.[template.id]);
       if (template && toggle.checked !== checked) toggle.checked = checked;
     }
+    filterTemplateList();
   }
 
   function rememberInsertion() {

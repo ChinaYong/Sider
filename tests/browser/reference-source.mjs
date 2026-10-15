@@ -105,6 +105,7 @@ try {
   await chat.getByRole('combobox', { name: '搜索标签页' }).fill(unavailableTitle);
   await unavailable.first().waitFor();
   await panel.locator('#ai-settings-toggle').click();
+  await panel.locator('#settings-tab-reference').click();
   await panel.locator('#reference-hide-unavailable-tabs').check();
   await panel.locator('#ai-save-settings').click();
   await panel.waitForFunction(() => !document.querySelector('#ai-settings-dialog').open);
@@ -116,6 +117,7 @@ try {
   await chat.getByText('没有匹配的标签页。', { exact: true }).waitFor();
   await panel.locator('#ai-settings-toggle').click();
   assert.equal(await panel.locator('#reference-hide-unavailable-tabs').isChecked(), true);
+  await panel.locator('#settings-tab-reference').click();
   await panel.locator('#reference-hide-unavailable-tabs').uncheck();
   await panel.locator('#ai-save-settings').click();
   await panel.waitForFunction(() => !document.querySelector('#ai-settings-dialog').open);

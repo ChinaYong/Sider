@@ -28,6 +28,8 @@ test('reference visibility defaults to showing unavailable tabs, cancels unsaved
   const toggle = f.$('#reference-hide-unavailable-tabs');
   assert.equal(toggle.checked, false);
   toggle.click(); f.$('#ai-close-settings').click();
+  assert.equal(f.dialog.open, true);
+  f.$('#settings-discard-close').click();
   f.$('#ai-settings-toggle').click(); await settle();
   assert.equal(toggle.checked, false);
   toggle.click(); f.$('#ai-save-settings').click(); await settle();
@@ -73,7 +75,7 @@ test('per-site settings collapse independently and configuring another site pres
   const menu = f.$('#ai-site-settings');
   const gemini = f.$('[data-site-id="gemini"]');
   const claude = f.$('[data-site-id="claude"]');
-  assert.equal(menu.open, false);
+  assert.equal(menu.open, true);
   assert.equal(gemini.open, false);
   assert.ok(gemini.contains(f.$('#ai-gemini-spark')));
   menu.open = true; gemini.open = true; claude.open = true;
@@ -172,4 +174,34 @@ test('removing a website cannot discard an unfinished editor and cancelling retu
   assert.equal(f.document.activeElement, f.$('#ai-edit-site'));
   f.$('#ai-save-settings').click(); await settle();
   assert.equal(f.messages.at(-1).settings.customSites[0].name, 'Custom');
+});
+
+test('category navigation retains unfinished edits and Save returns to the editor before writing', async t => {
+  const f = await fixture(t);
+  f.$('#ai-edit-site').click(); f.$('#ai-selector-send').value = '#draft-send';
+  f.$('#settings-tab-appearance').click();
+  assert.equal(f.$('#settings-ai').hidden, true);
+  assert.equal(f.$('#settings-appearance').hidden, false);
+  f.$('#settings-tab-appearance').dispatchEvent(new f.window.KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+  assert.equal(f.document.activeElement.id, 'settings-tab-launcher');
+  assert.equal(f.$('#settings-tab-launcher').getAttribute('aria-selected'), 'true');
+  f.$('#ai-save-settings').click(); await settle();
+  assert.equal(f.$('#settings-ai').hidden, false);
+  assert.equal(f.$('#ai-selector-send').value, '#draft-send');
+  assert.equal(f.document.activeElement.id, 'ai-apply-site');
+  assert.equal(f.messages.some(message => message.type === 'SIDER_AI_WEB_SETTINGS_SAVE'), false);
+});
+
+test('Escape retains pending settings until explicit discard, and unchanged settings close directly', async t => {
+  const f = await fixture(t);
+  f.$('#reference-hide-unavailable-tabs').click();
+  const cancel = new f.window.Event('cancel', { cancelable: true }); f.dialog.dispatchEvent(cancel);
+  assert.equal(cancel.defaultPrevented, true); assert.equal(f.dialog.open, true);
+  assert.equal(f.$('#settings-discard').hidden, false);
+  f.$('#settings-keep-editing').click();
+  assert.equal(f.$('#reference-hide-unavailable-tabs').checked, true);
+  f.$('#ai-settings-toggle').click(); await settle();
+  assert.equal(f.$('#reference-hide-unavailable-tabs').checked, true);
+  f.$('#reference-hide-unavailable-tabs').click();
+  f.$('#ai-close-settings').click(); assert.equal(f.dialog.open, false);
 });

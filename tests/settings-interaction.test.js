@@ -91,6 +91,24 @@ const pause = () => new Promise(resolve => setTimeout(resolve, 20));
 async function editPreset(f, name = '划词') { await f.api.refresh(); f.clickControl(f.$('[data-pane="templates"]')); f.clickControl(f.$('[aria-label="编辑预设 ' + name + '"]')); }
 const save = f => f.clickControl([...f.root.querySelectorAll('button')].find(button => button.textContent === '保存预设'));
 
+test('search and manage mode preserve the native draft, filter without saving, and restore focus after editing', async t => {
+ const f = fixture(t); await f.api.refresh(); f.editor.value = '保留原站问题';
+ f.clickControl(f.$('[data-pane="templates"]'));
+ assert.equal(f.$('[aria-label="编辑预设 划词"]').hidden, true);
+ const search = f.$('#preset-search'); f.clickControl(search); f.typeText(search, '划词');
+ assert.equal([...f.root.querySelectorAll('.template-row')].filter(row => !row.hidden).length, 1);
+ f.clickControl(f.$('#preset-manage')); await pause();
+ assert.equal(f.$('#preset-search').value, '划词');
+ assert.equal(f.$('[aria-label="拖动预设 划词"]').disabled, true);
+ assert.equal(f.$('[aria-label="编辑预设 划词"]').hidden, false);
+ f.clickControl(f.$('[aria-label="编辑预设 划词"]'));
+ f.clickControl([...f.root.querySelectorAll('button')].find(button => button.textContent === '取消编辑'));
+ assert.equal(f.root.activeElement, f.$('[aria-label="编辑预设 划词"]'));
+ assert.equal(f.$('#preset-search').value, '划词');
+ assert.equal(f.editor.value, '保留原站问题'); assert.equal(f.nativeSubmits, 0);
+ assert.equal(f.calls.some(call => call.request.type === 'SIDER_PROMPT_TEMPLATES_SAVE'), false);
+});
+
 test('template fields retain focus and accept typing despite native composer focus handlers', async t => {
  const f = fixture(t); await editPreset(f); const input = f.$('#template-text'); f.clickControl(input);
  assert.ok(f.typeText(input, '\n自定义 {{selection}}')); assert.equal(f.root.activeElement, input);

@@ -87,7 +87,7 @@ export function installPresetSort(list, { scroller, items, save, changed = () =>
   for (const row of original) {
     const handle = row.querySelector('[data-sort-handle]');
     const onDown = event => {
-      if (disposed || saving || drag || event.button !== 0) return;
+      if (disposed || saving || drag || handle.disabled || event.button !== 0) return;
       event.preventDefault(); event.stopPropagation();
       drag = { handle, row, pointerId: event.pointerId, start: event.clientY, y: event.clientY, moved: false };
       list.setPointerCapture?.(event.pointerId); changed(true);

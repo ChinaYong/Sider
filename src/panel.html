@@ -32,12 +32,19 @@
     <button id="copy-diagnostics">复制连接信息</button>
   </dialog>
   <dialog id="ai-settings-dialog" aria-labelledby="ai-settings-title">
-    <div class="dialog-title"><strong id="ai-settings-title">AI 网站设置</strong><button id="ai-close-settings" aria-label="关闭 AI 网站设置"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
-    <p class="dialog-intro">选择常用 AI，管理网站偏好、引用列表、扩展字体与侧栏入口。</p>
+    <div class="dialog-title"><div class="settings-title-copy"><strong id="ai-settings-title">设置</strong><span>让 Sider 更合你的习惯</span></div><button id="ai-close-settings" aria-label="关闭设置"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <nav class="settings-nav" role="tablist" aria-label="设置分类">
+      <button id="settings-tab-ai" role="tab" aria-controls="settings-ai" aria-selected="true" data-settings-tab="ai"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="3"/><path d="M8 21h8M12 18v3M3 9h18"/></svg>AI 网站</button>
+      <button id="settings-tab-reference" role="tab" aria-controls="settings-reference" aria-selected="false" tabindex="-1" data-settings-tab="reference"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 14 4-4M8 16l-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0M16 8l1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0" transform="translate(1 -1) scale(.9)"/></svg>引用</button>
+      <button id="settings-tab-appearance" role="tab" aria-controls="settings-appearance" aria-selected="false" tabindex="-1" data-settings-tab="appearance"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 19 6-14 6 14M6 14h8M17 11h5M19.5 11v8"/></svg>外观</button>
+      <button id="settings-tab-launcher" role="tab" aria-controls="settings-launcher" aria-selected="false" tabindex="-1" data-settings-tab="launcher"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M15 4v16M6 12h6m-3-3 3 3-3 3"/></svg>入口</button>
+    </nav>
+    <div class="settings-scroll">
+    <section id="settings-ai" role="tabpanel" aria-labelledby="settings-tab-ai" tabindex="0">
     <section class="settings-card" aria-labelledby="ai-preferences-title">
-      <div class="settings-card-heading"><h2 id="ai-preferences-title">AI 网站</h2><span class="scope-badge">保存后生效</span></div>
+      <div class="settings-card-heading"><h2 id="ai-preferences-title">默认网站</h2><span class="scope-badge">保存后生效</span></div>
       <div class="settings-card-body">
-        <label for="ai-active-site">使用的 AI 网站</label><select id="ai-active-site" aria-describedby="ai-active-site-help"></select>
+        <label for="ai-active-site" class="sr-only">使用的 AI 网站</label><select id="ai-active-site" aria-describedby="ai-active-site-help"></select>
         <p id="ai-active-site-help" class="setting-help">所有侧栏共用，新开或重新加载侧栏时应用。</p>
         <div class="settings-actions"><button id="ai-add-site">＋ 添加网站</button><button id="ai-edit-site" hidden>编辑网站</button><button id="ai-remove-site" class="danger" hidden>从列表移除</button></div>
         <details id="ai-site-settings" class="site-settings-menu">
@@ -60,6 +67,8 @@
         <div id="ai-editor-home"></div>
       </div>
     </section>
+    </section>
+    <section id="settings-reference" role="tabpanel" aria-labelledby="settings-tab-reference" tabindex="0" hidden>
     <section class="settings-card" aria-labelledby="reference-preferences-title">
       <div class="settings-card-heading"><h2 id="reference-preferences-title">引用</h2><span class="scope-badge">保存后生效</span></div>
       <div class="settings-card-body">
@@ -67,8 +76,11 @@
         <p id="reference-hide-unavailable-tabs-help" class="setting-help">隐藏浏览器内部页和 AI 网站页。未授权的普通网页仍会显示，选择后可授权。所有侧栏共用，保存后更新引用来源列表。</p>
       </div>
     </section>
-    <details id="font-settings" class="settings-card">
-      <summary class="settings-card-heading"><span class="summary-copy"><strong>扩展字体</strong><span>字体选择与预览</span></span><span class="scope-badge immediate">立即生效</span></summary>
+    <div class="settings-explainer"><strong>引用如何加入对话</strong><p>在原站输入框旁打开「预设」，选择网页来源，再勾选要随消息附加的内容。</p><p>勾选只影响下一条消息，发送成功后自动取消。点击预设名称则按该预设的方式填入或发送。</p></div>
+    </section>
+    <section id="settings-appearance" role="tabpanel" aria-labelledby="settings-tab-appearance" tabindex="0" hidden>
+    <section id="font-settings" class="settings-card">
+      <div class="settings-card-heading"><span class="summary-copy"><strong>扩展字体</strong><span>字体选择与预览</span></span><span class="scope-badge immediate">立即生效</span></div>
       <div class="settings-card-body">
         <label for="extension-font">界面字体</label><select id="extension-font" aria-describedby="extension-font-help"></select>
         <p id="extension-font-help" class="setting-help">所有侧栏共用，用于设置、预设、引用和网页提示。字体需已安装在本机，缺失时自动使用备用字体。</p>
@@ -80,9 +92,11 @@
         <div class="settings-actions"><button id="extension-font-reset" type="button">恢复系统默认</button></div>
         <p id="extension-font-status" class="setting-help" role="status" aria-live="polite"></p>
       </div>
-    </details>
-    <details id="launcher-settings" class="settings-card">
-      <summary class="settings-card-heading"><span class="summary-copy"><strong>打开方式</strong><span>悬浮球、右键与快捷键</span></span><span class="scope-badge immediate">立即生效</span></summary>
+    </section>
+    </section>
+    <section id="settings-launcher" role="tabpanel" aria-labelledby="settings-tab-launcher" tabindex="0" hidden>
+    <section id="launcher-settings" class="settings-card">
+      <div class="settings-card-heading"><span class="summary-copy"><strong>打开方式</strong><span>悬浮球、右键与快捷键</span></span><span class="scope-badge immediate">立即生效</span></div>
       <div class="settings-card-body">
         <section class="setting-block" aria-labelledby="launcher-appearance-title">
         <h3 id="launcher-appearance-title">网页悬浮球</h3>
@@ -114,7 +128,8 @@
         </section>
         <p id="launcher-status" class="setting-help" role="status" aria-live="polite"></p>
       </div>
-    </details>
+    </section>
+    </section>
     <section id="ai-custom-fields" class="site-editor" aria-labelledby="ai-editor-title" hidden>
       <div class="editor-heading"><h3 id="ai-editor-title">网站与控件</h3><span class="scope-badge">编辑中</span></div>
       <label for="ai-site-name">网站名称</label><input id="ai-site-name" maxlength="80" placeholder="我的 AI 网站">
@@ -133,11 +148,15 @@
       </details>
       <div class="settings-actions editor-actions"><button id="ai-cancel-edit">取消编辑</button><button id="ai-apply-site" class="primary">完成编辑</button></div>
     </section>
-    <p id="ai-settings-error" role="alert" hidden></p>
-    <p id="ai-settings-status" class="setting-help" role="status" hidden></p>
+    </div>
     <div class="dialog-footer">
+      <p id="ai-settings-error" role="alert" hidden></p>
+      <p id="ai-settings-status" class="setting-help" role="status" hidden></p>
+      <div id="settings-discard" class="settings-discard" hidden><p>有尚未保存的更改，要放弃吗？</p><div class="settings-actions"><button id="settings-keep-editing" type="button">继续编辑</button><button id="settings-discard-close" type="button" class="danger">放弃并关闭</button></div></div>
+      <p id="settings-save-hint" class="settings-save-hint" role="status">AI 网站与引用设置保存后生效</p>
       <button id="configuration-open" type="button">配置导入／导出</button>
-      <button id="ai-save-settings" class="primary">保存全局设置</button>
+      <button id="ai-save-settings" class="primary">保存更改</button>
+      <button id="settings-done" type="button" class="primary" hidden>完成</button>
     </div>
   </dialog>
   <dialog id="configuration-dialog" aria-labelledby="configuration-title">

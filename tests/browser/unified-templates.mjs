@@ -71,7 +71,19 @@ try {
  }
  async function settled(){await chat.locator('#sider-enhancement').evaluate(async host=>{await Promise.all(host.shadowRoot.getAnimations().map(animation=>animation.finished.catch(()=>{})))});}
  assert.equal(await chat.locator('[data-pane="references"]').count(),0);assert.equal(await chat.locator('[data-pane="settings"]').count(),0);
- await menu();await chat.getByRole('button',{name:'编辑预设 旧预设',exact:true}).click();await chat.locator('#template-name').fill('修改后的旧预设');await chat.locator('#template-position').selectOption('prepend');await chat.getByRole('button',{name:'保存预设',exact:true}).click();
+ await menu();
+ assert.equal(await chat.getByRole('button',{name:'编辑预设 旧预设',exact:true}).isVisible(),false);
+ await chat.locator('#preset-search').fill('不存在的预设');await chat.locator('#preset-empty').waitFor({state:'visible'});
+ assert.equal(await chat.locator('.template-row:visible').count(),0);
+ await chat.locator('#preset-search').fill('正文一');assert.equal(await chat.locator('.template-row:visible').count(),1);
+ await chat.locator('#preset-manage').click();assert.equal(await chat.locator('.template-row:visible [data-sort-handle]').isDisabled(),true);
+ await chat.locator('#preset-search').fill('');
+ await settled();await panel.screenshot({path:'tmp/browser/presets-manage-420.png',animations:'disabled'});
+ await chat.locator('#preset-manage').click();
+ await settled();await panel.screenshot({path:'tmp/browser/presets-use-420.png',animations:'disabled'});
+ await chat.locator('#preset-manage').click();
+ checked('preset search, empty state and use/manage modes preserve selections and disable filtered sorting');
+ await chat.getByRole('button',{name:'编辑预设 旧预设',exact:true}).click();await chat.locator('#template-name').fill('修改后的旧预设');await chat.locator('#template-position').selectOption('prepend');await chat.getByRole('button',{name:'保存预设',exact:true}).click();
  await eventually(async()=>assert.equal((await exported()).backup.configuration.templates.find(item=>item.id==='legacy-fixture-001').name,'修改后的旧预设'));checked('one entrance edits each template and its position without touching the native draft');
  assert.equal((await exported()).backup.version,3);
   // Actual pointer events save the order, and Escape cancels a pending change.

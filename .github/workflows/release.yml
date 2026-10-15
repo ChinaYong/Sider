@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/check.yml
+    with:
+      release-tag: ${{ github.ref_name }}
+
+  publish:
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Download tested extension
+        uses: actions/download-artifact@v4
+        with:
+          name: extension-dist
+          path: dist
+      - name: Package extension
+        shell: bash
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test -f dist/manifest.json
+          cd dist
+          zip -q -r "../Sider-${RELEASE_TAG}.zip" .
+          cd ..
+          unzip -t "Sider-${RELEASE_TAG}.zip"
+          sha256sum "Sider-${RELEASE_TAG}.zip" > "Sider-${RELEASE_TAG}.zip.sha256"
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            "Sider-${RELEASE_TAG}.zip" \
+            "Sider-${RELEASE_TAG}.zip.sha256" \
+            --verify-tag \
+            --title "Sider ${RELEASE_TAG}" \
+            --generate-notes

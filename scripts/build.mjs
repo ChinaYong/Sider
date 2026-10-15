@@ -2,8 +2,10 @@ import { build } from 'esbuild';
 import { mkdir, copyFile, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { checkVersion } from './version.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
+await checkVersion(root);
 const outdir = path.join(root, 'dist');
 await mkdir(outdir, { recursive: true });
 const common = { bundle: true, target: ['chrome116'], sourcemap: false, legalComments: 'eof', outdir, logLevel: 'info' };

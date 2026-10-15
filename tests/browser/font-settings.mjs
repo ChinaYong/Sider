@@ -49,7 +49,7 @@ try {
   await chat.locator('#sider-enhancement [data-pane="templates"]').click();
   const other = await context.newPage(); await other.goto(`chrome-extension://${id}/panel.html`);
   const request = data => panel.evaluate(data => chrome.runtime.sendMessage(data), data);
-  const open = async () => { await panel.locator('#ai-settings-toggle').click(); await panel.locator('#font-settings > summary').click(); };
+  const open = async () => { await panel.locator('#ai-settings-toggle').click(); await panel.locator('#settings-tab-appearance').click(); };
   await open();
   await panel.locator('#extension-font').selectOption('mono');
   await panel.waitForFunction(() => document.querySelector('#extension-font-status').textContent.includes('已保存'));

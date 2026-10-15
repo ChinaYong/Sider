@@ -109,7 +109,7 @@ try {
   await source.screenshot({ path: 'tmp/browser/launcher-small-dark.png' });
   pass('drag snaps left without opening; position survives reload and stays visible after resizing');
   await panel.bringToFront(); await panel.setViewportSize({ width: 320, height: 640 });
-  await panel.locator('#ai-settings-toggle').click(); await panel.locator('#launcher-settings > summary').click();
+  await panel.locator('#ai-settings-toggle').click(); await panel.locator('#settings-tab-launcher').click();
   await panel.locator('#launcher-floating').uncheck(); await launcher.waitFor({ state: 'detached' });
   await eventually(async () => assert.equal(await worker.evaluate(async () => (await chrome.scripting.getRegisteredContentScripts({ ids: ['sider-floating-launcher'] })).length), 0));
   await panel.locator('#launcher-floating').check(); await launcher.waitFor();
@@ -134,6 +134,9 @@ try {
     assert.ok(nodeId, selector); return nodeId;
   }
   async function shadowClick(selector) {
+    // Viewport changes reposition the launcher on the next animation frame.
+    // Read click coordinates only after that layout has been applied.
+    await source.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const nodeId = await shadowNode(selector);
     await pageCDP.send('DOM.scrollIntoViewIfNeeded', { nodeId });
     const { model } = await pageCDP.send('DOM.getBoxModel', { nodeId });

@@ -439,7 +439,7 @@ test('reference controls render and open on a page that rejects HTML-string assi
   await new Promise(resolve => setTimeout(resolve, 40));
   api.root.querySelector('[data-pane="templates"]').click();
   assert.equal(api.root.querySelector('.popover').hidden, false);
-  assert.equal(api.root.querySelector('#pane-title').textContent, '预设');
+  assert.equal(api.root.querySelector('#pane-title').textContent, '预设与引用');
   api.root.querySelector('[aria-label="编辑预设 划词"]').click();
   assert.ok(api.root.querySelector('#template-text'));
   assert.equal(api.host.isConnected, true);

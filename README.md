@@ -57,7 +57,7 @@ npm run build
 2. 点击 **加载已解压的扩展**，选择项目中的 **`dist/`**。
 3. 打开要阅读的网页，点击工具栏中的 Sider 图标。
 
-如果已有构建好的扩展 ZIP，解压后直接加载包含 `manifest.json` 的目录即可。浏览器持续读取该目录，请保留它。
+也可在 [Releases](https://github.com/ChinaYong/Sider/releases) 下载构建好的 `Sider-v*.zip`，解压后直接加载包含 `manifest.json` 的目录，无需安装 Node.js。浏览器持续读取该目录，请保留它。GitHub 自动附带的 Source code 是源码归档，请选择 Sider 扩展附件。
 
 更新时重新构建，或用新扩展包更新原加载目录，然后在扩展管理页点击 **重新加载**，关闭旧侧栏并重开。`npm run build` 只生成 `dist/`，不会生成 ZIP。
 
@@ -145,9 +145,13 @@ flowchart LR
 | --- | --- |
 | `npm ci` | 安装锁定版本的依赖 |
 | `npm run build` | 构建可加载的 `dist/` |
+| `npm run version:set -- 0.7.1` | 同步更新扩展、npm 与锁文件的版本号 |
+| `npm run version:check` | 检查版本号是否一致 |
 | `npm test` | 运行单元测试 |
 | `npm run test:browser` | 构建并运行隔离浏览器回归，见 [浏览器测试说明](docs/browser-tests.md) |
 | `npm run check` | 运行单元测试并构建 |
 | `npm run dev` | 启动安装提示与示例文章页面 |
 
 完整侧栏需在浏览器中加载扩展。本地开发页面用于辅助调试，测试范围与历史结果见 [验证记录](docs/validation.md)。`dist/` 与扩展 ZIP 为生成产物，不随源码提交。
+
+发布时推送与扩展版本一致的 `vX.Y.Z` 标签，GitHub Actions 会自动测试、打包并创建 Release，无需手动压缩 `dist/` 或上传附件。操作步骤见 [自动发布说明](docs/releasing.md)。

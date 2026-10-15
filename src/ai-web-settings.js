@@ -1,4 +1,5 @@
 import { GEMINI_MODE_NORMAL, GEMINI_MODE_SPARK, GEMINI_MODEL_OPTIONS, GEMINI_THINKING_OPTIONS, normalizeAIWebSettings, listAISites, selectedAISite, normalizeCustomAISite, validateAIWebSettings, aiSitePattern } from './ai-web.js';
+import { installSettingsNavigation } from './settings-navigation.js';
 
 export function installAIWebSettings({ document, chrome, onSaved, pickSendButton }) {
   const $ = selector => document.querySelector(selector);
@@ -8,7 +9,10 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
   const geminiOptions = $('#ai-gemini-options');
   const siteEditor = $('#ai-custom-fields');
   const editorHome = $('#ai-editor-home');
+  const navigation = installSettingsNavigation(document);
   let draft = normalizeAIWebSettings();
+  let savedDraft = JSON.stringify(draft);
+  let saving = false;
   let editingId = null;
   let editingBuiltin = false;
   let picking = false;
@@ -17,7 +21,29 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
   document.defaultView.addEventListener('pagehide', () => { disposed = true; });
   const error = message => { $('#ai-settings-error').textContent = message; $('#ai-settings-error').hidden = !message; };
   const status = message => { $('#ai-settings-status').textContent = message; $('#ai-settings-status').hidden = !message; };
+  const dirty = () => !siteEditor.hidden || JSON.stringify(draft) !== savedDraft;
+  function updateSaveHint() {
+    const pending = dirty();
+    dialog.toggleAttribute('data-unsaved', pending);
+    const immediate = ['appearance', 'launcher'].includes(dialog.dataset.settingsSection);
+    $('#ai-save-settings').hidden = immediate && !pending;
+    $('#settings-done').hidden = !immediate || pending;
+    $('#settings-save-hint').textContent = pending ? 'AI 网站或引用有未保存的更改' : immediate ? '本页设置立即保存，无需再次保存' : 'AI 网站与引用设置保存后生效';
+  }
+  function requestClose() {
+    if (saving || picking) return;
+    if (!dirty()) { dialog.close(); return; }
+    $('#settings-discard').hidden = false;
+    $('#settings-keep-editing').focus();
+  }
+  dialog.addEventListener('sider-settings-section', updateSaveHint);
+  dialog.addEventListener('input', updateSaveHint);
+  dialog.addEventListener('change', updateSaveHint);
+  dialog.addEventListener('cancel', event => { event.preventDefault(); requestClose(); });
+  $('#settings-keep-editing').addEventListener('click', () => { $('#settings-discard').hidden = true; $('#ai-close-settings').focus(); });
+  $('#settings-discard-close').addEventListener('click', () => { $('#settings-discard').hidden = true; dialog.close(); });
   function revealEditor() {
+    navigation.activate('ai');
     for (let parent = siteEditor.parentElement; parent && parent !== dialog; parent = parent.parentElement) if (parent.tagName === 'DETAILS') parent.open = true;
     error('请先完成或取消当前网站编辑。'); $('#ai-apply-site').focus();
   }
@@ -25,6 +51,7 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
     siteEditor.hidden = true; editingId = null; error('');
     const opener = editOpener?.isConnected ? editOpener : $('#ai-edit-site');
     opener.focus();
+    updateSaveHint();
   }
   function renderSiteGroups() {
     const expanded = new Set([...siteGroups.children].filter(group => group.open).map(group => group.dataset.siteId));
@@ -70,11 +97,12 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
     const custom = !selectedAISite(draft).builtin;
     $('#ai-edit-site').hidden = false; $('#ai-edit-site').textContent = custom ? '编辑网站' : '配置网站'; $('#ai-remove-site').hidden = !custom;
     renderSiteGroups();
+    updateSaveHint();
   }
   function edit(site) {
     if (!siteEditor.hidden) { revealEditor(); return; }
     editOpener = document.activeElement;
-    status('完成编辑后，点击「保存全局设置」应用更改。');
+    status('完成编辑后，点击「保存更改」应用。');
     if (site) {
       const group = [...siteGroups.children].find(candidate => candidate.dataset.siteId === site.id);
       siteMenu.open = true; group.open = true;
@@ -91,19 +119,22 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
     for (const key of ['composer', 'send', 'mount']) $(`#ai-selector-${key}`).value = site?.selectors[key] || '';
     $('#ai-send-shortcut').value = site?.sendShortcut || 'enter';
     $('#ai-custom-fields').hidden = false;
+    updateSaveHint();
     $('#ai-site-name').focus();
   }
   async function open() {
-    if (picking) return;
+    if (picking || dialog.open) return;
     error(''); status(''); $('#ai-custom-fields').hidden = true; editingId = null;
-    siteMenu.open = false;
+    $('#settings-discard').hidden = true;
+    navigation.activate('ai', { reset: true });
+    siteMenu.open = true;
     for (const group of siteGroups.children) group.open = false;
     dialog.showModal();
     $('#ai-save-settings').disabled = true;
     try {
       const response = await chrome.runtime.sendMessage({ type: 'SIDER_AI_WEB_SETTINGS_GET' });
       if (!response?.ok) throw new Error(response?.error || '无法读取 AI 网站设置。');
-      draft = normalizeAIWebSettings(response.settings); render();
+      draft = normalizeAIWebSettings(response.settings); savedDraft = JSON.stringify(draft); render();
       $('#ai-save-settings').disabled = false;
     } catch (cause) { error(cause.message); }
   }
@@ -111,7 +142,8 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
     if (!chrome?.runtime?.id) { error('请安装扩展后配置 AI 网站。'); dialog.showModal(); return; }
     void open();
   });
-  $('#ai-close-settings').addEventListener('click', () => dialog.close());
+  $('#ai-close-settings').addEventListener('click', requestClose);
+  $('#settings-done').addEventListener('click', requestClose);
   $('#ai-active-site').addEventListener('change', () => {
     if (!siteEditor.hidden) { $('#ai-active-site').value = draft.activeSiteId; revealEditor(); return; }
     draft.activeSiteId = $('#ai-active-site').value; error(''); status('网站已选择，保存后生效。'); render();
@@ -159,7 +191,7 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
           const existing = draft.customSites.some(candidate => candidate.id === site.id);
           return validateAIWebSettings({ ...draft, activeSiteId: existing ? draft.activeSiteId : site.id, customSites: [...draft.customSites.filter(candidate => candidate.id !== site.id), site] });
         })();
-      draft = settings; finishEdit(); render(); $('#ai-edit-site').focus(); status('网站编辑已完成，保存全局设置后生效。');
+      draft = settings; finishEdit(); render(); $('#ai-edit-site').focus(); status('网站编辑已完成，保存更改后生效。');
     } catch (cause) { error(cause.name === 'SyntaxError' ? 'CSS 选择器无效，请检查高级配置。' : cause.message); }
   });
   $('#ai-remove-site').addEventListener('click', () => {
@@ -171,6 +203,8 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
     if (!$('#ai-custom-fields').hidden) {
       revealEditor(); return;
     }
+    if (saving) return;
+    saving = true;
     const button = $('#ai-save-settings'); button.disabled = true; button.textContent = '正在保存…'; button.setAttribute('aria-busy', 'true'); error('');
     const controls = [...dialog.querySelectorAll('input,select,button')].filter(control => control.id !== 'ai-close-settings' && control !== button);
     const disabled = controls.map(control => control.disabled);
@@ -183,9 +217,9 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
       if (!granted) throw new Error(`${site.name} 的访问权限未授予，设置尚未保存。`);
       const result = await chrome.runtime.sendMessage({ type: 'SIDER_AI_WEB_SETTINGS_SAVE', settings });
       if (!result?.ok) throw new Error(result?.error || '设置保存失败，请重试。');
-      dialog.close(); onSaved?.(normalizeAIWebSettings(result.settings));
+      savedDraft = JSON.stringify(draft); updateSaveHint(); dialog.close(); onSaved?.(normalizeAIWebSettings(result.settings));
     } catch (cause) { error(cause.message); }
-    finally { button.disabled = false; button.textContent = '保存全局设置'; button.removeAttribute('aria-busy'); controls.forEach((control, index) => { control.disabled = disabled[index]; }); }
+    finally { saving = false; button.disabled = false; button.textContent = '保存更改'; button.removeAttribute('aria-busy'); controls.forEach((control, index) => { control.disabled = disabled[index]; }); }
   });
   render();
 }

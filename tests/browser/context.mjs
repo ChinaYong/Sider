@@ -173,6 +173,7 @@ try {
 
   const chatA = panels.a.chat;
   await chatA.locator('[data-pane="templates"]').click();
+  await chatA.locator('#preset-manage').click();
   for (const [kind, name] of [['selection', '划词'], ['url', '网页链接'], ['page', '网页正文']]) {
     await chatA.getByRole('button', { name: '编辑预设 ' + name, exact: true }).click();
     await chatA.locator('#template-text').fill(settings[kind + 'Template']);

@@ -109,15 +109,15 @@ export function installLauncherSettingsUI({ document, chrome, sourceTabId }) {
   const changed = (changes, area) => {
     if (area === 'local' && changes[LAUNCHER_SETTINGS_KEY]) { revision++; settings = normalizeLauncherSettings(changes[LAUNCHER_SETTINGS_KEY].newValue); render(); }
   };
-  const accessChanged = () => { void refreshAccess().catch(() => {}); if (details.open) void refreshSource(); };
+  const visible = () => !document.querySelector('#settings-launcher')?.hidden && document.querySelector('#ai-settings-dialog').open;
+  const accessChanged = () => { void refreshAccess().catch(() => {}); if (visible()) void refreshSource(); };
   chrome.storage.onChanged.addListener(changed);
   chrome.permissions.onAdded.addListener(accessChanged); chrome.permissions.onRemoved.addListener(accessChanged);
-  const details = document.querySelector('#launcher-settings');
-  details.addEventListener('toggle', () => { if (details.open) void refreshSource(); });
-  const sourceChanged = (tabId, change) => { if (tabId === sourceTabId && change.url && details.open) void refreshSource(); };
+  document.querySelector('#ai-settings-dialog').addEventListener('sider-settings-section', event => { if (event.detail === 'launcher') void refreshSource(); });
+  const sourceChanged = (tabId, change) => { if (tabId === sourceTabId && change.url && visible()) void refreshSource(); };
   chrome.tabs.onUpdated?.addListener(sourceChanged);
   // Refresh customized shortcuts whenever the settings dialog is opened.
-  document.querySelector('#ai-settings-toggle').addEventListener('click', () => { void load().catch(error => message(error.message)); if (details.open) void refreshSource(); });
+  document.querySelector('#ai-settings-toggle').addEventListener('click', () => { void load().catch(error => message(error.message)); if (visible()) void refreshSource(); });
   document.defaultView.addEventListener('pagehide', () => {
     chrome.storage.onChanged.removeListener(changed);
     chrome.permissions.onAdded.removeListener(accessChanged); chrome.permissions.onRemoved.removeListener(accessChanged);
