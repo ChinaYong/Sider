@@ -25,7 +25,7 @@ const tls = httpsServer({ key: await readFile('tests/browser/fixtures/test-key.p
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(nativeFixture);
 });
 const article = httpServer((req, res) => {
-  const key = req.url.includes('/b') ? 'B' : req.url.includes('/denied') ? 'D' : 'A';
+  const key = req.url.includes('/b') ? 'B' : req.url.includes('/c') ? 'C' : req.url.includes('/denied') ? 'D' : 'A';
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
   res.end(`<!doctype html><meta charset="utf-8"><title>来源 ${key} 的文章</title><article><h1>来源 ${key} 的文章</h1><p id="quote">${key} 的独立划词</p><p>${key}-BODY-START ${('来源 ' + key + ' 的正文资料。').repeat(50)} ${key}-BODY-END</p></article>`);
 });
@@ -211,6 +211,25 @@ try {
   await eventually(async () => assert.equal((await state()).status, 'ready'));
   assert.equal((await state()).sourceTabId, tabA.id);
   checked('closing the selected source invalidates variables, retains existing site content and leaves quick return available');
+  const sourceC = await context.newPage(); await sourceC.goto(rootURL + '/c'); await grantAction(sourceC); await panel.bringToFront();
+  await openPresets();
+  const selectionToggle = chat.getByRole('checkbox', { name: '发送时引用 划词', exact: true });
+  await selectionToggle.click();
+  await eventually(async () => assert.equal(await selectionToggle.getAttribute('data-selection-mode'), 'once'));
+  await selectionToggle.click();
+  await eventually(async () => { assert.equal(await selectionToggle.getAttribute('data-selection-mode'), 'always'); assert.equal(await selectionToggle.isEnabled(), true); });
+  const pinnedDraft = await editor.inputValue(), pinnedFiles = await files();
+  await choose('来源 C');
+  await eventually(async () => { assert.equal((await state()).context.selection.content, 'C 的独立划词'); assert.equal(await selectionToggle.getAttribute('data-selection-mode'), 'always'); });
+  assert.equal(await editor.inputValue(), pinnedDraft); assert.deepEqual(await files(), pinnedFiles);
+  await chat.getByRole('button', { name: '关闭', exact: true }).click();
+  await editor.fill('总是引用当前借用来源的划词'); await editor.press('Enter');
+  await eventually(async () => assert.equal(await chat.locator('body').evaluate(() => sent.length), 2));
+  assert.match(await chat.locator('body').evaluate(() => sent[1].text), /C 的独立划词/);
+  await eventually(async () => assert.equal((await state()).context.selectionIncluded, true));
+  await chat.getByRole('button', { name: '取消划词', exact: true }).click();
+  await eventually(async () => assert.equal((await state()).context.selectionIncluded, false));
+  checked('always selected retains draft and files across a borrowed-source switch, sends the new source selection, survives send and exits through chip cancellation');
   assert.deepEqual(errors, []);
   await writeFile('tmp/browser/reference-source-result.json', JSON.stringify({ fixtureOnly: true, browser: context.browser().version(), checks, errors }, null, 2));
 } finally {

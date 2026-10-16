@@ -6,6 +6,154 @@ import { PROMPT_TEMPLATES_KEY, UNIFIED_TEMPLATES_KEY, PRESET_IDS, newTemplate } 
 import { REFERENCE_SESSIONS_KEY } from '../src/reference-sessions.js';
 import { expandVariables } from '../src/variables.js';
 
+test('selection modes pin every existing sidebar, keep ordinary choices local and release globally', async () => {
+ const f = await fixture(); await f.register(1); await f.register(2);
+ await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' }); await f.wrapped(2, { type: 'SIDER_TAB_CONTEXT_GET' });
+ await f.wrapped(1, { type: 'SIDER_SELECTION_MODE_SET', mode: 'off' });
+ const once = await f.wrapped(1, { type: 'SIDER_SELECTION_MODE_SET', mode: 'once' });
+ assert.equal(once.context.selectionIncluded, true);
+ await f.wrapped(2, { type: 'SIDER_SELECTION_MODE_SET', mode: 'off' });
+ assert.equal((await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' })).context.selectionIncluded, true);
+ await f.wrapped(2, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'url', enabled: true });
+ const pinned = await f.wrapped(1, { type: 'SIDER_SELECTION_MODE_SET', mode: 'always' });
+ assert.equal(pinned.ok, true, pinned.error);
+ assert.equal(pinned.templates[0].alwaysIncluded, true);
+ assert.equal(f.session[TAB_CONTEXT_PREFIX + 2].selectionIncluded, true);
+ const unpinned = await f.wrapped(1, { type: 'SIDER_SELECTION_MODE_SET', mode: 'off' });
+ assert.equal(unpinned.context.selectionIncluded, false);
+ assert.equal(f.session[TAB_CONTEXT_PREFIX + 2].selectionIncluded, false);
+ assert.equal(f.session[TAB_CONTEXT_PREFIX + 2].attachments.url, true);
+ await f.register(3);
+ assert.equal((await f.wrapped(3, { type: 'SIDER_TAB_CONTEXT_GET' })).context.selectionIncluded, true);
+ assert.equal((await f.wrapped(1, { type: 'SIDER_SELECTION_MODE_SET', mode: 'invalid' })).ok, false);
+});
+
+test('pinned selection survives send clearing and tracks new or empty source selections', async () => {
+ const f = await fixture(); await f.register(1); await f.select(1, '第一次划词');
+ await f.wrapped(1, { type: 'SIDER_SELECTION_MODE_SET', mode: 'always' });
+ await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'url', enabled: true });
+ const before = (await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' })).context;
+ const cleared = await f.wrapped(1, { type: 'SIDER_TAB_TEMPLATES_CLEAR', expectedContext: before });
+ assert.equal(cleared.context.selectionIncluded, true); assert.equal(cleared.context.attachments.url, false);
+ assert.deepEqual(cleared.context.explicitTemplates, []);
+ await f.select(1, null);
+ assert.equal((await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' })).context.selectionIncluded, true);
+ await f.select(1, '最新划词');
+ const next = (await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' })).context;
+ assert.equal(next.selection.content, '最新划词'); assert.equal(next.selectionIncluded, true);
+ const stale = await f.wrapped(1, { type: 'SIDER_TAB_TEMPLATES_CLEAR', expectedContext: before });
+ assert.equal(stale.context.revision, next.revision); assert.equal(stale.context.selectionIncluded, true);
+});
+
+test('borrowed sources keep the global pin across sends, source changes and worker restart', async () => {
+ const f = await fixture(); await f.register(1); await f.register(3);
+ await f.wrapped(3, { type: 'SIDER_TAB_CONTEXT_GET' });
+ await f.select(2, '借用来源的划词');
+ const source = await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 2 });
+ const pinned = await f.wrapped(1, { type: 'SIDER_SELECTION_MODE_SET', mode: 'always', referenceEpoch: source.referenceSource.epoch });
+ assert.equal(pinned.ok, true, pinned.error);
+ const cleared = await f.wrapped(1, { type: 'SIDER_TAB_TEMPLATES_CLEAR', expectedContext: { ...pinned.context, referenceEpoch: pinned.referenceSource.epoch } });
+ assert.equal(cleared.context.selectionIncluded, true);
+ const changed = await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 3 });
+ assert.equal(changed.context.selectionIncluded, true);
+ assert.equal((await f.wrapped(1, { type: 'SIDER_SELECTION_MODE_SET', mode: 'off', referenceEpoch: source.referenceSource.epoch })).ok, false);
+ assert.equal(f.local[UNIFIED_TEMPLATES_KEY][0].alwaysIncluded, true);
+ await f.restart();
+ const restored = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+ assert.equal(restored.referenceSource.tabId, 3); assert.equal(restored.context.selectionIncluded, true);
+ const cancelled = await f.wrapped(1, { type: 'SIDER_TAB_TEMPLATE_SET', id: PRESET_IDS.selection, enabled: false });
+ assert.equal(cancelled.context.selectionIncluded, false);
+ assert.equal(f.local[UNIFIED_TEMPLATES_KEY][0].alwaysIncluded, false);
+ assert.equal(f.session[TAB_CONTEXT_PREFIX + 3].selectionIncluded, false);
+});
+
+test('global pin persists after session contexts are discarded and navigation clears only old material', async () => {
+ const f = await fixture(); await f.register(1); await f.select(1, '旧网页划词');
+ await f.wrapped(1, { type: 'SIDER_CONTEXT_SETTINGS_PATCH', patch: { defaultSelection: false } });
+ await f.wrapped(1, { type: 'SIDER_SELECTION_MODE_SET', mode: 'always' });
+ Object.assign(f.tabs.get(1), { url: 'https://example.test/new', title: '新网页', status: 'loading' }); f.selections.delete(1);
+ await f.api.tabs.onUpdated.emit(1, { url: f.tabs.get(1).url, status: 'loading' }, f.tabs.get(1));
+ f.tabs.get(1).status = 'complete';
+ const navigated = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+ assert.equal(navigated.context.selection, null); assert.equal(navigated.context.selectionIncluded, true);
+ delete f.session[TAB_CONTEXT_PREFIX + 1];
+ await f.restart();
+ const fresh = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+ assert.equal(fresh.context.selectionIncluded, true); assert.equal(fresh.templates[0].alwaysIncluded, true);
+ assert.equal(fresh.templates[0].defaultIncluded, false);
+});
+
+test('failed global-mode writes retain choices and stale send completion cannot undo a new mode', async () => {
+ const f = await fixture(); await f.register(1);
+ const old = (await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' })).context;
+ const set = f.api.storage.local.set;
+ f.api.storage.local.set = async change => { if (change[UNIFIED_TEMPLATES_KEY]) throw new Error('模拟保存失败'); return set(change); };
+ const failed = await f.wrapped(1, { type: 'SIDER_SELECTION_MODE_SET', mode: 'always' });
+ assert.equal(failed.ok, false); assert.match(failed.error, /模拟保存失败/);
+ assert.equal(f.local[UNIFIED_TEMPLATES_KEY][0].alwaysIncluded, false);
+ assert.deepEqual(f.session[TAB_CONTEXT_PREFIX + 1], old);
+ f.api.storage.local.set = set;
+ const pinned = await f.wrapped(1, { type: 'SIDER_SELECTION_MODE_SET', mode: 'always' });
+ const cleared = await f.wrapped(1, { type: 'SIDER_TAB_TEMPLATES_CLEAR', expectedContext: old });
+ assert.equal(cleared.context.revision, pinned.context.revision); assert.equal(cleared.context.selectionIncluded, true);
+});
+
+test('extension cancellation and explicit source-selection clearing also exit global persistence', async () => {
+ const f = await fixture(); await f.register(1); await f.register(2);
+ await f.wrapped(2, { type: 'SIDER_TAB_CONTEXT_GET' });
+ for (const type of ['SIDER_TAB_ATTACHMENT_SET', 'SIDER_TAB_SELECTION_CLEAR']) {
+  await f.wrapped(1, { type: 'SIDER_SELECTION_MODE_SET', mode: 'always' });
+  const result = await f.send({ type, tabId: 1, kind: 'selection', enabled: false });
+  assert.equal(result.ok, true, result.error); assert.equal(result.context.selectionIncluded, false);
+  assert.equal(f.local[UNIFIED_TEMPLATES_KEY][0].alwaysIncluded, false);
+  assert.equal(f.session[TAB_CONTEXT_PREFIX + 2].selectionIncluded, false);
+ }
+});
+
+test('concurrent default-setting and persistence changes complete without reversing lock order', { timeout: 3000 }, async () => {
+ const f = await fixture(); await f.register(1);
+ const results = await Promise.all([
+  f.wrapped(1, { type: 'SIDER_CONTEXT_SETTINGS_PATCH', patch: { defaultSelection: false } }),
+  f.wrapped(1, { type: 'SIDER_SELECTION_MODE_SET', mode: 'always' }),
+ ]);
+ assert.ok(results.every(result => result.ok), JSON.stringify(results));
+ const current = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+ assert.equal(current.templates[0].defaultIncluded, false);
+ assert.equal(current.templates[0].alwaysIncluded, true); assert.equal(current.context.selectionIncluded, true);
+});
+
+test('a session-write failure after the policy commit reconciles from persisted settings on the next read', async () => {
+ const f = await fixture(); await f.register(1);
+ await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+ const set = f.api.storage.session.set;
+ f.api.storage.session.set = async change => { if (change[TAB_CONTEXT_PREFIX + 1]) throw new Error('模拟会话写入失败'); return set(change); };
+ const failed = await f.wrapped(1, { type: 'SIDER_SELECTION_MODE_SET', mode: 'always' });
+ assert.equal(failed.ok, false); assert.equal(f.local[UNIFIED_TEMPLATES_KEY][0].alwaysIncluded, true);
+ f.api.storage.session.set = set;
+ const restored = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+ assert.equal(restored.context.selectionIncluded, true); assert.equal(restored.context.selectionAlwaysIncluded, true);
+});
+
+test('template reset and configuration import release pinned contexts while preserving other choices', async () => {
+ const f = await fixture(); await f.register(1); await f.register(2);
+ await f.wrapped(2, { type: 'SIDER_TAB_CONTEXT_GET' });
+ await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 3 });
+ await f.wrapped(1, { type: 'SIDER_SELECTION_MODE_SET', mode: 'always' });
+ await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'url', enabled: true });
+ const previous = (await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_GET' })).templates;
+ const templates = previous.map(item => item.preset === 'selection' ? { ...item, alwaysIncluded: false } : item);
+ assert.equal((await f.wrapped(1, { type: 'SIDER_PROMPT_TEMPLATES_SAVE', templates, expected: previous })).ok, true);
+ assert.equal(f.session[REFERENCE_SESSIONS_KEY][1].context.selectionIncluded, false);
+ assert.equal(f.session[REFERENCE_SESSIONS_KEY][1].context.attachments.url, true);
+ await f.wrapped(1, { type: 'SIDER_SELECTION_MODE_SET', mode: 'always' });
+ const { backup } = await f.send({ type: 'SIDER_CONFIGURATION_EXPORT' });
+ const oldBackup = structuredClone(backup); delete oldBackup.configuration.templates[0].alwaysIncluded;
+ assert.equal((await f.send({ type: 'SIDER_CONFIGURATION_IMPORT', backup: oldBackup, expected: backup.configuration })).ok, true);
+ assert.equal(f.session[REFERENCE_SESSIONS_KEY][1].context.selectionIncluded, false);
+ assert.equal(f.session[TAB_CONTEXT_PREFIX + 2].selectionIncluded, false);
+ assert.equal(f.session[REFERENCE_SESSIONS_KEY][1].context.attachments.url, true);
+});
+
 test('source picker lists all accessible windows and marks unsupported pages without changing the active tab', async () => {
   const f = await fixture(); await f.register(1);
   f.tabs.get(2).windowId = 27;
@@ -299,7 +447,7 @@ function browserModel() {
   };
   function area(data, name) {
     return {
-      async get(key) { return structuredClone(Object.fromEntries((Array.isArray(key) ? key : [key]).map(name => [name, data[name]]))); },
+      async get(key) { return structuredClone(key == null ? data : Object.fromEntries((Array.isArray(key) ? key : [key]).map(name => [name, data[name]]))); },
       async set(update) {
         const changes = {};
         for (const [key, value] of Object.entries(update)) { changes[key] = { oldValue: data[key], newValue: structuredClone(value) }; data[key] = structuredClone(value); }

@@ -60,6 +60,7 @@ export function normalizeContext(raw, tabId = raw?.tabId) {
     templateSelections: raw.templateSelections && typeof raw.templateSelections === 'object' && !Array.isArray(raw.templateSelections)
       ? Object.fromEntries(Object.entries(raw.templateSelections).filter(([id, enabled]) => /^[a-zA-Z0-9-]{8,100}$/.test(id) && typeof enabled === 'boolean')) : null,
     explicitTemplates: Array.isArray(raw.explicitTemplates) ? raw.explicitTemplates.filter(id => typeof id === 'string') : [],
+    ...(raw.selectionAlwaysIncluded === true ? { selectionAlwaysIncluded: true } : {}),
   };
 }
 

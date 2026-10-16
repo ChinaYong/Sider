@@ -1,5 +1,5 @@
 import { TAB_CONTEXT_PREFIX, MAX_CONTEXT_CHARS, DEFAULT_REFERENCE_KEYS, createTabContext, normalizeContext, normalizeContextSettings, validateContextReference } from './context.js';
-import { getTemplates, PRESET_IDS, templateSettings, UNIFIED_TEMPLATES_KEY, validateTemplates } from './prompt-templates.js';
+import { getTemplates, PRESET_IDS, templateSettings, UNIFIED_TEMPLATES_KEY, validateTemplates, alwaysIncludeSelection } from './prompt-templates.js';
 import { needsPageVariables, needsTemplateSelection } from './variables.js';
 
 let contextQueue = Promise.resolve();
@@ -102,14 +102,28 @@ export function applyTabDefaults(tabId, rawSettings, kinds) {
 }
 
 export function initializeTemplates(context, templates) {
-  if (context.templateSelections !== null) return;
-  const legacy = context.defaultsInitialized;
-  context.templateSelections = Object.fromEntries(templates.map(item => [item.id, legacy && item.preset
-    ? item.preset === 'selection' ? context.selectionIncluded : item.preset === 'url' ? context.attachments.url : context.pageRequested
-    : item.defaultIncluded]));
-  context.defaultsInitialized = true;
+  if (context.templateSelections === null) {
+    const legacy = context.defaultsInitialized;
+    context.templateSelections = Object.fromEntries(templates.map(item => [item.id, legacy && item.preset
+      ? item.preset === 'selection' ? context.selectionIncluded : item.preset === 'url' ? context.attachments.url : context.pageRequested
+      : item.defaultIncluded]));
+    context.defaultsInitialized = true;
+  }
+  syncSelectionPolicy(context, templates);
+}
+function syncSelectionPolicy(context, templates) {
+  const always = alwaysIncludeSelection(templates);
+  // Remember which global policy this context last applied. An inactive sidebar
+  // also releases its pin on its next read after reset/import/worker suspension.
+  if (always || context.selectionAlwaysIncluded) {
+    context.templateSelections[PRESET_IDS.selection] = always;
+    context.explicitTemplates = context.explicitTemplates.filter(id => id !== PRESET_IDS.selection);
+  }
+  if (always) context.selectionAlwaysIncluded = true;
+  else delete context.selectionAlwaysIncluded;
 }
 export function syncTemplateDemand(context, templates) {
+  syncSelectionPolicy(context, templates);
   const selected = templates.filter(item => context.templateSelections?.[item.id]
     && (!needsTemplateSelection(item) || context.selection?.content));
   context.selectionIncluded = Boolean(context.templateSelections?.[PRESET_IDS.selection]);

@@ -266,10 +266,17 @@ function fixture(t, options = {}) {
         return { ...result(), ...(inner.needPage ? { variablePage: context.attachments.page || page() } : {}) };
       }
       if (inner.type === 'SIDER_TAB_CONTEXT_GET') return result();
+      if (inner.type === 'SIDER_SELECTION_MODE_SET') {
+        templates.find(item => item.id === PRESET_IDS.selection).alwaysIncluded = inner.mode === 'always';
+        context.templateSelections ||= {}; context.templateSelections[PRESET_IDS.selection] = inner.mode !== 'off';
+        context.selectionIncluded = inner.mode !== 'off'; context.revision++;
+        return result();
+      }
       if (inner.type === 'SIDER_TAB_TEMPLATES_CLEAR') {
         if (inner.expectedContext.tabId === context.tabId && inner.expectedContext.url === context.url && inner.expectedContext.revision === context.revision) {
           for (const id of Object.keys(context.templateSelections)) context.templateSelections[id] = false;
           context.explicitTemplates = []; context.selectionIncluded = false; context.attachments = { url: false, page: null }; context.pageRequested = false; context.pageError = ''; context.revision++;
+          if (templates.find(item => item.id === PRESET_IDS.selection).alwaysIncluded) context.selectionIncluded = context.templateSelections[PRESET_IDS.selection] = true;
         }
         return result();
       }
@@ -334,6 +341,58 @@ function fixture(t, options = {}) {
   };
 }
 
+test('selection checkbox cycles all three states and keeps its accessible label and native draft', async t => {
+ const f = fixture(t); await pause(); f.editor.value = '保留我的草稿';
+ f.click('[data-pane="templates"]');
+ const toggle = () => f.root.querySelector('[aria-label="发送时引用 划词"]');
+ assert.equal(toggle().dataset.selectionMode, 'once');
+ toggle().focus(); toggle().click();
+ await waitUntil(() => toggle().dataset.selectionMode === 'always' && !toggle().disabled);
+ assert.equal(toggle().checked, true); assert.equal(f.root.activeElement, toggle());
+ assert.match(f.root.querySelector('#selection-mode-description').textContent, /当前状态：总是选中/);
+ assert.equal(f.root.querySelector('.selection-pin').hidden, false);
+ assert.equal(f.root.querySelector('[data-chip="selection"]').dataset.selectionMode, 'always');
+ toggle().click(); await waitUntil(() => toggle().dataset.selectionMode === 'off' && !toggle().disabled);
+ assert.equal(toggle().checked, false);
+ toggle().click(); await waitUntil(() => toggle().dataset.selectionMode === 'once' && !toggle().disabled);
+ assert.equal(toggle().checked, true); assert.equal(f.editor.value, '保留我的草稿'); assert.equal(f.submitted.length, 0);
+ assert.deepEqual(f.calls.filter(item => item.request.type === 'SIDER_SELECTION_MODE_SET').map(item => item.request.mode), ['always', 'off', 'once']);
+});
+
+test('failed persistence restores the actual checkbox state and reports the error', async t => {
+ const f = fixture(t); await pause(); f.click('[data-pane="templates"]');
+ const original = f.chrome.runtime.sendMessage;
+ f.chrome.runtime.sendMessage = message => message.request.type === 'SIDER_SELECTION_MODE_SET'
+   ? Promise.resolve({ ok: false, error: '划词设置保存失败' }) : original(message);
+ const toggle = f.root.querySelector('[aria-label="发送时引用 划词"]'); toggle.click();
+ await waitUntil(() => f.root.querySelector('.status.error')?.textContent.includes('保存失败'));
+ assert.equal(toggle.checked, true); assert.equal(toggle.dataset.selectionMode, 'once');
+ assert.equal(toggle.disabled, false); assert.equal(f.submitted.length, 0);
+});
+
+test('a pinned waiting selection survives ordinary send and chip cancellation switches it off', async t => {
+ const f = fixture(t); await pause(); f.click('[data-pane="templates"]');
+ f.click('[aria-label="发送时引用 划词"]');
+ await waitUntil(() => f.root.querySelector('[aria-label="发送时引用 划词"]')?.dataset.selectionMode === 'always');
+ assert.match(f.root.querySelector('[data-chip="selection"] .excerpt').textContent, /等待划词/);
+ f.editor.value = '普通问题'; f.send(); await waitUntil(() => f.submitted.length === 1);
+ await waitUntil(() => f.calls.some(item => item.request.type === 'SIDER_TAB_TEMPLATES_CLEAR'));
+ assert.equal(f.submitted[0], '普通问题'); assert.equal(f.context.selectionIncluded, true);
+ assert.equal(f.root.querySelector('[aria-label="发送时引用 划词"]').dataset.selectionMode, 'always');
+ f.click('[aria-label="取消划词"]'); await waitUntil(() => !f.root.querySelector('[data-chip="selection"]'));
+ assert.equal(f.context.selectionIncluded, false);
+});
+
+test('failed ordinary selection rolls back the immediate native checkbox feedback', async t => {
+ const f = fixture(t); await f.seed({ selectionIncluded: false }); f.click('[data-pane="templates"]');
+ const original = f.chrome.runtime.sendMessage;
+ f.chrome.runtime.sendMessage = message => message.request.type === 'SIDER_SELECTION_MODE_SET'
+   ? Promise.resolve({ ok: false, error: '模拟选择失败' }) : original(message);
+ const toggle = f.root.querySelector('[aria-label="发送时引用 划词"]'); toggle.click();
+ await waitUntil(() => f.root.querySelector('.status.error')?.textContent.includes('模拟选择失败'));
+ assert.equal(toggle.checked, false); assert.equal(toggle.dataset.selectionMode, 'off'); assert.equal(toggle.disabled, false);
+});
+
 test('live selection replaces the preview and remains outside the native question', async t => {
   const f = fixture(t); await pause(); f.editor.value = '这个词是什么意思？';
   await f.seed({ selection: selection() });
@@ -346,7 +405,7 @@ test('live selection replaces the preview and remains outside the native questio
   f.click('[aria-label="取消划词"]'); await pause();
   assert.equal(f.root.querySelector('.selection-chip'), null);
   assert.equal(f.context.selectionIncluded, false);
-  assert.equal(f.calls.at(-1).request.type, 'SIDER_TAB_TEMPLATE_SET');
+  assert.equal(f.calls.at(-1).request.type, 'SIDER_SELECTION_MODE_SET');
   assert.equal(f.root.querySelector('.status.error'), null);
   assert.equal(f.editor.value, '这个词是什么意思？');
   assert.equal(f.root.querySelector('#expand'), null);
@@ -935,14 +994,17 @@ test('the message names the unique actual attachment and later sends omit its de
   assert.equal(f.submitted[1], '请总结');
 });
 
-test('upload failure preserves both the question and selected body without a partial send', async t => {
+test('upload failure preserves the question, selected body and pinned selection without a partial send', async t => {
   const manager = attachmentFixture({ failure: '附件上传失败。' });
   const f = fixture(t, { attachmentManager: manager });
   await f.seed({ attachments: { page: page('正文'.repeat(9000)) } });
+  f.click('[data-pane="templates"]'); f.click('[aria-label="发送时引用 划词"]');
+  await waitUntil(() => f.root.querySelector('[aria-label="发送时引用 划词"]')?.dataset.selectionMode === 'always');
   f.editor.value = '总结一下'; f.send(); await pause();
   assert.equal(f.editor.value, '总结一下'); assert.equal(f.submitted.length, 0);
   assert.ok(f.context.attachments.page);
   assert.equal(f.context.templateSelections[PRESET_IDS.page], true);
+  assert.equal(f.context.selectionIncluded, true);
   assert.equal(f.calls.some(call => call.request.type === 'SIDER_TAB_TEMPLATES_CLEAR'), false);
   assert.match(f.root.querySelector('.status').textContent, /上传失败/);
 });
@@ -1001,7 +1063,7 @@ test('one template entrance contains three editable presets and no reference/set
  assert.equal(f.settings.defaultSelection, true); assert.equal(f.editor.value, '保留原问题'); assert.deepEqual(f.submitted, []);
 });
 
-test('selection close uses the clear operation accepted by the previous background', async t => {
+test('selection close explicitly switches the three-state control off', async t => {
   const f = fixture(t); await f.seed({ selection: selection(), attachments: { url: true, page: page() } });
   f.editor.value = '取消后继续提问';
   f.click('[aria-label="取消划词"]'); await pause(); await f.api.refresh();
@@ -1010,7 +1072,7 @@ test('selection close uses the clear operation accepted by the previous backgrou
   assert.ok(f.root.querySelector('[data-chip="url"]'));
   assert.ok(f.root.querySelector('[data-chip="page"]'));
   assert.equal(f.root.querySelector('.status.error'), null);
-  assert.deepEqual(f.calls.filter(message => !['SIDER_TAB_CONTEXT_GET', 'SIDER_PROMPT_TEMPLATES_GET'].includes(message.request.type)).map(message => message.request), [{ type: 'SIDER_TAB_TEMPLATE_SET', id: PRESET_IDS.selection, enabled: false }]);
+  assert.deepEqual(f.calls.filter(message => !['SIDER_TAB_CONTEXT_GET', 'SIDER_PROMPT_TEMPLATES_GET'].includes(message.request.type)).map(message => message.request), [{ type: 'SIDER_SELECTION_MODE_SET', mode: 'off' }]);
   assert.equal(f.editor.value, '取消后继续提问');
   assert.deepEqual(f.submitted, []);
   f.send(); await pause();

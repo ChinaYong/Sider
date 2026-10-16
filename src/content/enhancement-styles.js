@@ -32,6 +32,9 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .chip button{font-size:15px;line-height:1;padding:4px 6px;flex:none;color:var(--muted)}
 .chip .excerpt{cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .selection-chip{flex:0 1 auto;max-width:100%;color:var(--ink)} .selection-icon{color:var(--focus);flex:none}
+.chip[data-selection-mode="always"]::before{content:"∞";color:var(--focus);font-weight:650;flex:none}
+.selection-pin{display:inline-block;margin-left:5px;color:var(--focus);font-size:14px;line-height:1}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
 .popover{position:fixed;inset:auto;margin:0;z-index:2147483646;width:380px;max-width:calc(100vw - 20px);max-height:min(640px,80dvh);background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px;box-shadow:0 16px 48px #16152226,0 2px 6px #1615220d;overflow:auto;color:var(--ink);overscroll-behavior:contain;scroll-padding-block:62px 72px;scrollbar-width:thin;scrollbar-color:var(--control-line) transparent}
 .heading{position:sticky;top:-16px;z-index:2;display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--surface);padding:12px 16px;margin:-16px -16px 16px;border-bottom:1px solid var(--line)}
 .heading strong{font-size:14px;font-weight:650} .heading button{font-size:21px;padding:0;min-width:28px;min-height:28px;color:var(--muted)}

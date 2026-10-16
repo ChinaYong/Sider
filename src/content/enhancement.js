@@ -3,7 +3,7 @@ import { createWebAdapter } from './adapters.js';
 import { installTextDrop } from './text-drop.js';
 import { downloadText, safeFilename } from '../export-file.js';
 import { VARIABLES, needsPageVariables, needsTemplateSelection } from '../variables.js';
-import { UNIFIED_TEMPLATES_KEY, PRESET_IDS, newTemplate, presetTemplates, validateTemplates, migrateTemplates } from '../prompt-templates.js';
+import { UNIFIED_TEMPLATES_KEY, PRESET_IDS, newTemplate, presetTemplates, validateTemplates, migrateTemplates, selectionMode, nextSelectionMode } from '../prompt-templates.js';
 import { TemplateDraft } from './template-draft.js';
 import { installPresetSort } from './preset-sort.js';
 import { createMotion } from '../motion.js';
@@ -95,6 +95,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     bar, popup,
   );
   const $ = selector => root.querySelector(selector);
+  let selectionChanging = false;
   const setHidden = (node, hidden) => { if (node.hidden !== hidden) node.hidden = hidden; };
   const setText = (node, text) => { if (node.textContent !== text) node.textContent = text; };
   // Compare large strings directly rather than serializing/expanding the body
@@ -255,7 +256,8 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
       const snapshot = filled.records.get(template.id);
       const waiting = !snapshot && needsTemplateSelection(template) && !context?.selection;
       const block = snapshot || expandTemplateItem(template, context, { supportsAttachments: supportsAttachments() });
-      const title = template.name + (missingAttachments.has(template.id) ? ' · 附件缺失' : snapshot ? ' · 快照' : waiting ? ' · 等待划词' : block.errors?.length ? ' · 未就绪' : block.delivery === 'file' ? ' · 附件' : '');
+      const pinned = template.preset === 'selection' && template.alwaysIncluded;
+      const title = template.name + (pinned ? ' · 总是选中' : '') + (missingAttachments.has(template.id) ? ' · 附件缺失' : snapshot ? ' · 快照' : waiting ? ' · 等待划词' : block.errors?.length ? ' · 未就绪' : block.delivery === 'file' ? ' · 附件' : '');
       let node = existing.get(template.id);
       if (!node) {
         node = element('div', { class: 'chip' }); node.dataset.templateId = template.id; node.dataset.chip = template.preset || template.id;
@@ -268,6 +270,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
       }
       const selectionLabel = template.preset === 'selection' && !snapshot && Boolean(context?.selection) && needsTemplateSelection(template) && block.delivery === 'text' && !block.errors?.length;
       if (node.classList.contains('selection-chip') !== selectionLabel) node.classList.toggle('selection-chip', selectionLabel);
+      if (template.preset === 'selection') node.dataset.selectionMode = selectionMode(templates, context);
       setText(node.querySelector('.excerpt'), selectionLabel ? context.selection.content : title);
       if (node.title !== title) node.title = title;
     }
@@ -281,6 +284,39 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     await request({ type: 'SIDER_TAB_TEMPLATE_SET', id: template.id, enabled });
     if (!enabled && !filled.records.has(template.id)) await removeAttachmentId(template.id);
     if (pane === 'templates') syncTemplateList();
+  }
+
+  function syncSelectionToggle(toggle) {
+    const mode = selectionMode(templates, context);
+    const label = ({ off: '未选中', once: '选中', always: '总是选中' })[mode];
+    toggle.checked = mode !== 'off'; toggle.dataset.selectionMode = mode;
+    toggle.disabled = selectionChanging;
+    toggle.title = `划词：${label}。点击依次切换：未选中 → 选中 → 总是选中 → 未选中。总是选中对所有网页生效。`;
+    toggle.setAttribute('aria-describedby', 'selection-mode-description');
+    const description = $('#selection-mode-description');
+    if (description) setText(description, `当前状态：${label}。空格依次切换未选中、选中、总是选中。总是选中全局保存，发送后保留。`);
+    const marker = toggle.closest('.template-row').querySelector('.selection-pin');
+    if (marker) setHidden(marker, mode !== 'always');
+  }
+
+  async function cycleSelectionMode(toggle, focused) {
+    if (sourceSwitching) throw new Error('正在切换引用来源，请稍后操作。');
+    const mode = nextSelectionMode(selectionMode(templates, context));
+    selectionChanging = true; delivery?.abort.abort();
+    try {
+      await request({ type: 'SIDER_SELECTION_MODE_SET', mode });
+      if (mode === 'off' && !filled.records.has(PRESET_IDS.selection)) await removeAttachmentId(PRESET_IDS.selection);
+    } catch (error) {
+      await refresh().catch(() => {});
+      throw error;
+    } finally {
+      selectionChanging = false;
+      if (pane === 'templates') {
+        syncTemplateList();
+        const current = $('#pane-body input[data-selection-mode]');
+        if (focused) current?.focus({ preventScroll: true });
+      }
+    }
   }
 
   async function removeTemplate(id) {
@@ -298,7 +334,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
       }
     }
     missingAttachments.delete(id);
-    await request({ type: 'SIDER_TAB_TEMPLATE_SET', id, enabled: false });
+    await request(id === PRESET_IDS.selection ? { type: 'SIDER_SELECTION_MODE_SET', mode: 'off' } : { type: 'SIDER_TAB_TEMPLATE_SET', id, enabled: false });
     await removeAttachmentId(id); renderChips();
   }
   async function removeAttachmentId(id) {
@@ -387,7 +423,9 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
       const behavior = formSection(body, '使用方式', 'template-behavior-title');
       const position = selectField(behavior, '插入位置', 'template-position', edit.position, [['prepend', '问题前'], ['append', '问题后']]);
       const defaultIncluded = checkboxField(behavior, '默认勾选，随消息引用', 'template-default', edit.defaultIncluded);
-      behavior.append(element('p', { class: 'note' }, '勾选不会立即执行预设，发送成功后自动取消。'));
+      behavior.append(element('p', { class: 'note' }, edit.preset === 'selection'
+        ? '默认勾选用于新来源页，发送后取消；在预设列表切换为“总是选中”可全局保持，发送后保留。恢复默认会关闭总是选中。'
+        : '勾选不会立即执行预设，发送成功后自动取消。'));
       const action = selectField(behavior, '点击名称时', 'template-action', edit.action, [['replace', '替换'], ['append', '追加'], ['send', '直接发送']]);
       const advanced = element('details', { class: 'variables' }); advanced.append(element('summary', {}, '高级：发送方式与附件'));
       const advancedBody = element('div', { class: 'variables-body' }); advanced.append(advancedBody);
@@ -461,18 +499,29 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
         use.setAttribute('aria-label', template.name + ' · ' + actionLabel);
         use.append(element('span', { class: 'template-name' }, template.name), element('span', { class: 'template-action', 'data-action': template.action }, ({ replace: '替换当前草稿', append: '追加到输入框', send: '直接发送 ↗' })[template.action]));
         const toggle = element('input', { type: 'checkbox', 'aria-label': '发送时引用 ' + template.name }); toggle.checked = Boolean(context?.templateSelections?.[template.id]); toggle.title = '发送时引用';
-        toggle.addEventListener('change', () => run(toggle, () => toggleTemplate(template, toggle.checked)));
+        if (template.preset === 'selection') {
+          use.querySelector('.template-name').append(element('span', { class: 'selection-pin', 'aria-hidden': 'true', hidden: '' }, '∞'));
+          use.append(element('span', { id: 'selection-mode-description', class: 'sr-only' }));
+          toggle.addEventListener('click', event => {
+            // off -> once and always -> off retain native checkbox feedback.
+            // once -> always remains checked instead of using an indeterminate state.
+            if (selectionMode(templates, context) === 'once' || sourceSwitching) event.preventDefault();
+            const focused = root.activeElement === toggle;
+            void run(toggle, () => cycleSelectionMode(toggle, focused));
+          });
+        } else toggle.addEventListener('change', () => run(toggle, () => toggleTemplate(template, toggle.checked)));
         const editButton = button('编辑', () => renderTemplates(template)); editButton.setAttribute('aria-label', '编辑预设 ' + template.name);
         editButton.hidden = !managingTemplates;
         row.append(toggle, handle, use, editButton);
         if (!template.preset) { const remove = button('删除', async () => { await removeTemplate(template.id); await saveTemplates(templates.filter(item => item.id !== template.id)); renderTemplates(); }, 'danger'); remove.setAttribute('aria-label', '删除预设 ' + template.name); remove.hidden = !managingTemplates; row.append(remove); }
         list.append(row);
+        if (template.preset === 'selection') syncSelectionToggle(toggle);
       }
       installSorting(list);
       body.append(element('p', { id: 'preset-empty', class: 'preset-empty', role: 'status', hidden: '' }, '没有匹配的预设，试试其他关键词。'));
       const addTemplate = button('新增预设', () => renderTemplates(newTemplate({ id: view.crypto.randomUUID() })), 'preset-add');
       addTemplate.setAttribute('aria-label', '新增预设'); body.append(addTemplate);
-      body.append(element('p', { class: 'note preset-help' }, managingTemplates ? '拖动手柄调整顺序；搜索时暂停排序。' : '勾选以随下一条消息附加；点击名称按标注方式执行。'));
+      body.append(element('p', { class: 'note preset-help' }, managingTemplates ? '拖动手柄调整顺序；搜索时暂停排序。' : '勾选以随下一条消息附加；划词可再点一次设为总是选中 ∞。点击名称按标注方式执行。'));
       filterTemplateList();
     }
     // Each view starts at its heading, even when the previous editor was scrolled to its footer.
@@ -520,7 +569,8 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
       const use = row.querySelector('[data-template-id]');
       const template = templates.find(item => item.id === use?.dataset.templateId);
       const toggle = row.querySelector('input'), checked = Boolean(context?.templateSelections?.[template.id]);
-      if (template && toggle.checked !== checked) toggle.checked = checked;
+      if (template?.preset === 'selection') syncSelectionToggle(toggle);
+      else if (template && toggle.checked !== checked) toggle.checked = checked;
     }
     filterTemplateList();
   }

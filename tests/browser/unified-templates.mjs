@@ -29,11 +29,13 @@ const tls = httpsServer({ key: await readFile('tests/browser/fixtures/test-key.p
 const article = httpServer((_req,res) => { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end('<!doctype html><meta charset="utf-8"><title>预设合并来源</title><main><article><h1>预设合并来源</h1><p id="selection">选中的示例文字</p><p id="dynamic">' + '正文资料与关键事实。'.repeat(2200) + ' FULL-END-MARKER</p></article></main>'); });
 await new Promise(resolve=>tls.listen(0,'127.0.0.1',resolve)); await new Promise(resolve=>article.listen(0,'127.0.0.1',resolve));
 let context, panel;
+const profile = path.resolve('tmp/browser/unified-profile-'+Date.now());
 const checks=[], results={ fixtureOnly:true, trustedInteraction:true }, errors=[];
 const checked = message => { checks.push(message); console.log('PASS '+message); };
 async function eventually(check) { const until=Date.now()+10000; for(;;){try{return await check()}catch(error){if(Date.now()>until)throw error;await new Promise(resolve=>setTimeout(resolve,50))}} }
 try {
- const extension=path.resolve('dist'); context=await chromium.launchPersistentContext(path.resolve('tmp/browser/unified-profile-'+Date.now()),{ ...(process.env.SIDER_CHROMIUM?{executablePath:process.env.SIDER_CHROMIUM}:{}),headless:true,ignoreHTTPSErrors:true,viewport:{width:420,height:840},args:[`--disable-extensions-except=${extension}`,`--load-extension=${extension}`,'--enable-unsafe-extension-debugging',`--host-resolver-rules=MAP chatgpt.com:443 127.0.0.1:${tls.address().port}`,'--no-proxy-server','--ignore-certificate-errors'] });
+ const extension=path.resolve('dist'); const launchOptions={ ...(process.env.SIDER_CHROMIUM?{executablePath:process.env.SIDER_CHROMIUM}:{}),headless:true,ignoreHTTPSErrors:true,viewport:{width:420,height:840},args:[`--disable-extensions-except=${extension}`,`--load-extension=${extension}`,'--enable-unsafe-extension-debugging',`--host-resolver-rules=MAP chatgpt.com:443 127.0.0.1:${tls.address().port}`,'--no-proxy-server','--ignore-certificate-errors'] };
+ context=await chromium.launchPersistentContext(profile,launchOptions);
  const worker=context.serviceWorkers()[0]||await context.waitForEvent('serviceworker'),extensionId=new URL(worker.url()).hostname;
  await worker.evaluate(()=>chrome.storage.local.clear());await worker.evaluate(()=>chrome.storage.session.clear());
  // Start from old settings to verify the real worker migration, including backups.
@@ -66,7 +68,9 @@ try {
  async function select(id,enabled=true){
   await menu();const toggle=chat.locator(`#pane-body [data-template-id="${id}"]`).locator('..').locator('input[type=checkbox]');
   await eventually(async()=>assert.equal(await chat.locator('#pane-body input[data-busy]').count(),0));
-  if(await toggle.isChecked()!==enabled)await toggle.click();
+  for(let attempt=0;attempt<3&&await toggle.isChecked()!==enabled;attempt++){
+   await toggle.click();await eventually(async()=>assert.equal(await toggle.isEnabled(),true));
+  }
   await eventually(async()=>{assert.equal(await toggle.isChecked(),enabled);assert.equal(await toggle.getAttribute('data-busy'),null)});
  }
  async function settled(){await chat.locator('#sider-enhancement').evaluate(async host=>{await Promise.all(host.shadowRoot.getAnimations().map(animation=>animation.finished.catch(()=>{})))});}
@@ -156,12 +160,61 @@ try {
  await eventually(async()=>assert.match(await chat.locator('.status').innerText(),/已追加/));assert.match(await rich.innerText(),/旧提示/);assert.ok((await rich.innerText()).includes('富文本原问题'));assert.equal((await chat.locator('body').evaluate(()=>window.sent)).length,0);
  await panel.screenshot({path:'tmp/browser/unified-rich-320.png'});checked('rich editor fills at the configured position, preserves the original draft, and does not send');
  await menu();
- const waitingReference=chat.getByRole('checkbox',{name:'发送时引用 划词',exact:true});await waitingReference.focus();await waitingReference.press('Space');assert.equal(await waitingReference.isChecked(),true);
+ const waitingReference=chat.getByRole('checkbox',{name:'发送时引用 划词',exact:true});await waitingReference.focus();await waitingReference.press('Space');await eventually(async()=>{assert.equal(await waitingReference.isChecked(),true);assert.equal(await waitingReference.isEnabled(),true)});
  await chat.getByRole('button',{name:'关闭',exact:true}).click();await worker.evaluate(()=>captureCount=0);
  await rich.fill('只发普通问题');await rich.press('Enter');await eventually(async()=>assert.equal((await chat.locator('body').evaluate(()=>window.sent)).length,1));
  const ordinary=(await chat.locator('body').evaluate(()=>window.sent))[0];assert.equal(ordinary.text,'只发普通问题');assert.equal(ordinary.files.length,0);assert.equal(await worker.evaluate(()=>captureCount),0);
  await menu();await eventually(async()=>assert.equal(await chat.getByRole('checkbox',{name:'发送时引用 划词',exact:true}).isChecked(),false));
  assert.equal(await chat.locator('[data-chip="selection"]').count(),0);checked('a waiting selection preset skips ordinary sending, collects no page body, and is automatically unchecked after send');
+ // Selection alone has a persistent third state. Use actual Space/click events.
+ const selectionToggle=()=>chat.getByRole('checkbox',{name:'发送时引用 划词',exact:true});
+ const mode=async expected=>eventually(async()=>{assert.equal(await selectionToggle().getAttribute('data-selection-mode'),expected);assert.equal(await selectionToggle().isEnabled(),true)});
+ await rich.fill('保留三态操作期间的草稿');await selectionToggle().focus();await selectionToggle().press('Space');await mode('once');
+ await selectionToggle().press('Space');await mode('always');
+ assert.equal(await selectionToggle().isChecked(),true);assert.equal(await selectionToggle().evaluate(node=>node.getRootNode().activeElement===node),true);
+ assert.equal(await chat.locator('.selection-pin').isVisible(),true);assert.match(await chat.locator('#selection-mode-description').textContent(),/当前状态：总是选中/);
+ assert.equal(await rich.innerText(),'保留三态操作期间的草稿');
+ assert.equal((await exported()).backup.configuration.templates.find(item=>item.preset==='selection').alwaysIncluded,true);
+ for(const colorScheme of ['light','dark'])for(const width of [420,320]){
+  await panel.emulateMedia({colorScheme});await panel.setViewportSize({width,height:840});await settled();
+  assert.equal(await chat.locator('.popover').evaluate(node=>node.scrollWidth>node.clientWidth),false);
+  await panel.screenshot({path:`tmp/browser/selection-always-${width}-${colorScheme}.png`});
+ }
+ checked('trusted Space cycles to always selected with focus, draft, accessible state and visible marker retained at 320/420px in light/dark');
+ const peer=await context.newPage();await peer.goto(`chrome-extension://${extensionId}/panel.html?sourceTab=${tab.id}`);
+ const peerChat=peer.frameLocator('iframe');await peerChat.locator('#sider-enhancement').waitFor();await peerChat.getByRole('button',{name:'预设',exact:true}).click();
+ const peerToggle=peerChat.getByRole('checkbox',{name:'发送时引用 划词',exact:true});
+ await eventually(async()=>assert.equal(await peerToggle.getAttribute('data-selection-mode'),'always'));
+ await chat.getByRole('button',{name:'关闭',exact:true}).click();await rich.fill('总是选中但没有划词');await rich.press('Enter');
+ await eventually(async()=>assert.equal(await chat.locator('body').evaluate(()=>sent.length),2));
+ assert.equal(await chat.locator('body').evaluate(()=>sent[1].text),'总是选中但没有划词');await menu();await mode('always');
+ await source.evaluate(()=>{const range=document.createRange();range.selectNodeContents(document.querySelector('#selection'));getSelection().removeAllRanges();getSelection().addRange(range)});
+ await eventually(async()=>assert.match(await chat.locator('[data-chip="selection"] .excerpt').innerText(),/选中的示例文字/));
+ await chat.getByRole('button',{name:'关闭',exact:true}).click();await rich.fill('携带最新划词');await rich.press('Enter');
+ await eventually(async()=>assert.equal(await chat.locator('body').evaluate(()=>sent.length),3));
+ assert.match(await chat.locator('body').evaluate(()=>sent[2].text),/选中的示例文字/);await menu();await mode('always');
+ await chat.getByRole('button',{name:'关闭',exact:true}).click();await chat.getByRole('button',{name:'取消划词',exact:true}).click();await menu();await mode('off');
+ await eventually(async()=>assert.equal(await peerToggle.getAttribute('data-selection-mode'),'off'));
+ checked('always selected propagates to a second sidebar, survives ordinary and quoted sends, and chip cancellation releases both sidebars');
+ await worker.evaluate(()=>{const original=chrome.storage.local.set.bind(chrome.storage.local);globalThis.restoreSelectionStorage=()=>{chrome.storage.local.set=original};chrome.storage.local.set=async value=>{if(value['sider.templates.v3'])throw new Error('fixture selection save failed');return original(value)}});
+ await selectionToggle().click();await mode('once');await selectionToggle().click();
+ await eventually(async()=>assert.match(await chat.locator('.status.error').textContent(),/fixture selection save failed/));await mode('once');
+ assert.equal(await selectionToggle().isChecked(),true);await worker.evaluate(()=>restoreSelectionStorage());
+ checked('failed persistent-state storage restores the real checked state, reports failure and does not send');
+ await selectionToggle().click();await mode('always');await panel.reload();chat=panel.frameLocator('iframe');await chat.locator('#sider-enhancement').waitFor();await menu();await mode('always');
+ checked('always selected remains active after the sidebar reloads');
+ // Reopen the same isolated browser profile to verify local persistence beyond
+ // storage.session and service-worker lifetime, without using a user profile.
+ await context.close();context=await chromium.launchPersistentContext(profile,launchOptions);
+ const reopenedWorker=context.serviceWorkers()[0]||await context.waitForEvent('serviceworker');
+ assert.equal(await reopenedWorker.evaluate(async()=> (await chrome.storage.local.get('sider.templates.v3'))['sider.templates.v3'].find(item=>item.preset==='selection').alwaysIncluded),true);
+ const reopenedSource=await context.newPage();await reopenedSource.goto(sourceURL);await reopenedSource.bringToFront();
+ const reopenedCDP=await context.browser().newBrowserCDPSession(),reopenedTargets=await reopenedCDP.send('Target.getTargets',{filter:[{type:'tab',exclude:false}]});
+ await reopenedCDP.send('Extensions.triggerAction',{id:extensionId,targetId:reopenedTargets.targetInfos.find(item=>item.url===sourceURL).targetId});
+ const reopenedTab=await reopenedWorker.evaluate(async()=> (await chrome.tabs.query({active:true,lastFocusedWindow:true}))[0]);
+ panel=await context.newPage();panel.on('pageerror',error=>errors.push(error.message));await panel.goto(`chrome-extension://${extensionId}/panel.html?sourceTab=${reopenedTab.id}`);
+ chat=panel.frameLocator('iframe');await chat.locator('#sider-enhancement').waitFor();await menu();await mode('always');
+ checked('reopening the isolated browser profile initializes a fresh source with always selected still enabled');
  assert.deepEqual(errors,[]);Object.assign(results,{browser:context.browser().version(),checks,errors});await writeFile('tmp/browser/unified-results.json',JSON.stringify(results,null,2));console.log(JSON.stringify(results,null,2));
 }catch(error){Object.assign(results,{checks,errors,error:error.stack});if(panel){await panel.screenshot({path:'tmp/browser/unified-failure.png'}).catch(()=>{});try{results.fixture=await panel.frameLocator('iframe').locator('body').evaluate(()=>({sent:window.sent,uploads:window.uploads,status:document.querySelector('#sider-enhancement')?.shadowRoot.querySelector('.status')?.textContent}))}catch{}}
 await writeFile('tmp/browser/unified-results.json',JSON.stringify(results,null,2));throw error;

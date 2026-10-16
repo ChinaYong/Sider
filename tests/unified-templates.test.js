@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { presetTemplates, newTemplate, migrateTemplates, validateTemplates, getTemplates, UNIFIED_TEMPLATES_KEY, PROMPT_TEMPLATES_KEY, PRESET_IDS } from '../src/prompt-templates.js';
+import { presetTemplates, newTemplate, migrateTemplates, validateTemplates, getTemplates, UNIFIED_TEMPLATES_KEY, PROMPT_TEMPLATES_KEY, PRESET_IDS, selectionMode, nextSelectionMode } from '../src/prompt-templates.js';
 import { composeTemplatePrompt, expandTemplateItem, normalizeContextSettings, CONTEXT_SETTINGS_KEY } from '../src/context.js';
 import { validateConfiguration, exportConfiguration, configurationStorage } from '../src/configuration.js';
 import { TemplateDraft } from '../src/content/template-draft.js';
@@ -8,6 +8,37 @@ import { TemplateDraft } from '../src/content/template-draft.js';
 const context = () => ({ tabId: 1, url: 'https://example.test/', title: '标题', selection: { url: 'https://example.test/', content: '长选区'.repeat(8000), context: '附近原文'.repeat(6000) },
   attachments: { page: { url: 'https://example.test/', content: '# 正文\n包含 {{url}}\n尾标记', capturedAt: '2026-10-06T00:00:00Z', metadata: { author: '作者' } } }, templateSelections: {}, explicitTemplates: [] });
 const item = patch => newTemplate({ id: 'custom-template-001', name: '自建预设', text: '固定文本', ...patch });
+
+test('only selection supports persistence, old backups default off, and v3 roundtrips the pin', () => {
+ const backup = exportConfiguration({});
+ delete backup.configuration.templates[0].alwaysIncluded;
+ assert.equal(validateConfiguration(backup).configuration.templates[0].alwaysIncluded, false);
+ backup.configuration.templates[0].alwaysIncluded = true;
+ const restored = configurationStorage(JSON.parse(JSON.stringify(backup)))[UNIFIED_TEMPLATES_KEY];
+ assert.equal(restored[0].alwaysIncluded, true);
+ assert.equal(validateTemplates(restored)[0].alwaysIncluded, true);
+ for (const value of ['true', null, 1]) {
+  const invalid = structuredClone(restored); invalid[0].alwaysIncluded = value;
+  assert.throws(() => validateTemplates(invalid), /总是选中/);
+ }
+ const invalid = structuredClone(restored); invalid[1].alwaysIncluded = true;
+ assert.throws(() => validateTemplates(invalid), /仅划词/);
+ assert.throws(() => validateTemplates([...restored, item({ alwaysIncluded: true })]), /仅划词/);
+});
+
+test('selection states cycle independently of ordinary defaults and pinned empty selections wait', () => {
+ const templates = presetTemplates(); const ctx = context();
+ assert.equal(selectionMode(templates, ctx), 'off');
+ ctx.templateSelections[PRESET_IDS.selection] = true;
+ assert.equal(selectionMode(templates, ctx), 'once');
+ templates[0].alwaysIncluded = true;
+ assert.equal(selectionMode(templates, ctx), 'always');
+ assert.deepEqual(['off', 'once', 'always'].map(nextSelectionMode), ['once', 'always', 'off']);
+ ctx.selection = null;
+ const composed = composeTemplatePrompt('普通问题', templates, ctx);
+ assert.equal(composed.text, '普通问题'); assert.deepEqual(composed.errors, []);
+ assert.deepEqual(composed.waiting, [PRESET_IDS.selection]);
+});
 
 test('migration preserves each old format, default, position, file note, and direct action', () => {
  const settings = normalizeContextSettings({ defaultUrl: true, defaultSelection: false, pageMode: 'file', pageThreshold: 999, pageTemplate: '正文 {{content}}', pageAttachmentTemplate: '读 {{filename}}', selectionPosition: 'append' });

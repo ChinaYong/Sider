@@ -3,7 +3,7 @@ import { TAB_CONTEXT_PREFIX, expandTemplateItem } from './context.js';
 import { getTabContext, updateTabSelection, setTabAttachment, applyTemplateDefaults, setTabTemplate, clearTabTemplates, requestTabPage, invalidateTabSource, clearTabSelection, resetTabContext, removeTabContext, getContextSettings, patchContextSettings, syncTemplateDemand } from './context-store.js';
 import { createReferenceSessions, referenceSource, REFERENCE_SESSIONS_KEY } from './reference-sessions.js';
 import { AI_WEB_SETTINGS_KEY, BUILTIN_AI_SITES, aiSiteURL, normalizeAIWebSettings, validateAIWebSettings, normalizeCustomAISite, listAISites, selectedAISite, siteForURL, aiSitePattern } from './ai-web.js';
-import { UNIFIED_TEMPLATES_KEY, PRESET_IDS, getTemplates, validateTemplates } from './prompt-templates.js';
+import { UNIFIED_TEMPLATES_KEY, PRESET_IDS, getTemplates, validateTemplates, alwaysIncludeSelection } from './prompt-templates.js';
 import { needsPageVariables, needsTemplateSelection } from './variables.js';
 import { CONFIGURATION_KEYS, ENABLED_ORIGINS_KEY, exportConfiguration, validateConfiguration, configurationStorage } from './configuration.js';
 import { installLauncherBackground } from './launcher-background.js';
@@ -20,7 +20,7 @@ const chatPorts = new Set();
 const embedRegistrations = new Map();
 const panelPorts = new Map();
 const EMBED_STORAGE_KEY = 'siderEmbedRegistrations';
-const ENHANCEMENT_MESSAGES = new Set(['SIDER_TAB_CONTEXT_GET', 'SIDER_TAB_ATTACHMENT_SET', 'SIDER_TAB_TEMPLATE_SET', 'SIDER_TAB_TEMPLATES_CLEAR', 'SIDER_TAB_SELECTION_CLEAR', 'SIDER_CONTEXT_SETTINGS_PATCH', 'SIDER_SOURCE_INFO', 'SIDER_SOURCE_TABS_LIST', 'SIDER_REFERENCE_SOURCE_SET', 'SIDER_TEMPLATE_CONTEXT_GET', 'SIDER_PROMPT_TEMPLATES_GET', 'SIDER_PROMPT_TEMPLATES_SAVE']);
+const ENHANCEMENT_MESSAGES = new Set(['SIDER_TAB_CONTEXT_GET', 'SIDER_TAB_ATTACHMENT_SET', 'SIDER_TAB_TEMPLATE_SET', 'SIDER_SELECTION_MODE_SET', 'SIDER_TAB_TEMPLATES_CLEAR', 'SIDER_TAB_SELECTION_CLEAR', 'SIDER_CONTEXT_SETTINGS_PATCH', 'SIDER_SOURCE_INFO', 'SIDER_SOURCE_TABS_LIST', 'SIDER_REFERENCE_SOURCE_SET', 'SIDER_TEMPLATE_CONTEXT_GET', 'SIDER_PROMPT_TEMPLATES_GET', 'SIDER_PROMPT_TEMPLATES_SAVE']);
 const CONTENT_MESSAGES = new Set(['SIDER_SELECTION_CHANGED', 'SIDER_OPEN_SOURCE_PANEL']);
 const tabOperations = new Map();
 const liveSources = new Map();
@@ -44,6 +44,41 @@ let configurationQueue = Promise.resolve();
 function configurationOperation(operation) {
   const pending = configurationQueue.then(operation);
   configurationQueue = pending.catch(() => {}); return pending;
+}
+
+async function reconcileSelectionPolicy(templates) {
+  const stored = await chrome.storage.session.get(null);
+  const ids = Object.keys(stored).filter(key => key.startsWith(TAB_CONTEXT_PREFIX)).map(key => Number(key.slice(TAB_CONTEXT_PREFIX.length)));
+  for (const id of ids) await applyTemplateDefaults(id, templates);
+  for (const owner of Object.keys(await referenceSessions.all())) await referenceSessions.defaults(Number(owner), templates);
+}
+
+function changeSelectionMode(ownerTabId, inner) {
+  // Keep the same tab -> configuration lock order as legacy settings changes.
+  return withTab(ownerTabId, () => configurationOperation(async () => {
+    if (!['off', 'once', 'always'].includes(inner.mode)) throw new Error('划词状态无效。');
+    const state = await referenceSessions.get(ownerTabId);
+    if (inner.referenceEpoch !== undefined && inner.referenceEpoch !== (state?.epoch ?? 0)) throw referenceChanged();
+    let templates = await getTemplates();
+    const always = inner.mode === 'always';
+    if (alwaysIncludeSelection(templates) !== always) {
+      templates = validateTemplates(templates.map(item => item.id === PRESET_IDS.selection ? { ...item, alwaysIncluded: always } : item));
+      await chrome.storage.local.set({ [UNIFIED_TEMPLATES_KEY]: templates });
+      await reconcileSelectionPolicy(templates);
+    }
+    if (state) {
+      await referenceSessions.defaults(ownerTabId, templates);
+      await referenceSessions.update(ownerTabId, state.epoch, next => {
+        next.context.templateSelections[PRESET_IDS.selection] = inner.mode !== 'off';
+        next.context.explicitTemplates = next.context.explicitTemplates.filter(id => id !== PRESET_IDS.selection);
+        if (inner.mode === 'once') next.context.explicitTemplates.push(PRESET_IDS.selection);
+        syncTemplateDemand(next.context, templates);
+      });
+      return referenceResponse(ownerTabId, { sync: false });
+    }
+    await setTabTemplate(ownerTabId, PRESET_IDS.selection, inner.mode !== 'off', templates);
+    return contextResponse(ownerTabId, false);
+  }));
 }
 
 function syncAIScripts(settings = aiWebSettings) {
@@ -509,7 +544,8 @@ function changeTabAttachment(tabId, kind, enabled) {
   return changeTabTemplate(tabId, PRESET_IDS[kind], enabled);
 }
 
-function changeTabTemplate(tabId, id, enabled) {
+async function changeTabTemplate(tabId, id, enabled) {
+  if (id === PRESET_IDS.selection && enabled === false && alwaysIncludeSelection(await getTemplates())) await changeSelectionMode(tabId, { mode: 'off' });
   return withTab(tabId, async () => {
     const templates = await getTemplates();
     if (!enabled) {
@@ -543,7 +579,8 @@ function changeContextSettings(tabId, patch) {
   });
 }
 
-function clearCurrentSelection(tabId) {
+async function clearCurrentSelection(tabId) {
+  if (alwaysIncludeSelection(await getTemplates())) await changeSelectionMode(tabId, { mode: 'off' });
   return withTab(tabId, async () => {
     try { await chrome.tabs.sendMessage(tabId, { type: 'SIDER_PAGE_CLEAR_SELECTION' }, { frameId: 0 }); }
     catch { /* Storage cancellation still works if the source is unavailable. */ }
@@ -887,6 +924,11 @@ async function enhancementRequest(message, sender) {
   if (inner.type === 'SIDER_SOURCE_TABS_LIST') return sourceTabsList(tabId);
   if (inner.type === 'SIDER_REFERENCE_SOURCE_SET') return setReferenceSource(tabId, inner.tabId);
   if (inner.type === 'SIDER_SOURCE_INFO') return sourceInfo({ tabId, bridgeId: message.bridgeId });
+  if (inner.type === 'SIDER_SELECTION_MODE_SET') return changeSelectionMode(tabId, inner);
+  const cancellingSelection = inner.type === 'SIDER_TAB_SELECTION_CLEAR'
+    || inner.enabled === false && (inner.type === 'SIDER_TAB_TEMPLATE_SET' && inner.id === PRESET_IDS.selection
+      || inner.type === 'SIDER_TAB_ATTACHMENT_SET' && inner.kind === 'selection');
+  if (cancellingSelection && alwaysIncludeSelection(await getTemplates())) await changeSelectionMode(tabId, { ...inner, mode: 'off' });
   if (!['SIDER_PROMPT_TEMPLATES_GET', 'SIDER_PROMPT_TEMPLATES_SAVE'].includes(inner.type) && await referenceSessions.get(tabId)) return referenceRequest(tabId, inner);
   if (inner.type === 'SIDER_TAB_CONTEXT_GET') return withTab(tabId, () => ownedContextResponse(tabId, { refreshPage: inner.refreshPage === true, knownContext: inner.knownContext }));
   if (inner.type === 'SIDER_TAB_ATTACHMENT_SET') return changeTabAttachment(tabId, inner.kind, inner.enabled);
@@ -905,6 +947,7 @@ async function enhancementRequest(message, sender) {
       const previous = await getTemplates();
       if (inner.expected && JSON.stringify(inner.expected) !== JSON.stringify(previous)) throw new Error('预设已在另一侧栏修改，请重新打开预设菜单后保存。');
       await chrome.storage.local.set({ [UNIFIED_TEMPLATES_KEY]: templates });
+      if (alwaysIncludeSelection(previous) !== alwaysIncludeSelection(templates)) await reconcileSelectionPolicy(templates);
       const changed = templates.filter(item => previous.find(old => old.id === item.id)?.defaultIncluded !== item.defaultIncluded).map(item => item.id);
       if (await referenceSessions.get(tabId)) {
         await referenceSessions.defaults(tabId, templates, changed);
@@ -1147,6 +1190,7 @@ function importConfiguration(message) {
       if (restored.some(result => result.status === 'rejected')) throw new Error(`${error.message}\n已有配置未改动，但网站脚本恢复失败，请在扩展管理页面重新加载 Sider 后重试。`);
       throw error;
     }
+    if (alwaysIncludeSelection(previous.configuration.templates) !== alwaysIncludeSelection(backup.configuration.templates)) await reconcileSelectionPolicy(backup.configuration.templates);
     for (const origin of new Set([...previous.configuration.enabledOrigins, ...backup.configuration.enabledOrigins])) {
       const enabled = backup.configuration.enabledOrigins.includes(origin);
       const tabs = await chrome.tabs.query({ url: `${origin}/*` }).catch(() => []);

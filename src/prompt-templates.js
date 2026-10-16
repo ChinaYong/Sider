@@ -9,7 +9,18 @@ export const DEFAULT_ATTACHMENT_TEXT = '预设“{{template.name}}”的内容�
 
 export function newTemplate(overrides = {}) {
   return { id: '', preset: null, name: '', text: '', position: 'append', defaultIncluded: false, action: 'append',
-    delivery: 'text', threshold: 10000, attachmentText: DEFAULT_ATTACHMENT_TEXT, ...overrides };
+    delivery: 'text', threshold: 10000, attachmentText: DEFAULT_ATTACHMENT_TEXT, ...overrides,
+    ...(overrides.preset === 'selection' ? { alwaysIncluded: overrides.alwaysIncluded ?? false } : {}) };
+}
+
+export function alwaysIncludeSelection(templates) {
+  return templates.some(item => item.id === PRESET_IDS.selection && item.alwaysIncluded === true);
+}
+export function selectionMode(templates, context) {
+  return alwaysIncludeSelection(templates) ? 'always' : context?.templateSelections?.[PRESET_IDS.selection] ? 'once' : 'off';
+}
+export function nextSelectionMode(mode) {
+  return ({ off: 'once', once: 'always', always: 'off' })[mode];
 }
 
 export function presetTemplates(settings = {}) {
@@ -30,6 +41,7 @@ export function validateTemplates(raw, { legacy = false } = {}) {
     if (item.preset !== null && (!Object.hasOwn(PRESET_IDS, item.preset) || PRESET_IDS[item.preset] !== item.id || presets.has(item.preset))) throw new Error('预置预设身份无效。');
     if (Object.values(PRESET_IDS).includes(item.id) && item.preset === null) throw new Error('预置预设身份无效。');
     if (item.preset) presets.add(item.preset);
+    if (item.alwaysIncluded !== undefined && (typeof item.alwaysIncluded !== 'boolean' || item.alwaysIncluded && item.preset !== 'selection')) throw new Error('仅划词预设支持总是选中，且必须为启用或关闭。');
     if (typeof item.name !== 'string' || !item.name.trim() || item.name.length > 80) throw new Error('预设名称须为 1–80 个字符。');
     if (typeof item.text !== 'string' || !item.text.trim() || item.text.length > MAX_CONTEXT_CHARS) throw new Error('预设内容不能为空，最多 100 万字符。');
     if (!['prepend', 'append'].includes(item.position) || !(legacy ? ['attach', 'fill', 'send'] : ['replace', 'append', 'send']).includes(item.action) || typeof item.defaultIncluded !== 'boolean') throw new Error('预设位置、点击行为或默认勾选无效。');
@@ -43,7 +55,8 @@ export function validateTemplates(raw, { legacy = false } = {}) {
       const invalid = validateVariables(item.attachmentText, 'attachment');
       if (invalid.length) throw new Error(`预设“${item.name}”附件说明含不支持的变量：${invalid.map(name => `{{${name}}}`).join('、')}。`);
     }
-    return newTemplate({ id: item.id, preset: item.preset, name: item.name.trim(), text: item.text, position: item.position, defaultIncluded: item.defaultIncluded, action: item.action, delivery: item.delivery, threshold: item.threshold, attachmentText: item.attachmentText });
+    return newTemplate({ id: item.id, preset: item.preset, name: item.name.trim(), text: item.text, position: item.position, defaultIncluded: item.defaultIncluded, action: item.action, delivery: item.delivery, threshold: item.threshold, attachmentText: item.attachmentText,
+      ...(item.preset === 'selection' ? { alwaysIncluded: item.alwaysIncluded ?? false } : {}) });
   });
   if (presets.size !== 3) throw new Error('必须保留划词、网页链接、网页正文三条预置预设。');
   return result;
