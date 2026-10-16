@@ -200,6 +200,38 @@ try {
   assert.equal(await panel.locator('#ai-settings-dialog').evaluate(node => node.scrollWidth <= node.clientWidth), true);
   await panel.screenshot({ path: 'tmp/browser/launcher-list-settings-320.png' });
   pass('whitelist quick-add restores the current site, site close removes it, mode switches retain both lists, and backups include rules');
+
+  // Keep the document open while runtime.reload replaces the extension's world.
+  // An orphan without a disposal listener also models DOM left by older builds.
+  await source.evaluate(() => {
+    const old = document.querySelector('#sider-floating-launcher');
+    old.dataset.beforeReload = 'true';
+    document.documentElement.append(old.cloneNode());
+  });
+  assert.equal(await launcher.count(), 2);
+  let activeWorker = worker;
+  for (let reload = 0; reload < 2; reload++) {
+    const nextWorker = context.waitForEvent('serviceworker', { predicate: item => item.url() === worker.url() });
+    await activeWorker.evaluate(() => { setTimeout(() => chrome.runtime.reload(), 0); });
+    activeWorker = await nextWorker;
+    await eventually(async () => {
+      assert.equal(await launcher.count(), 1);
+      assert.equal(await launcher.getAttribute('data-before-reload'), null);
+      assert.equal(await siblingLauncher.count(), 1);
+    });
+    await activeWorker.evaluate(() => {
+      globalThis.reloadOpened = []; globalThis.reloadClosed = [];
+      chrome.sidePanel.onOpened.addListener(info => reloadOpened.push(info));
+      chrome.sidePanel.onClosed.addListener(info => reloadClosed.push(info));
+    });
+    await source.bringToFront(); await launcher.click();
+    await eventually(async () => assert.equal(await activeWorker.evaluate(() => reloadOpened.at(-1)?.tabId), tab.id));
+    await launcher.click();
+    await eventually(async () => assert.equal(await activeWorker.evaluate(() => reloadClosed.at(-1)?.tabId), tab.id));
+    assert.equal(await source.getByRole('textbox', { name: '网页输入框' }).inputValue(), '保留原输入');
+    await launcher.evaluate(node => { node.dataset.beforeReload = 'true'; });
+  }
+  pass('two extension reloads without refreshing pages replace stale and orphan launchers, retain page input, and keep native toggling functional');
   assert.deepEqual(errors, []);
   await writeFile('tmp/browser/launcher-result.json', JSON.stringify({ browser: context.browser().version(), fixtureOnly: true, checks, errors }, null, 2));
 } finally {

@@ -13,7 +13,7 @@ async function fixture(t, initial) {
   const { window } = dom;
   let settings = initial;
   const changes = [], messages = [], sent = [], saves = [];
-  let response = { ok: true }, capture;
+  let response = { ok: true }, capture, sendError;
   const original = window.Element.prototype.attachShadow;
   window.Element.prototype.attachShadow = function(options) { const root = original.call(this, options); this.testShadow = root; return root; };
   window.Element.prototype.setPointerCapture = id => { capture = id; };
@@ -23,9 +23,10 @@ async function fixture(t, initial) {
   window.HTMLDialogElement.prototype.close = function() { this.open = false; };
   let saveError;
   const changed = value => { const oldValue = settings; settings = value; changes.forEach(fn => fn({ [LAUNCHER_SETTINGS_KEY]: { oldValue, newValue: value } }, 'local')); };
+  const listeners = list => ({ addListener(fn) { list.push(fn); }, removeListener(fn) { const index = list.indexOf(fn); if (index >= 0) list.splice(index, 1); } });
   window.chrome = {
-    runtime: { onMessage: { addListener(fn) { messages.push(fn); } }, async sendMessage(message) { sent.push(message); return response; } },
-    storage: { onChanged: { addListener(fn) { changes.push(fn); } }, local: {
+    runtime: { id: 'test-extension', onMessage: listeners(messages), sendMessage(message) { sent.push(message); if (sendError) throw new Error(sendError); return Promise.resolve(response); } },
+    storage: { onChanged: listeners(changes), local: {
       async get() { return { [LAUNCHER_SETTINGS_KEY]: settings }; },
       async set(value) { if (saveError) throw new Error(saveError); saves.push(value); changed(value[LAUNCHER_SETTINGS_KEY]); },
     } },
@@ -36,8 +37,8 @@ async function fixture(t, initial) {
     const event = new window.MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0 });
     Object.defineProperty(event, 'pointerId', { value: 1 }); button().dispatchEvent(event);
   };
-  window.eval(script); await Promise.resolve();
-  return { window, host, button, sent, saves, changed, pointer, messages, setSaveError: value => { saveError = value; }, setResponse: value => { response = value; }, inject: () => window.eval(script) };
+  window.eval(script); await new Promise(resolve => setImmediate(resolve));
+  return { window, host, button, sent, saves, changed, pointer, messages, setSaveError: value => { saveError = value; }, setSendError: value => { sendError = value; }, setResponse: value => { response = value; }, inject: () => window.eval(script) };
 }
 
 test('floating button installs once, toggles without selection, and reports failures', async t => {
@@ -49,6 +50,61 @@ test('floating button installs once, toggles without selection, and reports fail
   f.setResponse({ ok: false, error: '需要重新加载' }); f.button().click(); await new Promise(resolve => setImmediate(resolve));
   const status = f.host().testShadow.querySelector('[role=status]');
   assert.equal(status.hidden, false); assert.equal(status.textContent, '需要重新加载');
+});
+
+test('a fresh extension context replaces leftover launchers and retires old callbacks', async t => {
+  const f = await fixture(t), oldHost = f.host(), oldButton = f.button(), oldMessage = f.messages[0];
+  const leftover = oldHost.cloneNode(); f.window.document.documentElement.append(leftover);
+  delete f.window.__siderFloatingLauncherInstalled;
+  f.inject(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.window.document.querySelectorAll('#sider-floating-launcher').length, 1);
+  assert.notEqual(f.host(), oldHost); assert.equal(oldHost.isConnected, false); assert.equal(leftover.isConnected, false);
+  assert.equal(f.messages.length, 1);
+  oldMessage({ type: 'SIDER_LAUNCHER_ACCESS', allowed: true });
+  oldButton.click(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.sent.filter(message => message.type === 'SIDER_TOGGLE_PANEL').length, 0);
+  assert.equal(oldHost.isConnected, false);
+  f.button().click(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.sent.filter(message => message.type === 'SIDER_TOGGLE_PANEL').length, 1);
+});
+
+test('a fresh disabled context removes stale DOM without showing a new launcher', async t => {
+  const f = await fixture(t), leftover = f.host().cloneNode();
+  f.window.document.documentElement.append(leftover);
+  f.changed({ floating: false });
+  delete f.window.__siderFloatingLauncherInstalled;
+  f.inject(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.host(), null); assert.equal(leftover.isConnected, false);
+});
+
+test('an invalidated runtime removes its launcher before sending and cannot restore it', async t => {
+  const f = await fixture(t), oldMessage = f.messages[0];
+  f.window.chrome.runtime.id = undefined;
+  f.button().click(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.host(), null); assert.equal(f.messages.length, 0);
+  assert.equal(f.sent.filter(message => message.type === 'SIDER_TOGGLE_PANEL').length, 0);
+  f.changed({ floating: true }); oldMessage({ type: 'SIDER_LAUNCHER_ACCESS', allowed: true });
+  f.window.dispatchEvent(new f.window.Event('resize'));
+  assert.equal(f.host(), null);
+});
+
+test('synchronous and asynchronous context invalidation retire the launcher instead of showing a raw error', async t => {
+  for (const failure of ['throw', 'reject']) {
+    const f = await fixture(t), oldHost = f.host();
+    if (failure === 'throw') f.setSendError('Extension context invalidated.');
+    else f.setResponse(Promise.reject(new Error('Extension context invalidated.')));
+    f.button().click(); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.host(), null); assert.equal(f.messages.length, 0);
+    assert.equal(oldHost.testShadow.querySelector('.status').hidden, true);
+  }
+});
+
+test('context invalidation while saving a close choice removes the obsolete dialog', async t => {
+  const f = await fixture(t), root = f.host().testShadow;
+  root.querySelector('.dismiss-button').click();
+  f.setSaveError('Extension context invalidated.');
+  root.querySelector('[data-scope=global]').click(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.host(), null); assert.equal(root.querySelector('dialog').open, false);
 });
 
 test('drag snaps left, saves once and suppresses mouse click while allowing keyboard activation', async t => {

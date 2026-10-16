@@ -6,13 +6,40 @@ const SIZE = 40, GAP = 8;
 
 if (window === window.top && /^https?:$/.test(location.protocol) && document.contentType === 'text/html' && !globalThis[INSTALL_KEY]) {
   globalThis[INSTALL_KEY] = true;
+  // Reloading an extension creates a new isolated world, but leaves its old DOM.
+  for (const stale of document.querySelectorAll('#sider-floating-launcher')) {
+    stale.dispatchEvent(new Event('sider-launcher-dispose')); stale.remove();
+  }
   let settings = normalizeLauncherSettings();
-  let host, button, status, dialog, dismissButton, choiceStatus, drag, frame, busy = false, suppressClick = false, toastTimer;
+  let host, button, status, dialog, dismissButton, choiceStatus, drag, frame, fontSettings, busy = false, suppressClick = false, toastTimer;
   let dismissed = false, closing = false;
   let settingsChanged = false, allowed = true;
   let panelOpen = false, panelRevision = 0;
+  let disposed = false;
+  const events = new AbortController();
+
+  function dispose() {
+    if (disposed) return;
+    disposed = true; cancelDrag(); closeChoice(false); clearTimeout(toastTimer); events.abort();
+    // Removing Chrome listeners can itself throw once the context is invalid.
+    try { chrome.storage.onChanged.removeListener(storageChanged); } catch {}
+    try { chrome.runtime.onMessage.removeListener(messageReceived); } catch {}
+    try { fontSettings?.dispose(); } catch {}
+    host?.remove();
+  }
+  function contextAvailable() {
+    if (disposed) return false;
+    try { if (chrome.runtime.id) return true; } catch {}
+    dispose(); return false;
+  }
+  function handleError(error, report = () => {}) {
+    if (!contextAvailable()) return;
+    if (/Extension context invalidated/i.test(error?.message || '')) { dispose(); return; }
+    report();
+  }
 
   function applyPanelState(opened) {
+    if (disposed) return;
     panelOpen = opened === true;
     if (!button) return;
     button.title = `${panelOpen ? '关闭' : '打开'} Sider · 拖动可调整位置`;
@@ -56,30 +83,34 @@ if (window === window.top && /^https?:$/.test(location.protocol) && document.con
   }
   async function savePosition(position) {
     const stored = await chrome.storage.local.get(LAUNCHER_SETTINGS_KEY);
+    if (!contextAvailable()) return;
     await chrome.storage.local.set({ [LAUNCHER_SETTINGS_KEY]: { ...normalizeLauncherSettings(stored[LAUNCHER_SETTINGS_KEY]), ...position } });
   }
   async function dismiss(scope) {
-    if (closing) return;
+    if (!contextAvailable() || closing) return;
     closing = true; choiceStatus.textContent = '';
     const choices = [...dialog.querySelectorAll('button')]; choices.forEach(item => { item.disabled = true; });
     try {
       if (scope === 'once') { dismissed = true; render(); return; }
       const stored = await chrome.storage.local.get(LAUNCHER_SETTINGS_KEY);
+      if (!contextAvailable()) return;
       const current = normalizeLauncherSettings(stored[LAUNCHER_SETTINGS_KEY]);
       const next = scope === 'global' ? { ...current, floating: false } : setLauncherSite(current, location.href, current.mode === 'blacklist');
       await chrome.storage.local.set({ [LAUNCHER_SETTINGS_KEY]: next });
       settings = next; render();
-    } catch (error) { choiceStatus.textContent = error.message || '关闭设置未保存，请重试。'; }
+    } catch (error) { handleError(error, () => { choiceStatus.textContent = error.message || '关闭设置未保存，请重试。'; }); }
     finally { closing = false; choices.forEach(item => { item.disabled = false; }); }
   }
   function render() {
+    if (!contextAvailable()) return;
     if (dismissed || !launcherVisible(settings, location.href) || !allowed) { cancelDrag(); closeChoice(false); clearTimeout(toastTimer); host?.remove(); return; }
     if (host) { if (!host.isConnected) document.documentElement.append(host); dock(); return; }
     host = document.createElement('div'); host.id = 'sider-floating-launcher';
+    host.addEventListener('sider-launcher-dispose', dispose, { once: true });
     host.setAttribute('data-sider-ui', 'launcher');
     host.style.cssText = 'all:initial!important;position:fixed!important;z-index:2147483646!important;width:40px!important;height:40px!important;display:block!important;pointer-events:auto!important;';
     const root = host.attachShadow({ mode: 'closed' });
-    installFontSettings({ element: host, chrome });
+    fontSettings = installFontSettings({ element: host, chrome });
     const style = document.createElement('style');
     style.textContent = `:host{color-scheme:light dark}*{box-sizing:border-box}[hidden]{display:none!important}button{font:13px system-ui;cursor:pointer}button:focus-visible{outline:2px solid #4f46c8;outline-offset:3px}.launcher-button{display:grid;place-items:center;width:40px;height:40px;padding:0;border:1px solid #c6c1f0;border-radius:50%;background:#ffffff;color:#4f46c8;box-shadow:0 2px 10px #121b3424;touch-action:none;user-select:none;opacity:.72;transition:opacity 120ms,box-shadow 120ms,background 120ms}.launcher-button:hover,.launcher-button:focus-visible{opacity:1;box-shadow:0 3px 14px #121b3438}.launcher-button:active{background:#efedff}.launcher-button.dragging{cursor:grabbing;opacity:1}.launcher-button[aria-busy=true]{cursor:wait}svg{width:21px;height:21px;pointer-events:none}.dismiss-button{position:absolute;top:-4px;right:-4px;display:grid;place-items:center;width:20px;height:20px;border:1px solid #c6c1f0;border-radius:50%;padding:0;background:#ffffff;color:#5d6880;font-size:16px;line-height:1;box-shadow:0 1px 4px #121b3424}.dismiss-button:hover{background:#efedff}.status{position:absolute;bottom:48px;width:max-content;max-width:min(280px,calc(100vw - 32px));padding:9px 12px;border-radius:10px;background:#20283d;color:#fff;box-shadow:0 3px 14px #0002;font:12px/1.6 system-ui;overflow-wrap:anywhere}:host([data-side=right]) .status{right:0}:host([data-side=left]) .status{left:0}dialog{position:fixed;inset:0;margin:auto;width:min(300px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;padding:18px;border:1px solid #dfe3ed;border-radius:14px;background:#ffffff;color:#20283d;box-shadow:0 12px 40px #0003;font:13px/1.6 system-ui}dialog::backdrop{background:#0003}dialog h2{font-size:15px;margin:0 0 6px}dialog p{margin:0 0 12px;color:#5d6880;font-size:12px}dialog button{display:block;width:100%;padding:9px 12px;margin-top:8px;border:1px solid #dfe3ed;border-radius:8px;text-align:left;background:transparent;color:inherit}dialog button:hover{background:#efedff}dialog button:disabled{opacity:.6;cursor:wait}dialog button small{display:block;font-size:11px;opacity:.75}dialog .cancel{text-align:center;border:0}dialog [role=status]{color:#b42335;margin:10px 0 0;overflow-wrap:anywhere}dialog [role=status]:empty{display:none}@media(prefers-color-scheme:dark){button:focus-visible{outline-color:#b6b0ff}.launcher-button{color:#b6b0ff}.launcher-button:active,dialog button:hover{background:#302d50}.launcher-button,.dismiss-button,dialog{background:#1e2331;color:#edf0fa;border-color:#626f8b}dialog p{color:#b1bbd0}.dismiss-button:hover{background:#30394e}dialog [role=status]{color:#ff9caa}}@media(prefers-reduced-motion:reduce){.launcher-button{transition:none}}`;
     style.textContent += '@media(max-height:420px){dialog{padding:12px}dialog>p:not([role=status]){display:none}dialog button{font-size:12px;line-height:1.4;padding:4px 9px;margin-top:5px}dialog button small{font-size:11px}dialog .cancel{margin-top:4px}}';
@@ -111,12 +142,13 @@ if (window === window.top && /^https?:$/.test(location.protocol) && document.con
     dialog.addEventListener('cancel', event => { event.preventDefault(); if (!closing) closeChoice(); });
     dialog.addEventListener('click', event => { if (event.target === dialog && !closing) { const rect = dialog.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) closeChoice(); } });
     dismissButton.addEventListener('click', event => {
+      if (!contextAvailable()) return;
       event.preventDefault(); event.stopPropagation(); cancelDrag(); choiceStatus.textContent = '';
       dialog.showModal(); dismissButton.setAttribute('aria-expanded', 'true');
     });
     root.append(style, button, status, dismissButton, dialog); document.documentElement.append(host);
     button.addEventListener('pointerdown', event => {
-      if (event.button !== 0 || busy || drag || dialog.open) return;
+      if (!contextAvailable() || event.button !== 0 || busy || drag || dialog.open) return;
       event.preventDefault(); suppressClick = false;
       drag = { id: event.pointerId, startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY, left: parseFloat(host.style.left), top: parseFloat(host.style.top), moved: false };
       button.setPointerCapture(event.pointerId);
@@ -140,14 +172,14 @@ if (window === window.top && /^https?:$/.test(location.protocol) && document.con
       drag = null; suppressClick = moved; button.classList.remove('dragging');
       if (button.hasPointerCapture(event.pointerId)) button.releasePointerCapture(event.pointerId);
       applySide(); dock();
-      if (moved) void savePosition({ side: settings.side, y: settings.y }).catch(() => toast('位置未保存，刷新后可重新拖动。'));
+      if (moved) void savePosition({ side: settings.side, y: settings.y }).catch(error => handleError(error, () => toast('位置未保存，刷新后可重新拖动。')));
     });
     button.addEventListener('pointercancel', cancelDrag);
     button.addEventListener('lostpointercapture', cancelDrag);
     button.addEventListener('keydown', event => { if (event.key === 'Escape') cancelDrag(); });
     button.addEventListener('click', async event => {
       event.preventDefault(); event.stopPropagation();
-      if ((suppressClick && event.detail !== 0) || busy) return;
+      if (!contextAvailable() || (suppressClick && event.detail !== 0) || busy) return;
       busy = true; button.setAttribute('aria-busy', 'true');
       try {
         // Send directly from the click so sidePanel.open keeps the user gesture.
@@ -155,29 +187,37 @@ if (window === window.top && /^https?:$/.test(location.protocol) && document.con
         const result = await chrome.runtime.sendMessage({ type: 'SIDER_TOGGLE_PANEL', opened: panelOpen });
         if (!result?.ok) throw new Error(result?.error || '切换侧栏失败，请重试。');
         if (revision === panelRevision && typeof result.opened === 'boolean') applyPanelState(result.opened);
-      } catch (error) { toast(error.message || '请在扩展管理页重新加载 Sider。'); }
+      } catch (error) { handleError(error, () => toast(error.message || '请在扩展管理页重新加载 Sider。')); }
       finally { busy = false; button.removeAttribute('aria-busy'); }
     });
     applySide(); dock();
     if (document.fullscreenElement) host.style.setProperty('display', 'none', 'important');
   }
   function applySide() { if (host) host.dataset.side = settings.side; }
-  chrome.storage.onChanged.addListener((changes, area) => {
+  function storageChanged(changes, area) {
+    if (!contextAvailable()) return;
     if (area !== 'local' || !changes[LAUNCHER_SETTINGS_KEY]) return;
     settingsChanged = true; cancelDrag(); settings = normalizeLauncherSettings(changes[LAUNCHER_SETTINGS_KEY].newValue); applySide(); render();
-  });
-  chrome.runtime.onMessage.addListener(message => {
+  }
+  function messageReceived(message) {
+    if (!contextAvailable()) return;
     if (message?.type === 'SIDER_LAUNCHER_ACCESS') { allowed = message.allowed === true; render(); }
     if (message?.type === 'SIDER_PANEL_STATE_CHANGED') { panelRevision++; applyPanelState(message.opened); }
-  });
-  window.addEventListener('resize', () => { cancelDrag(); dock(); });
-  document.addEventListener('keydown', event => { if (drag && event.key === 'Escape') cancelDrag(); });
-  document.addEventListener('fullscreenchange', () => { if (host) host.style.setProperty('display', document.fullscreenElement ? 'none' : 'block', 'important'); });
-  chrome.storage.local.get(LAUNCHER_SETTINGS_KEY).then(stored => {
+  }
+  chrome.storage.onChanged.addListener(storageChanged);
+  chrome.runtime.onMessage.addListener(messageReceived);
+  window.addEventListener('resize', () => { if (contextAvailable()) { cancelDrag(); dock(); } }, { signal: events.signal });
+  document.addEventListener('keydown', event => { if (drag && event.key === 'Escape') cancelDrag(); }, { signal: events.signal });
+  document.addEventListener('fullscreenchange', () => { if (contextAvailable() && host) host.style.setProperty('display', document.fullscreenElement ? 'none' : 'block', 'important'); }, { signal: events.signal });
+  async function loadSettings() {
+    const stored = await chrome.storage.local.get(LAUNCHER_SETTINGS_KEY);
     if (!settingsChanged) settings = normalizeLauncherSettings(stored[LAUNCHER_SETTINGS_KEY]); render();
-  }).catch(() => {});
-  const initialRevision = panelRevision;
-  chrome.runtime.sendMessage({ type: 'SIDER_PANEL_STATE_GET' }).then(result => {
+  }
+  async function loadPanelState() {
+    const initialRevision = panelRevision;
+    const result = await chrome.runtime.sendMessage({ type: 'SIDER_PANEL_STATE_GET' });
     if (result?.ok && initialRevision === panelRevision) applyPanelState(result.opened);
-  }).catch(() => {});
+  }
+  void loadSettings().catch(error => handleError(error));
+  void loadPanelState().catch(error => handleError(error));
 }
