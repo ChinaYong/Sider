@@ -2,33 +2,72 @@
 
 推送 `vX.Y.Z` 标签后，GitHub Actions 会校验版本、运行单元测试和隔离浏览器回归，并将通过测试的 `dist/` 自动打包为 GitHub Release 附件。本地无需压缩或上传。
 
-## 发布一次版本
+## 每次发布的操作步骤
 
-本次版本为 **0.7.0**。先把本次功能改动、版本文件和 `.github/workflows/` 中的发布流程一起提交并推送，再给该提交打标签：
+当前版本为 **0.7.1**，包含划词“总是选中”。以下以接下来发布 **0.7.2** 为例；每次将命令中的版本号替换为新的版本号。命令在项目根目录的 PowerShell 中执行，不需要在本机安装 GitHub CLI。
 
-```sh
-git tag -a v0.7.0 -m "Sider v0.7.0"
-git push origin v0.7.0
+### 1. 更新代码和版本
+
+先保存并提交要发布的功能改动，再同步主分支，避免版本标签遗漏功能提交：
+
+```powershell
+Set-Location Q:\1Coding\Sider
+git switch main
+git pull --ff-only origin main
+npm ci
+npm run version:set -- 0.7.2
+npm run version:check -- v0.7.2
+npm run check
 ```
+
+`version:set` 同步更新 `package.json`、`package-lock.json` 的两个版本字段与 `manifest.json`，不提交代码、不打标签。任一步骤报错时先停止并修复，检查全部成功后再继续。
+
+`npm run check` 执行全量单元测试和构建；GitHub 发布流程还会运行全量隔离浏览器回归。需要先在本机验证浏览器时，可执行 `npm run test:browser`，浏览器安装与 `SIDER_CHROMIUM` 用法见 [浏览器回归](browser-tests.md)。
+
+### 2. 提交并推送版本
+
+```powershell
+git diff --check
+git diff
+git add package.json package-lock.json manifest.json
+git status --short
+git commit -m "Release v0.7.2"
+git push origin main
+```
+
+确认暂存区只包含本次准备发布的内容。如果上一步还有源码、测试或文档修改，需要先将相应文件一起提交；不要只发布版本号而遗漏功能代码。
+
+### 3. 创建并推送发布标签
+
+先确认本地和远端都没有使用过这个标签；如果已有同名标签，使用更高的新版本号：
+
+```powershell
+git tag --list v0.7.2
+git ls-remote origin refs/tags/v0.7.2
+```
+
+两条命令均无输出表示该标签尚未使用，然后执行：
+
+```powershell
+git tag -a v0.7.2 -m "Sider v0.7.2"
+git push origin v0.7.2
+```
+
+`git push origin main` 只推送代码；最后一条标签推送才触发 Release。只打本地标签不会发布，之后也不需要在 GitHub 再手工创建同名 Release。
+
+### 4. 查看发布结果
 
 到仓库的 [Actions → Release](https://github.com/ChinaYong/Sider/actions/workflows/release.yml) 查看进度。成功后，[Releases](https://github.com/ChinaYong/Sider/releases) 自动出现：
 
-- `Sider-v0.7.0.zip`：可加载的扩展文件，`manifest.json` 直接位于 ZIP 根目录。
-- `Sider-v0.7.0.zip.sha256`：ZIP 的 SHA-256 校验值。
+- `Sider-v0.7.2.zip`：可加载的扩展文件，`manifest.json` 直接位于 ZIP 根目录。
+- `Sider-v0.7.2.zip.sha256`：ZIP 的 SHA-256 校验值。
 - GitHub 自动生成的更新说明，可在 Release 页面继续编辑。
 
 下载扩展附件并解压，再加载包含 `manifest.json` 的目录。GitHub 自动附带的 **Source code** 是源码归档，不能代替构建好的扩展 ZIP。
 
-## 下次更新版本
+如需校验下载是否完整，在下载目录执行 `Get-FileHash .\Sider-v0.7.2.zip -Algorithm SHA256`，将结果与 `.sha256` 文件中的值比较。更新已有扩展时，解压到固定目录后在扩展管理页面点击“重新加载”，并重开旧侧栏。
 
-用一个命令同步 `package.json`、`package-lock.json` 的两个版本字段与 `manifest.json`：
-
-```sh
-npm run version:set -- 0.7.1
-npm run check
-```
-
-检查并提交本次改动，推送代码，然后创建并推送对应的 `v0.7.1` 标签。`version:set` 只更新文件，不会自动提交、打标签或推送。
+## 版本号规则
 
 本项目使用三段稳定版本号；每段为 0–65535 的整数，不含前导零，不能全为零。不使用 `-beta` 等后缀，以保持扩展清单版本可加载。通常问题修复递增最后一段，较大的功能或界面更新递增中间一段。
 
@@ -36,7 +75,7 @@ npm run check
 
 ```sh
 npm run version:check
-npm run version:check -- v0.7.0
+npm run version:check -- v0.7.1
 ```
 
 普通构建也会检查版本一致性。版本不匹配时立即失败，避免发布标签与扩展内部显示的版本不同。
