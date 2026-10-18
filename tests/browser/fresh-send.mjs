@@ -87,15 +87,36 @@ try {
   const state = () => worker.evaluate(async tabId => (await chrome.storage.session.get(`sider.tabContext.${tabId}`))[`sider.tabContext.${tabId}`], sourceTab.id);
   const ownedUploads = fixture => fixture.uploads.filter(upload => upload.name.includes('-预设') && /sider-[0-9a-f]{16}\.txt$/.test(upload.name));
   async function enableBody() {
+    const popup = chat.locator('.popover');
     if ((await state())?.templateSelections?.['preset-page']) {
       await assertEventually(async () => assert.ok((await state()).attachments.page)); return;
     }
     await chat.locator('[data-chip="page"]').waitFor({ state: 'hidden' });
-    if (await chat.locator('.popover').isVisible()) await chat.getByRole('button', { name: '关闭', exact: true }).click();
-    await chat.getByRole('button', { name: '预设', exact: true }).click(); await chat.getByRole('checkbox', { name: '发送时引用 网页正文', exact: true }).setChecked(true);
+    if (await popup.isVisible()) await chat.getByRole('button', { name: '关闭', exact: true }).click();
+    await popup.waitFor({ state: 'hidden' });
+    await chat.getByRole('button', { name: '预设', exact: true }).click();
+    await popup.evaluate(async node => {
+      await Promise.all(node.getAnimations({ subtree: true }).map(animation => animation.finished.catch(() => {})));
+    });
+    const toggle = chat.getByRole('checkbox', { name: '发送时引用 网页正文', exact: true });
+    await assertEventually(async () => {
+      assert.equal(await toggle.isChecked(), false);
+      assert.equal(await toggle.isEnabled(), true);
+    });
+    // Context refreshes can repaint the old value before the async write returns.
+    // Click once, then require both persisted and rendered completion instead of
+    // setChecked's immediate post-click assertion. Do not retry a missed click.
+    await toggle.click();
+    await assertEventually(async () => {
+      const current = await state();
+      assert.equal(current.templateSelections['preset-page'], true);
+      assert.ok(current.attachments.page);
+      assert.equal(await toggle.isChecked(), true);
+      assert.equal(await toggle.isEnabled(), true);
+    });
     await chat.locator('[data-chip="page"]').waitFor();
-    await assertEventually(async () => assert.ok((await state()).attachments.page));
-    if (await chat.locator('.popover').isVisible()) await chat.getByRole('button', { name: '关闭', exact: true }).click();
+    await chat.getByRole('button', { name: '关闭', exact: true }).click();
+    await popup.waitFor({ state: 'hidden' });
   }
   const hold = () => body.evaluate(() => { window.holdUploads = true; });
   const release = () => body.evaluate(() => window.releaseUploads());
@@ -375,6 +396,17 @@ try {
   Object.assign(results, { checks, consoleErrors, error: error.stack || error.message });
   if (panel) {
     try { await panel.screenshot({ path: path.resolve('tmp/browser/fresh-send-failure.png') }); } catch {}
+    try {
+      results.referenceControls = await panel.frameLocator('iframe').locator('#sider-enhancement').evaluate(host => {
+        const popup = host.shadowRoot.querySelector('.popover');
+        const toggle = host.shadowRoot.querySelector('[aria-label="发送时引用 网页正文"]');
+        return { popupHidden: popup.hidden, popupInert: popup.inert, popupClosing: popup.hasAttribute('data-motion-closing'),
+          checked: toggle?.checked, disabled: toggle?.disabled, busy: toggle?.dataset.busy };
+      });
+      const current = await worker.evaluate(async tabId => (await chrome.storage.session.get(`sider.tabContext.${tabId}`))[`sider.tabContext.${tabId}`], sourceTabId);
+      results.referenceState = { revision: current?.revision, templateSelections: current?.templateSelections,
+        pageRequested: current?.pageRequested, pageError: current?.pageError, hasPage: Boolean(current?.attachments?.page) };
+    } catch {}
     try { results.fixtureState = await panel.frameLocator('iframe').locator('body').evaluate(() => ({ sent: window.sent, uploads: window.uploads.map(upload => ({ ...upload, content: upload.content?.slice(-120) })), removed: window.removed })); } catch {}
   }
   await writeFile('tmp/browser/fresh-send-results.json', JSON.stringify(results, null, 2));
