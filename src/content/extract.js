@@ -568,36 +568,75 @@ function isSelectionExcluded(selection) {
     const range = selection.getRangeAt(index);
     const ancestor = elementFor(range.commonAncestorContainer);
     if (!ancestor) continue;
-    for (const element of ancestor.querySelectorAll('*')) {
-      if (range.intersectsNode(element) && isExcluded(element)) return true;
-    }
+    // Prune unrelated conversation turns instead of enumerating every element
+    // under a potentially document-wide common ancestor.
+    const walker = ancestor.ownerDocument.createTreeWalker(ancestor, 1, {
+      acceptNode: element => range.intersectsNode(element) ? 1 : 2,
+    });
+    let element;
+    while ((element = walker.nextNode())) if (isExcluded(element)) return true;
   }
   return false;
 }
 
-export function captureSelection(document) {
-  const selection = document.defaultView?.getSelection();
+// Selection capture already knows the exact DOM range. Only explicit source
+// highlighting needs a document-wide character-to-node index.
+function adjacentText(container, offset, backwards, root, limit) {
+  if (!root?.contains(container)) return '';
+  let text = '', previousBlock = elementFor(container)?.closest(BLOCK_SELECTOR);
+  const advance = node => {
+    while (node && node !== root) {
+      const sibling = backwards ? node.previousSibling : node.nextSibling;
+      if (sibling) return sibling;
+      node = node.parentNode;
+    }
+    return null;
+  };
+  const append = (value, block) => {
+    const fragment = value.replace(/\s+/g, ' ');
+    const separator = previousBlock && block !== previousBlock ? ' ' : '';
+    text = backwards ? fragment + separator + text : text + separator + fragment;
+    text = backwards ? text.slice(-limit) : text.slice(0, limit);
+    previousBlock = block;
+  };
+  let node;
+  if (container.nodeType === 3) {
+    append(backwards ? container.nodeValue.slice(Math.max(0, offset - limit), offset)
+      : container.nodeValue.slice(offset, offset + limit), previousBlock);
+    node = advance(container);
+  } else node = container.childNodes[backwards ? offset - 1 : offset] || advance(container);
+  // Also bound empty/hidden markup and giant whitespace runs around the quote.
+  for (let visited = 0; node && text.length < limit && visited < 128; visited++) {
+    if (node.nodeType === 3) {
+      const value = node.nodeValue || '';
+      append(backwards ? value.slice(-limit) : value.slice(0, limit), node.parentElement?.closest(BLOCK_SELECTOR));
+    } else if (node.nodeType === 1 && !isExcluded(node)
+      && !node.matches('nav,[role="navigation"]')
+      && !(node.matches('aside,footer') && !node.closest(MAIN_SELECTOR) && node.getAttribute('role') !== 'note')) {
+      if (node.tagName === 'BR') append(' ', previousBlock);
+      const child = backwards ? node.lastChild : node.firstChild;
+      if (child) { node = child; continue; }
+    }
+    node = advance(node);
+  }
+  return text;
+}
+
+export function captureSelection(document, selection = document.defaultView?.getSelection()) {
   if (!selection || !selection.rangeCount || selection.isCollapsed || isSelectionExcluded(selection)) return null;
   const content = selection.toString().trim();
   if (!content) return null;
-  const index = buildTextIndex(document);
-  const exact = normaliseInline(content);
   const range = selection.getRangeAt(0);
-  const offsets = quoteOffsets(index, exact);
-  const offset = offsets.find(candidate => {
-    const position = index.positions[candidate];
-    try { return range.comparePoint(position.node, position.start) === 0; } catch { return false; }
-  }) ?? offsets[0];
   const block = elementFor(range.commonAncestorContainer)?.closest(BLOCK_SELECTOR);
-  const context = block ? normaliseInline(cleanClone(block, block.cloneNode(true)).textContent) : exact;
+  const before = adjacentText(range.startContainer, range.startOffset, true, block, 2048);
+  const after = adjacentText(range.endContainer, range.endOffset, false, block, 2048);
+  const root = document.body || document.documentElement;
+  const prefix = before.length >= 80 ? before.slice(-80) : adjacentText(range.startContainer, range.startOffset, true, root, 80);
+  const suffix = after.length >= 80 ? after.slice(0, 80) : adjacentText(range.endContainer, range.endOffset, false, root, 80);
   return {
     kind: 'selection', title: document.title || '未命名网页', url: document.location.href,
-    content, context,
-    locator: {
-      exact: content,
-      prefix: offset === undefined ? '' : index.text.slice(Math.max(0, offset - 80), offset),
-      suffix: offset === undefined ? '' : index.text.slice(offset + exact.length, offset + exact.length + 80),
-    },
+    content, context: normaliseInline(before + content + after),
+    locator: { exact: content, prefix, suffix },
     capturedAt: new Date().toISOString(),
   };
 }

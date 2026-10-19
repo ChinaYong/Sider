@@ -170,6 +170,63 @@ test('source picker lists all accessible windows and marks unsupported pages wit
   assert.equal((await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: -1 })).ok, false);
 });
 
+test('manually opening Sider on an AI tab captures its selection while keeping automatic entry settings', { timeout: 3000 }, async () => {
+  for (const url of ['https://chatgpt.com/c/source', 'https://gemini.google.com/app/source', 'https://claude.ai/chat/source']) {
+    const f = await fixture();
+    Object.assign(f.tabs.get(1), { url, title: 'AI 会话来源' });
+    f.local.siderEnabledOrigins = [];
+    f.local['sider.launcher.v1'] = { floating: true, mode: 'blacklist', blacklist: [new URL(url).hostname] };
+    const settings = structuredClone(f.local);
+    const reference = { kind: 'selection', title: 'AI 会话来源', url, content: 'AI 回答中的划词' };
+    f.selections.set(1, reference);
+    await f.api.tabs.onUpdated.emit(1, { status: 'complete' }, structuredClone(f.tabs.get(1)));
+    assert.equal(f.injections.some(item => item.files.includes('page-content.js')), false);
+    const captured = f.waitForSession(data => data[TAB_CONTEXT_PREFIX + 1]?.selection?.content === reference.content);
+    await f.api.action.onClicked.emit(structuredClone(f.tabs.get(1)));
+    await captured;
+    assert.deepEqual(f.opened.at(-1), { tabId: 1 });
+    assert.ok(f.injections.some(item => item.files.includes('page-content.js')));
+    await f.register(1);
+    const result = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.referenceSource.status, 'ready');
+    assert.equal(result.context.selection.content, reference.content);
+    const changed = await f.select(1, '更新后的 AI 划词');
+    assert.equal(changed.ok, true, changed.error);
+    const list = await f.wrapped(1, { type: 'SIDER_SOURCE_TABS_LIST' });
+    assert.equal(list.tabs.find(tab => tab.tabId === 1).disabledReason, '');
+    assert.equal((await f.send({ type: 'SIDER_SOURCE_INFO' })).source.tabId, 1);
+    const capturedExplicitly = await f.send({ type: 'SIDER_CAPTURE', kind: 'selection' });
+    assert.equal(capturedExplicitly.ok, true, capturedExplicitly.error);
+    assert.deepEqual(f.local.siderEnabledOrigins, settings.siderEnabledOrigins);
+    assert.deepEqual(f.local['sider.launcher.v1'], settings['sider.launcher.v1']);
+  }
+});
+
+test('an AI owner remains available in a hidden source list and nested AI frames cannot publish or open it', async () => {
+  const f = await fixture();
+  Object.assign(f.tabs.get(1), { url: 'https://chatgpt.com/c/source', title: '当前 AI 会话' });
+  f.tabs.set(4, { id: 4, windowId: 9, url: 'https://chatgpt.com/c/other', title: '其他 AI 会话' });
+  const settings = (await f.send({ type: 'SIDER_AI_WEB_SETTINGS_GET' })).settings;
+  await f.send({ type: 'SIDER_AI_WEB_SETTINGS_SAVE', settings: { ...settings, hideUnavailableTabs: true } });
+  await f.register(1);
+  const list = await f.wrapped(1, { type: 'SIDER_SOURCE_TABS_LIST' });
+  assert.equal(list.tabs.find(tab => tab.tabId === 1)?.disabledReason, '');
+  assert.equal(list.tabs.some(tab => tab.tabId === 4), false);
+  const switched = await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 2 });
+  assert.equal(switched.referenceSource.tabId, 2);
+  const returned = await f.wrapped(1, { type: 'SIDER_REFERENCE_SOURCE_SET', tabId: 1 });
+  assert.equal(returned.referenceSource.status, 'ready');
+  const sender = { id: f.api.runtime.id, url: f.tabs.get(1).url, tab: structuredClone(f.tabs.get(1)), frameId: 1 };
+  const before = structuredClone(f.session), opened = f.opened.length;
+  for (const type of ['SIDER_SELECTION_CHANGED', 'SIDER_OPEN_SOURCE_PANEL']) {
+    const denied = await f.send({ type, source: { url: sender.url }, reference: null }, sender);
+    assert.equal(denied.ok, false);
+  }
+  assert.equal(f.opened.length, opened);
+  assert.deepEqual(f.session, before);
+});
+
 test('saved reference visibility filters unsupported tabs across windows and survives worker restart without changing the source', async () => {
   const f = await fixture(); await f.register(1);
   f.tabs.get(2).windowId = 27;
@@ -426,6 +483,7 @@ function browserModel() {
           return snapshot;
         }
         if (message.type === 'SIDER_PAGE_CLEAR_SELECTION') { selections.delete(tabId); return { ok: true, source }; }
+        if (message.type === 'SIDER_PAGE_CAPTURE' && message.kind === 'selection') return { ok: true, reference: selections.get(tabId) || null };
         if (message.type === 'SIDER_PAGE_CAPTURE' && message.kind === 'page') {
           const snapshot = { ok: true, reference: { kind: 'page', ...source, content: pages.get(tabId), context: '' } };
           const gate = pageGates.get(tabId);
@@ -861,8 +919,8 @@ test('withheld source metadata clears previous material and returns needsAccess 
   assert.equal(f.session[`${TAB_CONTEXT_PREFIX}3`].selection.content, '另一个网页的词');
 });
 
-test('ChatGPT and browser-internal source pages keep plain questions usable while refusing webpage attachments', async () => {
-  for (const url of ['https://chatgpt.com/', 'chrome://settings/']) {
+test('browser-internal source pages keep plain questions usable while refusing webpage attachments', async () => {
+  for (const url of ['chrome://settings/']) {
     const f = await fixture(); await f.register(1); await f.select(1, '之前普通网页的词');
     await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'url', enabled: true });
     await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: true });
@@ -1046,7 +1104,7 @@ test('navigation during send-time extraction rejects the old body', async () => 
   assert.equal(f.session[`${TAB_CONTEXT_PREFIX}1`].attachments.page, null);
 });
 
-test('navigation to an unsupported source during fresh capture cannot become a partial send', async () => {
+test('navigation to an internal or AI page during fresh capture cannot become a partial send', async () => {
   for (const url of ['chrome://settings/', 'https://chatgpt.com/']) {
     const f = await fixture(); await f.register(1);
     await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: true });
@@ -1058,7 +1116,8 @@ test('navigation to an unsupported source during fresh capture cannot become a p
     gate.release.resolve();
     const result = await preparing;
     assert.equal(result.ok, false);
-    assert.match(result.error, /不支持/);
+    assert.match(result.error, /不支持|跳转/);
+    f.tabs.get(1).status = 'complete';
     const current = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
     assert.equal(current.context.attachments.page, null);
     assert.equal(composeContextPrompt('之后的普通问题', current.context, current.settings).text, '之后的普通问题');
@@ -1218,7 +1277,7 @@ test('selection shortcut and webpage button always attach even when the preset c
 });
 
 test('unsupported pages ignore automatic defaults and keep ordinary questions usable', async () => {
-  for (const url of ['chrome://settings/', 'https://chatgpt.com/']) {
+  for (const url of ['chrome://settings/']) {
     const f = await fixture(); await f.register(1);
     f.local[CONTEXT_SETTINGS_KEY] = { defaultSelection: true, defaultUrl: true, defaultPage: true };
     f.tabs.get(1).url = url;

@@ -3,6 +3,64 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { captureReference, captureSelection, extractPage, highlightReference } from '../src/content/extract.js';
 
+test('short selections in long conversations inspect only nearby text without indexing or cloning the whole page', t => {
+  const history = `<p class="history">${'过去的回答。'.repeat(60)}</p>`.repeat(100);
+  const dom = new JSDOM(`<!doctype html><title>Long conversation</title><main>${history}<p id="quote">段落前缀，当前选词，段落后缀。</p>${history}</main>`, { url: 'https://chatgpt.com/c/long' });
+  t.after(() => dom.window.close());
+  const { document } = dom.window;
+  const text = document.querySelector('#quote').firstChild;
+  const range = document.createRange(); range.setStart(text, 5); range.setEnd(text, 9);
+  const selection = dom.window.getSelection(); selection.addRange(range);
+  let indexedPages = 0, historyStyles = 0, clones = 0;
+  const walk = document.createTreeWalker.bind(document), style = dom.window.getComputedStyle.bind(dom.window);
+  document.createTreeWalker = (root, ...args) => { if (root === document.body) indexedPages++; return walk(root, ...args); };
+  dom.window.getComputedStyle = element => { if (element.matches('.history')) historyStyles++; return style(element); };
+  const clone = dom.window.Node.prototype.cloneNode;
+  dom.window.Node.prototype.cloneNode = function (...args) { clones++; return clone.apply(this, args); };
+  const reference = captureSelection(document);
+  assert.equal(reference.content, '当前选词');
+  assert.equal(reference.context, '段落前缀，当前选词，段落后缀。');
+  assert.equal(indexedPages, 0);
+  assert.ok(historyStyles < 5, `Unrelated history style reads: ${historyStyles}`);
+  assert.equal(clones, 0);
+});
+
+test('cross-paragraph capture bounds surrounding context and rejects selected hidden or editable descendants', t => {
+  const dom = page(`<main><p>${'前面的对话。'.repeat(1000)}</p><p id="first">第一段可选正文。</p><p id="second">第二段可选正文。</p><p>${'后面的对话。'.repeat(1000)}</p></main>`);
+  t.after(() => dom.window.close());
+  const { document } = dom.window, range = document.createRange();
+  const first = document.querySelector('#first'), second = document.querySelector('#second');
+  range.setStart(first.firstChild, 0); range.setEnd(second.firstChild, second.textContent.length);
+  dom.window.getSelection().addRange(range);
+  const reference = captureSelection(document);
+  assert.equal(reference.content, first.textContent + second.textContent);
+  assert.ok(reference.context.length <= reference.content.length + 4096);
+  for (const [attribute, value] of [['hidden', ''], ['contenteditable', 'true'], ['data-sider-ui', '']]) {
+    const excluded = document.createElement('span'); excluded.setAttribute(attribute, value); excluded.textContent = '不应采集';
+    first.after(excluded);
+    assert.equal(captureSelection(document), null);
+    excluded.remove();
+  }
+});
+
+test('element-boundary and reverse selections keep inline, line-break and duplicate quote locators', t => {
+  const dom = page('<p>第一处前文</p><p class="quote"><b>相同</b><br><span>词句</span></p><p>第二处前文</p><p class="quote"><b>相同</b><br><span>词句</span></p>');
+  t.after(() => dom.window.close());
+  const { document } = dom.window, quote = document.querySelectorAll('.quote')[1];
+  const range = document.createRange(); range.selectNodeContents(quote);
+  dom.window.getSelection().addRange(range);
+  const reference = captureSelection(document);
+  assert.match(reference.locator.prefix, /第二处前文/);
+  assert.equal(reference.context, reference.content);
+  dom.window.getSelection().collapse(quote, quote.childNodes.length);
+  dom.window.getSelection().extend(quote, 0);
+  assert.equal(captureSelection(document).locator.prefix, reference.locator.prefix);
+  // A browser Selection renders BR as whitespace; explicit highlighting also
+  // accepts that rendered form and must distinguish the second occurrence.
+  assert.equal(highlightReference(document, { ...reference.locator, exact: '相同\n词句' }), true);
+  assert.equal(dom.window.getSelection().anchorNode, quote.querySelector('b').firstChild);
+});
+
 function page(html) {
   return new JSDOM(`<!doctype html><html><head><title>测试网页</title></head><body>${html}</body></html>`, {
     url: 'https://example.com/article', pretendToBeVisual: true,

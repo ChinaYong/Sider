@@ -11,6 +11,7 @@ if (isSupportedDocument(document) && !globalThis[INSTALL_KEY]) {
   let enabled = false;
   let explicitlyConfigured = false;
   let captureTimer;
+  let pendingSelection;
   let host;
   let button;
   let toast;
@@ -69,23 +70,27 @@ if (isSupportedDocument(document) && !globalThis[INSTALL_KEY]) {
     if (sourceURL === location.href) return false;
     sourceURL = location.href;
     cachedSelection = null;
+    pendingSelection = null;
     // An SPA can keep the same DOM range after navigating to another page.
     // It must not become a selection of that new page.
     window.getSelection()?.removeAllRanges();
     return true;
   }
 
-  function refreshSelection(clearFocusedCollapsed = true) {
+  function refreshSelection() {
     const navigated = resetForNavigation();
     const selection = window.getSelection();
     const editable = isEditable(document.activeElement);
-    const reference = editable ? null : captureSelection(document);
+    const selected = selection?.rangeCount && !selection.isCollapsed ? selection : !document.hasFocus() ? pendingSelection : null;
+    const reference = editable ? null : captureSelection(document, selected);
+    pendingSelection = null;
     if (reference) cachedSelection = reference;
-    else if (navigated || (selection && !selection.isCollapsed) || editable || (clearFocusedCollapsed && document.hasFocus())) cachedSelection = null;
-    return { selection, reference };
+    else if (navigated || selected || editable || document.hasFocus()) cachedSelection = null;
+    return { selection, reference: selected === selection ? reference : null };
   }
 
   function updateSelection(force = false) {
+    clearTimeout(captureTimer);
     const { selection, reference } = refreshSelection();
     publishSelection(force);
     if (!enabled || !reference) {
@@ -104,10 +109,16 @@ if (isSupportedDocument(document) && !globalThis[INSTALL_KEY]) {
   }
 
   function scheduleCapture() {
-    // Keep a replacement before focus can move to ChatGPT and collapse the DOM
-    // range. Only the notification is delayed; focused deselection is decided
-    // after the focus transition has settled.
-    refreshSelection(false);
+    // Save cheap DOM ranges before sidebar focus can collapse the live range.
+    // Text extraction and style reads wait until dragging/focus changes settle.
+    resetForNavigation();
+    const selection = window.getSelection();
+    if (isEditable(document.activeElement)) pendingSelection = null;
+    else if (selection?.rangeCount && !selection.isCollapsed) {
+      const ranges = Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index).cloneRange());
+      pendingSelection = { anchorNode: selection.anchorNode, focusNode: selection.focusNode, rangeCount: ranges.length,
+        isCollapsed: false, getRangeAt: index => ranges[index], toString: () => ranges.map(range => range.toString()).join('') };
+    }
     clearTimeout(captureTimer);
     captureTimer = setTimeout(updateSelection, 90);
   }
@@ -151,6 +162,7 @@ if (isSupportedDocument(document) && !globalThis[INSTALL_KEY]) {
         sendResponse({ ok: true, reference: cachedSelection, source: source() });
       } else if (message.type === 'SIDER_PAGE_CLEAR_SELECTION') {
         cachedSelection = null;
+        pendingSelection = null;
         window.getSelection()?.removeAllRanges();
         if (button) button.style.display = 'none';
         publishSelection(true);

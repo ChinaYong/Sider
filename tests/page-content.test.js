@@ -181,6 +181,34 @@ test('a replacement selected immediately before sidebar focus does not fall back
   assert.equal(env.sent.at(-1).reference.content, '正文后缀');
 });
 
+test('a burst of selection events defers extraction while preserving the latest quote before sidebar focus', async t => {
+  const env = environment(t); env.inject();
+  let styleReads = 0;
+  const style = env.window.getComputedStyle.bind(env.window);
+  env.window.getComputedStyle = element => { styleReads++; return style(element); };
+  for (let index = 0; index < 20; index++) {
+    env.selectText(index === 19 ? '正文后缀' : '目标文字');
+    env.window.document.dispatchEvent(new env.window.Event('selectionchange'));
+  }
+  assert.equal(styleReads, 0, 'Dragging should snapshot DOM ranges without synchronous extraction');
+  env.setFocused(false); env.window.getSelection().removeAllRanges();
+  env.window.document.dispatchEvent(new env.window.Event('selectionchange'));
+  const deadline = Date.now() + 2000;
+  while (env.sent.at(-1)?.reference?.content !== '正文后缀' && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(env.sent.at(-1).reference.content, '正文后缀');
+  assert.equal(env.sent.length, 2, 'One settled selection notification follows the initial empty state');
+});
+
+test('a pending quote that becomes hidden before sidebar focus clears the older cached selection', t => {
+  const env = environment(t); env.selectTarget(); env.inject();
+  const quote = env.window.document.createElement('p'); quote.textContent = '新的选区'; env.window.document.body.append(quote);
+  env.selectText('新的选区', quote);
+  env.window.document.dispatchEvent(new env.window.Event('selectionchange'));
+  quote.hidden = true; env.setFocused(false); env.window.getSelection().removeAllRanges();
+  assert.equal(env.request({ type: 'SIDER_PAGE_SELECTION_GET' }).response.reference, null);
+  assert.equal(env.sent.at(-1).reference, null);
+});
+
 test('selecting hidden content clears the previous readable quote and never publishes hidden text', async t => {
   const env = environment(t);
   env.selectTarget();

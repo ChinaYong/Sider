@@ -142,6 +142,11 @@ function isPageSender(sender) {
   return sender?.id === chrome.runtime.id && Number.isInteger(sender.tab?.id) && isWebURL(sender.url);
 }
 
+function isSourcePageSender(sender) {
+  return isPageSender(sender) && (!isChatURL(sender.url)
+    || (sender.frameId || 0) === 0 && sender.url === sender.tab.url);
+}
+
 function isChatSender(sender) {
   return sender?.id === chrome.runtime.id && isChatURL(sender.url);
 }
@@ -152,7 +157,7 @@ function authorize(message, sender) {
   if (message.type === 'SIDER_CHAT_READY' && isChatSender(sender)) return;
   if (message.type === 'SIDER_GEMINI_DEFAULTS_GET' && isChatSender(sender)) return;
   if (message.type === 'SIDER_ENHANCEMENT_REQUEST' && isChatSender(sender) && message.embedded && embedRegistration(sender, message.bridgeId)) return;
-  if (isPageSender(sender) && !isChatURL(sender.url) && CONTENT_MESSAGES.has(message.type)) {
+  if (isSourcePageSender(sender) && CONTENT_MESSAGES.has(message.type)) {
     if (message.type === 'SIDER_CAPTURE' && message.tabId != null && message.tabId !== sender.tab.id) {
       throw new Error('网页不能读取其他标签页。');
     }
@@ -199,8 +204,9 @@ function configureTabPanel(tab) {
 function prepareSource(tab) {
   rememberSource(tab);
   void launchers.inject(tab).catch(() => {});
-  if (Number.isInteger(tab?.id) && isWebURL(tab.url) && !isChatURL(tab.url)) {
+  if (Number.isInteger(tab?.id) && isWebURL(tab.url)) {
     // Install while the source page still has its selection, before sidebar focus.
+    // Explicit open gestures also support AI tabs; passive navigation skips them.
     void withTab(tab.id, () => syncSourceContext(tab.id)).catch(() => {});
   }
 }
@@ -221,7 +227,6 @@ async function sourceTab(message = {}, sender = {}, { allowUnexposedURL = false 
       if (allowUnexposedURL) return tab;
       throw sourceAccessError();
     }
-    if (isChatURL(tab?.url)) throw new Error(`当前标签页是 ${siteForURL(tab.url, aiWebSettings)?.name || 'AI 网站'}，请先切回要引用的网页。`);
     if (!isWebURL(tab?.url)) {
       const sourceWindowId = Number.isInteger(message.windowId) ? message.windowId : (await chrome.windows.getLastFocused()).id;
       const lastId = recentSources.get(sourceWindowId);
@@ -234,8 +239,8 @@ async function sourceTab(message = {}, sender = {}, { allowUnexposedURL = false 
     if (allowUnexposedURL) return tab;
     throw sourceAccessError();
   }
-  if (!tab || !isWebURL(tab.url) || isChatURL(tab.url)) {
-    throw new Error('请先打开一个普通网页再引用；浏览器内部页面与 AI 网站页面不支持采集。');
+  if (!tab || !isWebURL(tab.url)) {
+    throw new Error('请先打开一个网页再引用；浏览器内部页面不支持采集。');
   }
   rememberSource(tab);
   return tab;
@@ -265,7 +270,7 @@ async function sourceById(tabId, allowUnexposedURL = false) {
     if (allowUnexposedURL) return tab;
     throw sourceAccessError();
   }
-  if (!isWebURL(tab.url) || isChatURL(tab.url)) throw Object.assign(new Error('浏览器内部页面与 AI 网站页面不支持网页引用。'), { code: 'SOURCE_UNSUPPORTED' });
+  if (!isWebURL(tab.url)) throw Object.assign(new Error('浏览器内部页面不支持网页引用。'), { code: 'SOURCE_UNSUPPORTED' });
   return tab;
 }
 
@@ -374,7 +379,10 @@ async function sourceTabsList(ownerTabId) {
     || a.windowId - b.windowId || (a.index || 0) - (b.index || 0));
   const choices = tabs.map(tab => ({
     tabId: tab.id, windowId: tab.windowId, title: tab.title || tab.url || '未命名标签页', url: tab.url || '',
-    disabledReason: !isWebURL(tab.url) ? '浏览器内部页面不支持引用' : isChatURL(tab.url) ? 'AI 网站页面不支持引用' : '',
+    // Keep other AI tabs out of the default picker, but never disable the page
+    // whose sidebar the user explicitly opened (including quick return to it).
+    disabledReason: !isWebURL(tab.url) ? '浏览器内部页面不支持引用'
+      : isChatURL(tab.url) && tab.id !== ownerTabId ? 'AI 网站默认不作为引用来源，可在该标签页打开 Sider 使用' : '',
   }));
   return { ok: true, ownerTabId, ownerWindowId: owner.windowId, sourceTabId: session?.sourceTabId ?? ownerTabId,
     tabs: aiWebSettings.hideUnavailableTabs ? choices.filter(tab => !tab.disabledReason) : choices };
@@ -384,7 +392,7 @@ async function ownedContextResponse(tabId, options) {
   const result = await contextResponse(tabId, true, options);
   const tab = await chrome.tabs.get(tabId);
   return { ...result, referenceSource: { ownerTabId: tabId, tabId, epoch: 0, title: tab.title || result.context?.title || '当前网页',
-    status: result.needsAccess ? 'needs-access' : isWebURL(tab.url) && !isChatURL(tab.url) ? 'ready' : 'unsupported',
+    status: result.needsAccess ? 'needs-access' : isWebURL(tab.url) ? 'ready' : 'unsupported',
     error: result.needsAccess ? sourceAccessError().message : '' } };
 }
 
@@ -1261,7 +1269,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   // Opening the panel must precede async storage or tab lookups to retain the gesture.
-  if (isPageSender(sender) && !isChatURL(sender.url) && message?.type === 'SIDER_OPEN_SOURCE_PANEL') {
+  if (isSourcePageSender(sender) && message?.type === 'SIDER_OPEN_SOURCE_PANEL') {
     prepareSource(sender.tab);
     openPanelNow(sender.tab);
   }
@@ -1340,7 +1348,7 @@ chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
     sourceVersions.set(tabId, (sourceVersions.get(tabId) || 0) + 1);
     liveSources.delete(tabId);
     void referenceSessions.invalidate(tabId, 'loading', '来源网页正在加载，请等待完成。').catch(() => {});
-    void withTab(tabId, () => resetTabContext(tabId, { url: isWebURL(tab.url) && !isChatURL(tab.url) ? tab.url : '', title: tab.title || '' })).catch(() => {});
+    void withTab(tabId, () => resetTabContext(tabId, { url: isWebURL(tab.url) ? tab.url : '', title: tab.title || '' })).catch(() => {});
     for (const [key, frame] of chatFrames) if (frame.tabId === tabId) chatFrames.delete(key);
   }
   if (change.status === 'complete' && isWebURL(tab.url) && !isChatURL(tab.url)) prepareSource(tab);

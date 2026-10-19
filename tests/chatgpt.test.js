@@ -418,7 +418,7 @@ test('background isolates page content scripts from state mutation and ChatGPT f
   delete globalThis.chrome;
 });
 
-test('background rejects default capture from a ChatGPT tab and opens the panel synchronously on shortcuts', async () => {
+test('background explicitly captures the active ChatGPT tab and opens the panel synchronously on shortcuts', async () => {
   const mock = chromeMock();
   globalThis.chrome = mock.api;
   await import(`../src/background.js?capture=${Date.now()}`);
@@ -427,15 +427,16 @@ test('background rejects default capture from a ChatGPT tab and opens the panel 
   mock.source.active = false;
   mock.chat.active = true;
   const result = await send({ type: 'SIDER_CAPTURE', kind: 'page' });
-  assert.equal(result.ok, false);
-  assert.match(result.error, /切回/);
+  assert.equal(result.ok, true, result.error);
+  assert.equal(mock.sent.find(item => item.message.type === 'SIDER_PAGE_CAPTURE').tabId, mock.chat.id);
   mock.source.active = true;
   mock.chat.active = false;
+  const shortcutStart = mock.sent.length;
   mock.api.commands.onCommand.emit('capture-selection', mock.source);
   assert.equal(mock.opened.length, 1);
   // Waiting on the same source queue flushes the shortcut and its source sync.
   await send({ type: 'SIDER_TAB_CONTEXT_GET', tabId: 1 });
-  assert.equal(mock.sent.find(item => item.message.type.startsWith('SIDER_PAGE_')).message.type, 'SIDER_PAGE_SELECTION_GET');
+  assert.equal(mock.sent.slice(shortcutStart).find(item => item.message.type.startsWith('SIDER_PAGE_')).message.type, 'SIDER_PAGE_SELECTION_GET');
   await new Promise((resolve) => setTimeout(resolve, 10));
   const before = mock.sent.length;
   const previousURL = mock.source.url;
@@ -468,8 +469,12 @@ test('toolbar actions open the panel synchronously and prepare the invoked sourc
   assert.ok(mock.panelOptions.some(options => options.tabId == null && options.enabled === false));
   assert.equal(mock.sent.at(-1).tabId, 1);
   mock.api.action.onClicked.emit(mock.chat);
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(pageInjections().length, 1); // The AI tab gets only a launcher, never source collection.
+  assert.deepEqual(mock.opened.at(-1), { tabId: mock.chat.id });
+  const aiContext = await new Promise(resolve => listener({ type: 'SIDER_TAB_CONTEXT_GET', tabId: mock.chat.id }, sender, resolve));
+  assert.equal(aiContext.ok, true, aiContext.error);
+  assert.equal(aiContext.context.url, mock.chat.url);
+  assert.equal(pageInjections().length, 2);
+  assert.equal(pageInjections()[1].target.tabId, mock.chat.id);
   assert.ok(mock.injections.some(item => item.target.tabId === mock.chat.id && item.files.includes('launcher-content.js')));
 });
 
