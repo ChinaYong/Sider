@@ -29,19 +29,22 @@ Sider 是一个 Chromium 浏览器扩展，把 ChatGPT、Gemini、Claude 等原�
 - 完整正文
 - 附件文件名
 - 当前预设名称
-![image](README-img-01.png)
+
+<img src="README-img-01.png" alt="提示词预设变量" width="360">
 
 #### 其他相关预设功能：
 - 支持预设点击直接发送，常用于总结网页
 - 支持预设默认选中，自动附加网页信息
 - 支持引用其他浏览器标签页（屏蔽了一些页面）
-![image](README-img-03.png)
+
+<img src="README-img-03.png" alt="预设与标签页引用" width="360">
 
 ### 其他功能
 - 更换字体
 - 悬浮球（仅用于开关扩展）
 - 其他功能可自行探索
-![image](README-img-02.png)
+
+<img src="README-img-02.png" alt="扩展功能设置" width="360">
 
 ## 效果
 ![image](README-img-04.png)
