@@ -541,6 +541,42 @@ test('the ChatGPT child receives its bound bridge over the transferred MessagePo
   assert.equal(f.frameMessages.length, 0);
 });
 
+test('embedded loading diagnostics require the owning frame and remain bounded without reloading it', async t => {
+  const f = await fixture(t); await f.resolve(0, { ok: true, compatibility: true });
+  const frame = f.document.querySelector('iframe'), before = frame.src;
+  const diagnostic = { event: 'error', documentId: 'diagnostic-document-0001', error: 'chunk-load', message: 'private-error-secret' };
+  const send = patch => f.window.dispatchEvent(new f.window.MessageEvent('message', { origin: 'https://chatgpt.com', source: frame.contentWindow, data: { type: 'SIDER_EMBED_DIAGNOSTIC', diagnostic }, ...patch }));
+  send({ source: f.window }); send({ origin: 'https://other.example' });
+  f.document.querySelector('#diagnostics-toggle').click();
+  assert.doesNotMatch(f.document.querySelector('#diagnostics-text').textContent, /chunk-load/);
+  f.document.querySelector('#close-diagnostics').click();
+  for (let i = 0; i < 100; i++) send({});
+  f.document.querySelector('#diagnostics-toggle').click();
+  const output = f.document.querySelector('#diagnostics-text').textContent;
+  assert.match(output, /chunk-load/); assert.doesNotMatch(output, /private-error-secret/);
+  assert.equal(output.split('\n').filter(line => line.startsWith('{')).length, 40);
+  assert.equal(frame.src, before); assert.equal(f.frameMessages.length, 0);
+});
+
+test('a pre-editor ChatGPT reload storm is paused once, retains diagnostics and requires an explicit retry', async t => {
+  const f = await fixture(t); await f.resolve(0, { ok: true, compatibility: true });
+  const frame = f.document.querySelector('iframe'), before = frame.src;
+  const send = i => f.window.dispatchEvent(new f.window.MessageEvent('message', { origin: 'https://chatgpt.com', source: frame.contentWindow, data: { type: 'SIDER_EMBED_DIAGNOSTIC', diagnostic: { event: 'document-start', documentId: 'reloading-document-' + i, navigation: 'reload', httpStatus: 200, page: 'other' } } }));
+  for (let i = 0; i < 5; i++) send(i);
+  assert.equal(frame.src, before); send(5);
+  assert.equal(frame.src, 'about:blank'); assert.equal(frame.hidden, true);
+  assert.match(f.document.querySelector('#loading-title').textContent, /反复重载/);
+  assert.match(f.document.querySelector('#diagnostics-text').textContent, /reload-storm-paused/);
+  const calls = f.calls.length;
+  f.ports[0].receive({ type: 'SIDER_ENHANCEMENT_READY', bridgeId: f.calls[0].message.bridgeId });
+  assert.equal(f.calls.length, calls, 'late status notifications cannot restart a paused frame');
+  f.document.querySelector('#retry-embed').click(); await settle();
+  await f.resolve(f.calls.length - 1, { ok: true, compatibility: true });
+  assert.equal(frame.src, before); assert.equal(frame.hidden, false);
+  for (let i = 0; i < 5; i++) send(i + 10);
+  assert.equal(frame.src, before, 'explicit retry starts a fresh guard');
+});
+
 test('a fully navigated ChatGPT document can request the bridge again without a URL parameter', async t => {
   const f = await fixture(t);
   await f.resolve(0, { ok: true, compatibility: true });

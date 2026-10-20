@@ -13,6 +13,17 @@
   "side_panel": {"default_path": "panel.html"},
   "content_scripts": [{
     "matches": ["https://chatgpt.com/*"],
+    "js": ["embed-startup-main.js"],
+    "world": "MAIN",
+    "run_at": "document_start",
+    "all_frames": true
+  }, {
+    "matches": ["https://chatgpt.com/*"],
+    "js": ["embed-diagnostics-content.js"],
+    "run_at": "document_start",
+    "all_frames": true
+  }, {
+    "matches": ["https://chatgpt.com/*"],
     "js": ["file-drop-main.js"],
     "world": "MAIN",
     "run_at": "document_start",

@@ -8,14 +8,33 @@ import { composeTemplatePrompt } from '../../src/context.js';
 import { chromium } from './browser.js';
 const tlsDelay = 1250;
 const tlsRequests = [];
+let reloadFixture = false;
+let sessionCookieFixture = false;
+const sessionCookieRequests = [];
+const sessionCookieHTML = `<!doctype html><html><head><title>ChatGPT session-cookie fixture</title><script id="client-bootstrap" type="application/json">${JSON.stringify({ sessionCookieContext: { epoch: 'fixture-epoch', account: 'fixture-workspace' } })}</script></head><body><template id="fixture-editor"><main><form><div data-composer-body><textarea id="prompt-textarea" aria-label="Ask ChatGPT"></textarea></div><button type="button" data-testid="send-button" aria-label="Send prompt">Send</button></form></main></template><script>
+const nativeCookies=Object.getOwnPropertyDescriptor(Document.prototype,'cookie').get.call(document);
+window.nativeMarkersHidden=!nativeCookies.includes('oai-client-session-epoch=')&&!nativeCookies.includes('_account=');
+const cookies=document.cookie;
+window.cookieCompatibilityMatched=cookies.includes('oai-client-session-epoch=fixture-epoch')&&cookies.includes('_account=fixture-workspace');
+if(!window.cookieCompatibilityMatched)location.reload();else {document.body.append(document.querySelector('template').content.cloneNode(true));document.querySelector('#client-bootstrap').remove();window.cookieCompatibilityAfterHydration=document.cookie.includes('oai-client-session-epoch=fixture-epoch')&&document.cookie.includes('_account=fixture-workspace')}
+</script></body></html>`;
 const interactionProbe = `<script>window.fixtureClicks=[];for(const type of ['pointerdown','pointerup','click','submit'])document.addEventListener(type,event=>fixtureClicks.push({type,target:event.target.tagName,id:event.target.id,label:event.target.getAttribute('aria-label'),trusted:event.isTrusted,prevented:event.defaultPrevented}),true);</script>`;
 const fixture = `<!doctype html><html lang="zh-CN"><head><title>ChatGPT current-page context fixture</title><style>html,body{margin:0;font:14px system-ui;background:white;color:#222}header{padding:12px 16px;border-bottom:1px solid #ddd}main{padding:14px;min-height:680px;display:flex;flex-direction:column;justify-content:center}.shell{border:1px solid #ddd;border-radius:18px;padding:12px}form{margin:0}textarea{display:block;width:100%;min-height:70px;box-sizing:border-box;resize:vertical;border:0;background:#fafafa;font:inherit}button{font:inherit}.native-controls{display:flex;justify-content:flex-end;margin-top:8px}#result{white-space:pre-wrap;font-size:11px;overflow-wrap:anywhere;max-height:110px;overflow:auto}</style></head><body><header>ChatGPT</header><main><div class="shell"><form><div data-composer-body><textarea id="prompt-textarea" aria-label="Ask ChatGPT"></textarea></div><div class="native-controls"><button type="submit" data-testid="send-button" aria-label="Send prompt">发送</button></div></form></div><p id="result"></p></main><script>window.sent=[];window.nativeKeys=[];const form=document.querySelector('form');const input=document.querySelector('textarea');form.addEventListener('submit',event=>{event.preventDefault();sent.push(input.value);document.querySelector('#result').textContent='fixture received: '+input.value});input.addEventListener('keydown',event=>{nativeKeys.push({key:event.key,isComposing:event.isComposing,isTrusted:event.isTrusted,shiftKey:event.shiftKey});if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();form.requestSubmit(document.querySelector('[data-testid="send-button"]'))}});</script></body></html>`;
 const tls = createHttpsServer({ key: await readFile('tests/browser/fixtures/test-key.pem'), cert: await readFile('tests/browser/fixtures/test-cert.pem') }, (req, res) => {
   tlsRequests.push(req.url);
+  if (req.url.startsWith('/cdn/assets/__sider_reload_fixture__.js')) {
+    res.writeHead(200, { 'content-type': 'text/javascript' });
+    res.end('setTimeout(function repeatStartup(){location.reload()},80);');
+    return;
+  }
   setTimeout(() => {
     if (res.destroyed) return;
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': "frame-ancestors 'none'; script-src 'unsafe-inline'", 'x-frame-options': 'DENY' });
-    if (req.url.startsWith('/nested-fixture')) res.end('<!doctype html><title>Nested ChatGPT fixture</title><main><p>嵌套 ChatGPT 框架，不应安装侧栏增强层。</p></main>');
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': "frame-ancestors 'none'; script-src 'self' 'unsafe-inline'", 'x-frame-options': 'DENY' });
+    if (sessionCookieFixture) {
+      sessionCookieRequests.push({ epoch: Boolean(req.headers.cookie?.includes('oai-client-session-epoch=fixture-epoch')), account: Boolean(req.headers.cookie?.includes('_account=fixture-workspace')) });
+      res.end(sessionCookieHTML);
+    } else if (reloadFixture) res.end('<!doctype html><title>Reloading startup fixture</title><main>Starting</main><script src="/cdn/assets/__sider_reload_fixture__.js"></script>');
+    else if (req.url.startsWith('/nested-fixture')) res.end('<!doctype html><title>Nested ChatGPT fixture</title><main><p>嵌套 ChatGPT 框架，不应安装侧栏增强层。</p></main>');
     else res.end(fixture.replace('</main>', '<iframe id="nested-chatgpt" title="Nested ChatGPT fixture" src="/nested-fixture" hidden></iframe></main>') + interactionProbe);
   }, tlsDelay);
 });
@@ -38,10 +57,10 @@ function checked(message) { checks.push(message); console.log(`PASS ${message}`)
 function collectPage(page, label) {
   if (observedPages.has(page)) return observedPages.get(page);
   const ready = (async () => {
-    page.on('console', event => { if (event.type() === 'error') consoleErrors.push(`${label}: ${event.text()}`); });
+    page.on('console', event => { if (event.type() === 'error' && !event.text().includes('__sider_diagnostic_fixture__')) consoleErrors.push(`${label}: ${event.text()}`); });
     page.on('pageerror', error => consoleErrors.push(`${label}: ${error.message}`));
     const session = await context.newCDPSession(page);
-    session.on('Log.entryAdded', ({ entry }) => cdpLogs.push({ label, level: entry.level, source: entry.source, text: entry.text, url: entry.url }));
+    session.on('Log.entryAdded', ({ entry }) => { if (!entry.text.includes('__sider_diagnostic_fixture__')) cdpLogs.push({ label, level: entry.level, source: entry.source, text: entry.text, url: entry.url }); });
     await session.send('Log.enable');
     return session;
   })();
@@ -112,6 +131,26 @@ try {
     assert.equal(pendingFrameURL, 'about:blank', 'Delayed HTTPS response must keep the initial iframe at about:blank long enough to exercise the race');
     const chat = panel.frameLocator('iframe');
     await chat.locator('#sider-enhancement').waitFor({ timeout: 15000 });
+    if (key === 'a') {
+      // Exercise the real MAIN/ISOLATED handshake with an intentional, caught
+      // route-import error. Only this explicit fixture marker is ignored above.
+      await chat.locator('body').evaluate(() => {
+        console.error('Error loading route module `/cdn/assets/__sider_diagnostic_fixture__.js`, reloading page...');
+        const error = new TypeError('Cannot read properties of undefined (reading "__sider_diagnostic_fixture__")');
+        error.stack = 'TypeError\n at https://chatgpt.com/cdn/assets/__sider_diagnostic_fixture__.js:1:123';
+        console.error(error);
+      });
+      await panel.locator('#diagnostics-toggle').click();
+      await assertEventually(async () => {
+        const trace = await panel.locator('#diagnostics-text').textContent();
+        assert.match(trace, /"event":"document-start"/);
+        assert.match(trace, /"event":"dom-ready"/);
+        assert.match(trace, /"page":"editor"/);
+        assert.match(trace, /"event":"route-import-error"/);
+        assert.match(trace, /"error":"null-property","errorName":"TypeError","script":"__sider_diagnostic_fixture__.js","line":1,"column":123/);
+      });
+      await panel.locator('#close-diagnostics').click();
+    }
     panels[key] = { page: panel, chat, editor: chat.getByRole('textbox', { name: 'Ask ChatGPT' }) };
   }
   checked('1250 ms HTTPS response delay exercises initial about:blank frames and all three enhancement layers connect');
@@ -356,6 +395,42 @@ try {
   assert.equal(await panels.a.chat.locator('body').evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   checked('settled 320 px layout with template entry, long selection, URL and body chips keeps cancel/settings/native send controls in bounds');
   }
+  reloadFixture = true;
+  const stormPanel = await context.newPage();
+  await stormPanel.goto(`chrome-extension://${extensionId}/panel.html?sourceTab=${sourceTabIds.a}`, { waitUntil: 'domcontentloaded' });
+  await stormPanel.locator('#connection-status').filter({ hasText: '重复重载，已暂停' }).waitFor({ timeout: 20000 });
+  const stormTrace = await stormPanel.locator('#diagnostics-text').textContent();
+  assert.match(stormTrace, /startup-probe-ready/);
+  assert.match(stormTrace, /"event":"navigation-request","documentId":.*"navigation":"reload"/);
+  assert.match(stormTrace, /"initiator":"site-module","script":"__sider_reload_fixture__.js"/);
+  assert.match(stormTrace, /reload-storm-paused/);
+  assert.equal(await stormPanel.locator('iframe').getAttribute('src'), 'about:blank');
+  reloadFixture = false;
+  await stormPanel.locator('#retry-embed').click();
+  await stormPanel.frameLocator('iframe').locator('#sider-enhancement').waitFor({ timeout: 15000 });
+  await stormPanel.locator('#connection-status').filter({ hasText: '网页引用已就绪' }).waitFor();
+  await stormPanel.close();
+  checked('repeated pre-editor reloads expose their initiating script, pause before runaway allocation, retain diagnostics and recover only on explicit retry');
+  await context.addCookies([
+    { name: 'oai-client-session-epoch', value: 'fixture-epoch', domain: 'chatgpt.com', path: '/', secure: true, sameSite: 'Lax' },
+    { name: '_account', value: 'fixture-workspace', domain: 'chatgpt.com', path: '/', secure: true, sameSite: 'Lax' },
+  ]);
+  sessionCookieFixture = true;
+  const sessionPanel = await context.newPage();
+  await sessionPanel.goto(`chrome-extension://${extensionId}/panel.html?sourceTab=${sourceTabIds.a}`, { waitUntil: 'domcontentloaded' });
+  const sessionChat = sessionPanel.frameLocator('iframe');
+  await sessionChat.locator('#sider-enhancement').waitFor({ timeout: 15000 });
+  assert.deepEqual(await sessionChat.locator('body').evaluate(() => ({ nativeHidden: window.nativeMarkersHidden, matched: window.cookieCompatibilityMatched, afterHydration: window.cookieCompatibilityAfterHydration })), { nativeHidden: true, matched: true, afterHydration: true });
+  assert.deepEqual(sessionCookieRequests, [{ epoch: true, account: true }], 'SameSite markers reach the network but are hidden from native document.cookie');
+  await sessionPanel.locator('#diagnostics-toggle').click();
+  assert.match(await sessionPanel.locator('#diagnostics-text').textContent(), /"event":"session-cookie-compat".*"epochFallback":true,"accountFallback":true/);
+  await sessionPanel.locator('#close-diagnostics').click();
+  await sessionChat.locator('textarea').fill('keep the native draft');
+  assert.equal(await sessionChat.locator('textarea').inputValue(), 'keep the native draft');
+  const nativeMarkers = (await context.cookies('https://chatgpt.com/')).filter(cookie => ['oai-client-session-epoch', '_account'].includes(cookie.name));
+  assert.ok(nativeMarkers.every(cookie => cookie.sameSite === 'Lax'), 'compatibility must not weaken cookie attributes');
+  await sessionPanel.close(); sessionCookieFixture = false;
+  checked('real SameSite=Lax markers sent to the extension iframe but hidden from native document.cookie use only bootstrap consistency markers, load once and preserve browser cookies and draft');
   const originMismatches = [...consoleErrors, ...cdpLogs.map(entry => entry.text)].filter(text => /postMessage.*(?:origin|DOMWindow)|target origin.*does not match|recipient window.?s origin/i.test(text));
   assert.deepEqual(originMismatches, [], 'No browser CDP Log, console, or page error may report a DOMWindow target origin mismatch');
   assert.deepEqual(consoleErrors, []);

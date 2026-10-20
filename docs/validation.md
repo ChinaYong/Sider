@@ -1,3 +1,12 @@
+# ChatGPT 会话标记兼容与重载保护（0.7.2）
+
+2026-10-20（Asia/Shanghai）。Tabbit 的 ChatGPT 侧栏在输入框出现前约每 0.44 秒重新加载一次，最终 V8 OOM 灰屏；Gemini 正常。真实导航栈定位到 ChatGPT 官方模块 `204542.2daca31a84.js:219:17381`：会话检查比较 `client-bootstrap.sessionCookieContext` 与 `document.cookie` 中的 `oai-client-session-epoch`、`_account`，不一致时执行退出并重载。Chrome 对扩展内嵌网页的网络请求与 JavaScript Cookie 读取采用不同的 SameSite 规则，导致服务端收到标记而页面脚本读不到，持续触发校验。参见 [Chrome 官方说明](https://developer.chrome.com/docs/extensions/develop/concepts/storage-and-cookies)。
+
+- 仅在 Sider 直接内嵌 ChatGPT 文档中，启动时补足这两个不可见标记的脚本读取视图，值来自当前页面已提供的启动数据；不修改真实 Cookie、SameSite 属性或浏览器设置，不读取 HttpOnly Cookie，不补充其他登录凭据。保留真实可见值和可见的不一致；原生写入仍交给浏览器，写入这两个标记会使旧快照失效。只缓存标记字段，页面移除启动脚本后仍保持当前文档一致性。
+- 增加有界启动诊断：文档生命周期、HTTP 状态、堆采样、错误类别和导航发起的公开模块／行列号。每个文档最多 12 条生命周期报告、4 条全局错误、4 条启动控制台错误及 4 条导航，侧栏内存保留最近 40 条；不记录 Cookie 值、对话、草稿、标题、完整网址或错误原文。遇到输入框出现前 10 秒内 6 个成功响应的重载文档时暂停异常 iframe，保留连接信息并提供手动重试／原站入口。已出现编辑器或增强层已就绪的页面不会被此保护卸载。
+- `npm run check`：796 项单测与构建通过。`context` 隔离 Chromium 148.0.7778.96 的 17 条浏览器检查通过，覆盖真实 MAIN／ISOLATED 协作、主动自重载页面的发起栈／暂停／显式重试，以及 SameSite=Lax 标记实际随网络发送却被原生 document.cookie 隐藏的场景。兼容后页面只请求一次，启动脚本移除后保持一致，浏览器 Cookie 属性及原生草稿保留；原有导航、引用和发送回归通过。只过滤带明确测试标记的两条预期控制台错误，无意外页面、控制台或 CDP 日志错误。
+- 用户在重新加载新 `dist` 并重开原生侧栏后确认“已正常加载”。这确认了真实账号 ChatGPT 加载恢复；本轮未向真实 ChatGPT 发送测试消息。单测和浏览器日志为 `tmp/chatgpt-final-check.log`、`tmp/chatgpt-session-unit.log`、`tmp/chatgpt-diagnostics-browser.log`，详细诊断摘要为 `tmp/chatgpt-crash-diagnosis.md`。没有变更版本号或推送发布。
+
 # AI 网站划词性能（0.7.2）
 
 2026-10-19（Asia/Shanghai）。手动引用 AI 标签页后，长 ChatGPT 对话划词卡顿。短页面功能检查未覆盖这一负载；原 `captureSelection()` 每次构建整页逐字符定位索引并克隆公共段落，`selectionchange` 同步采集与侧栏轮询反复执行，开销随整页历史增长。

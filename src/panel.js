@@ -4,6 +4,7 @@ import { installConfigurationUI } from './configuration-ui.js';
 import { installLauncherSettingsUI } from './launcher-settings-ui.js';
 import { installFontSettingsUI } from './font-settings-ui.js';
 import { createMotion, installDialogMotion } from './motion.js';
+import { createEmbedReloadGuard, normalizeEmbedDiagnostic } from './embed-diagnostics.js';
 
 const $ = selector => document.querySelector(selector);
 const motion = createMotion(window);
@@ -27,7 +28,14 @@ let activeAISettings = normalizeAIWebSettings();
 let loadedSite = null;
 let loadedAISettings = null;
 let pendingSendPicker;
+let embedPaused = false;
+let reloadGuard = createEmbedReloadGuard();
 const diagnostics = { version: globalThis.chrome?.runtime?.getManifest?.().version || '0.4.0', sourceTabId, browser: navigator.userAgent, stage: '启动', rule: false, connected: false, enhancementReady: false };
+const frameTrace = [];
+function traceFrame(event, detail = {}) {
+  frameTrace.push({ at: new Date().toISOString(), event, ...detail });
+  if (frameTrace.length > 40) frameTrace.shift();
+}
 
 function showToast(text) {
   clearTimeout(toastTimer);
@@ -87,7 +95,8 @@ function status(text, kind = '', detail = text) {
 }
 
 function renderDiagnostics() {
-  $('#diagnostics-text').textContent = Object.entries(diagnostics).map(([key, value]) => `${key}: ${value}`).join('\n');
+  $('#diagnostics-text').textContent = Object.entries(diagnostics).map(([key, value]) => `${key}: ${value}`).join('\n')
+    + '\nframeTrace:\n' + frameTrace.map(entry => JSON.stringify(entry)).join('\n');
 }
 
 function failed(error) {
@@ -146,6 +155,7 @@ function connectLifecycle() {
       void chrome.runtime.lastError;
       if (lifecycle !== port || disposed) return;
       lifecycle = null;
+      traceFrame('background-disconnected');
       clearInterval(heartbeat);
       timer = setTimeout(async () => {
         try {
@@ -158,7 +168,7 @@ function connectLifecycle() {
 }
 
 async function poll(run, startedAt) {
-  if (disposed || run !== generation) return;
+  if (disposed || embedPaused || run !== generation) return;
   try {
     const result = await request({ type: 'SIDER_EMBED_STATUS_GET', bridgeId });
     if (run !== generation) return;
@@ -176,6 +186,7 @@ async function poll(run, startedAt) {
       if (!result.enhancementReady && result.enhancementDetail) enhancementUnavailable(result.enhancementDetail);
     }
     if (result.enhancementReady) {
+      reloadGuard.ready();
       delete diagnostics.warning;
       renderDiagnostics();
       return;
@@ -199,6 +210,8 @@ async function poll(run, startedAt) {
 }
 
 async function start() {
+  embedPaused = false;
+  reloadGuard = createEmbedReloadGuard();
   pendingSendPicker?.cancel();
   if (!isExtension) {
     status('需要安装浏览器扩展');
@@ -244,6 +257,7 @@ async function start() {
     frame.hidden = false;
     // Show the site's first paint without waiting for load or the document-idle bridge.
     const url = new URL(activeSite.url); url.searchParams.set('sider_bridge', bridgeId);
+    traceFrame('navigation-requested');
     frame.src = url.href;
     loadedSite = structuredClone(activeSite);
     loadedAISettings = structuredClone(activeAISettings);
@@ -260,9 +274,34 @@ $('#chatgpt-frame').addEventListener('load', () => {
   pendingSendPicker?.cancel();
   const frame = $('#chatgpt-frame');
   if (!frame.hasAttribute('src') || frame.contentDocument?.URL === 'about:blank') return;
+  traceFrame('frame-load');
   clearTimeout(timer);
   void poll(++generation, Date.now());
 });
+function pauseReloadStorm() {
+  if (embedPaused) return;
+  embedPaused = true;
+  generation++;
+  clearTimeout(timer);
+  traceFrame('reload-storm-paused');
+  diagnostics.stage = `${activeSite.name} 启动时重复重载，已暂停`;
+  diagnostics.connected = false;
+  diagnostics.enhancementReady = false;
+  delete diagnostics.warning;
+  const detail = 'ChatGPT 在输入框出现前连续重载，内存会持续增长。Sider 已暂停这个异常页面；可重试连接，或先在原站标签页使用。连接信息已保留在右上角“⋯”中。';
+  diagnostics.error = detail;
+  status('ChatGPT 重复重载，已暂停', 'failed', detail);
+  const frame = $('#chatgpt-frame');
+  frame.hidden = true;
+  frame.src = 'about:blank';
+  $('#loading-screen').removeAttribute('data-inline');
+  $('#loading-title').textContent = 'ChatGPT 在启动时反复重载';
+  $('#loading-detail').textContent = detail;
+  $('#loading-symbol').hidden = true;
+  $('#recovery-actions').hidden = false;
+  $('#loading-screen').hidden = false;
+  renderDiagnostics();
+}
 $('#retry-embed').addEventListener('click', start);
 $('#reload-chatgpt').addEventListener('click', start);
 $('#ai-settings-updated').addEventListener('click', start);
@@ -280,6 +319,15 @@ $('#copy-diagnostics').addEventListener('click', async () => {
 });
 window.addEventListener('message', async event => {
   if (!isExtension || disposed || event.origin !== (loadedSite || activeSite).origin || event.source !== $('#chatgpt-frame').contentWindow) return;
+  if (event.data?.type === 'SIDER_EMBED_DIAGNOSTIC') {
+    const diagnostic = normalizeEmbedDiagnostic(event.data.diagnostic);
+    if (diagnostic) {
+      traceFrame('document', diagnostic);
+      if (!embedPaused && (loadedSite || activeSite).id === 'chatgpt' && reloadGuard.observe(diagnostic, Date.now())) pauseReloadStorm();
+      if ($('#diagnostics-dialog').open) renderDiagnostics();
+    }
+    return;
+  }
   if (event.data?.type === 'SIDER_EMBED_HELLO_REQUEST') {
     // The child starts this exchange only after a ChatGPT document exists.
     // Reply through its port: a WindowProxy can change origin during navigation.
