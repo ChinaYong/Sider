@@ -84,7 +84,7 @@ export function createGeminiAttachmentDriver(document, adapter) {
   }
   const hasVisible = (card, selector) => { const scope = statusScope(card); return [scope, ...scope.querySelectorAll(selector)].some(node => node.matches(selector) && visible(node)); };
   return {
-    siteName: adapter.site.name, findComposer: () => adapter.findComposer(), sessionKey: () => adapter.sessionKey(), cards, namesCard, removeButton,
+    siteName: adapter.site.name, findComposer: () => adapter.findComposer(), sessionKey: editor => adapter.sessionKey(editor), cards, namesCard, removeButton,
     composerScope(_document, editor, options) {
       const scope = scopeFor(editor);
       if (entryDropAvailable(document, editor)) return { scope, input: null };

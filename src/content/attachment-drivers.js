@@ -41,7 +41,7 @@ export function createNativeAttachmentDriver(document, adapter) {
     throw new Error('没有找到可用的原站正文附件上传入口。');
   }
   return {
-    siteName: adapter.site.name, findComposer: () => adapter.findComposer(), sessionKey: () => adapter.sessionKey(), composerScope: (_document, editor) => findScope(editor), cards, namesCard, removeButton,
+    siteName: adapter.site.name, findComposer: () => adapter.findComposer(), sessionKey: editor => adapter.sessionKey(editor), composerScope: (_document, editor) => findScope(editor), cards, namesCard, removeButton,
     available() { try { const editor = adapter.findComposer(); return Boolean(editor && findScope(editor)); } catch { return false; } },
     failed(card) { return Boolean(card.matches(FAILURE) || card.querySelector(FAILURE) || [...card.querySelectorAll('button')].some(button => /^(retry upload|retry attachment|重试上传|重试附件)$/i.test(button.getAttribute('aria-label') || ''))); },
     failureDetail(card) { return attachmentFailureDetail(card, FAILURE); },

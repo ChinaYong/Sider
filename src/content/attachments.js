@@ -1,4 +1,4 @@
-import { findComposer } from './composer.js';
+import { findComposer, isComposerObscuredByModal, isChatGPTFilePreview } from './composer.js';
 
 const AREA = '[data-composer-attachments]';
 const CARD = '[class~="group/composer-attachment"]';
@@ -109,7 +109,9 @@ function createSingleAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT, 
   const notify = () => { for (const listener of [...listeners]) listener(); };
   const sameSession = record => {
     if (record.invalidSession) return false;
-    const current = record.href === view.location.href && record.editor === locateComposer() && record.scope.isConnected && (!driver?.sessionKey || record.session === driver.sessionKey());
+    const current = record.href === view.location.href && record.scope.isConnected && record.scope.contains(record.editor)
+      && (record.editor === locateComposer() || isComposerObscuredByModal(record.editor))
+      && (!driver?.sessionKey || record.session === driver.sessionKey(record.editor));
     // Once a navigation/replacement was observed, returning to the same URL
     // cannot make a new user attachment part of the retired upload again.
     if (!current) record.invalidSession = true;
@@ -135,6 +137,9 @@ function createSingleAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT, 
   }
 
   function state(record) {
+    // A full-screen viewer may detach the composer subtree. Recheck ownership
+    // after it closes, without permanently retiring the upload during preview.
+    if (record && !record.retiring && !driver && isChatGPTFilePreview(document)) return { ready: false, name: record.spec.name, invalidated: false, removed: false };
     if (!record || record.retiring || !sameSession(record)) return { ready: false, name: record?.spec.name || '', invalidated: Boolean(record), removed: Boolean(record?.seen && !record.card?.isConnected) };
     try {
       const card = locate(record);
@@ -255,6 +260,7 @@ function createSingleAttachmentManager(document, { timeoutMs = DEFAULT_TIMEOUT, 
       if (signal?.aborted || !isCurrent()) throw new Error('问题或引用已修改，正文附件准备已取消，请重新发送。');
     };
     assertCurrent();
+    if ((!driver && isChatGPTFilePreview(document)) || (active && isComposerObscuredByModal(active.editor))) throw new Error(`原站预览或弹窗暂时遮挡了 ${siteName} 输入框，请关闭后重试。`);
     if (active && !active.retiring && sameSpec(active.logicalSpec, spec) && sameSession(active) && !state(active).invalidated) {
       const record = active;
       await record.promise;

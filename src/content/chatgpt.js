@@ -14,6 +14,7 @@ import { installGeminiDefaults } from './gemini-defaults.js';
   let reconnect;
   let enhancement;
   let enhancementReady = false;
+  let enhancementSuspended = false;
   let enhancementDetail = '';
   let site = siteForURL(location.href);
   let siteConfirmed = false;
@@ -38,14 +39,14 @@ import { installGeminiDefaults } from './gemini-defaults.js';
   function announce() {
     try {
       bridge?.postMessage({ type: 'SIDER_CHAT_READY', embedded: isEmbedded(), bridgeId, siteId: site?.id });
-      bridge?.postMessage({ type: 'SIDER_ENHANCEMENT_READY', bridgeId, ready: enhancementReady, detail: enhancementDetail });
+      bridge?.postMessage({ type: 'SIDER_ENHANCEMENT_READY', bridgeId, ready: enhancementReady, suspended: enhancementSuspended, detail: enhancementDetail });
     } catch {}
   }
 
   function enhance() {
     if (!isEmbedded() || !bridgeId || !site || !siteConfirmed || enhancement) return;
-    enhancement = installEnhancement({ document, chrome, bridgeId, adapter: createWebAdapter(document, site), onReady({ ready, detail = '' }) {
-      enhancementReady = ready; enhancementDetail = detail; announce();
+    enhancement = installEnhancement({ document, chrome, bridgeId, adapter: createWebAdapter(document, site), onReady({ ready, suspended = false, detail = '' }) {
+      enhancementReady = ready; enhancementSuspended = suspended; enhancementDetail = detail; announce();
     } });
   }
 

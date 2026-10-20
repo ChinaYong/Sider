@@ -771,6 +771,19 @@ test('changing enhancement readiness notifies only the bound panel and disconnec
   assert.equal((await f.send({ type: 'SIDER_EMBED_STATUS_GET', bridgeId: f.bridge(1) })).connected, false);
 });
 
+test('file preview suspension is bound to its panel and clears on recovery or frame disconnection', async () => {
+  const f = await fixture(); await f.register(1); await f.register(2);
+  const first = await f.connectPanel(1), second = await f.connectPanel(2), chat = await f.connect(1);
+  await chat.port.onMessage.emit({ type: 'SIDER_ENHANCEMENT_READY', bridgeId: f.bridge(1), ready: false, suspended: true, detail: '正在预览文件' });
+  assert.equal(first.messages.at(-1).suspended, true); assert.deepEqual(second.messages, []);
+  assert.equal((await f.send({ type: 'SIDER_EMBED_STATUS_GET', bridgeId: f.bridge(1) })).enhancementSuspended, true);
+  await chat.port.onMessage.emit({ type: 'SIDER_ENHANCEMENT_READY', bridgeId: f.bridge(1), ready: true });
+  assert.equal(first.messages.at(-1).suspended, false);
+  await chat.port.onMessage.emit({ type: 'SIDER_ENHANCEMENT_READY', bridgeId: f.bridge(1), ready: false, suspended: true });
+  await chat.port.onDisconnect.emit();
+  assert.equal(first.messages.at(-1).suspended, false);
+});
+
 test('a previous website cannot publish readiness after the same panel changes its origin', async () => {
   const f = await fixture(); await f.register(1); const panel = await f.connectPanel(1), chat = await f.connect(1);
   const switched = await f.send({ type: 'SIDER_EMBED_REGISTER', bridgeId: f.bridge(1), tabId: 1, windowId: 9, siteId: 'claude' });

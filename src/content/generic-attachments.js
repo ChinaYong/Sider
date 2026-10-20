@@ -150,7 +150,7 @@ export function createGenericAttachmentDriver(document, adapter) {
     return statusNodes(card).some(node => PENDING_TEXT.test(node.textContent.trim()));
   }
   return {
-    siteName: adapter.site.name, findComposer: () => adapter.findComposer(), sessionKey: () => adapter.sessionKey(), cards, namesCard,
+    siteName: adapter.site.name, findComposer: () => adapter.findComposer(), sessionKey: editor => adapter.sessionKey(editor), cards, namesCard,
     removeButton: card => removeControl(card),
     composerScope(_document, editor, options) {
       const scope = scopeFor(editor);

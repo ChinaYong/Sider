@@ -798,6 +798,81 @@ test('concurrent body cancellation and upload rejection report cleanup once and 
   assert.deepEqual(f.submitted, ['保留草稿']);
 });
 
+for (const blocked of ['aria-hidden', 'inert']) test(`ChatGPT file preview preserves readiness and preset snapshots behind ${blocked}`, async t => {
+  const states = [];
+  const f = fixture(t, { onReady: state => states.push(state) });
+  await pause(); await f.seed({ attachments: { url: true } });
+  await createTemplate(f, '读 {{title}}');
+  f.editor.value = '原问题'; openTemplates(f);
+  f.click('#pane-body [data-template-id]:not([data-template-id^="preset-"])');
+  await waitUntil(() => f.root.querySelector('[data-chip][data-template-id]:not([data-template-id^="preset-"])')?.title.includes('快照'));
+  const draft = f.editor.value, main = f.editor.closest('main'), anchor = f.api.host.previousElementSibling;
+  const preview = f.window.document.createElement('section');
+  preview.setAttribute('role', 'dialog'); preview.setAttribute('aria-modal', 'true');
+  preview.innerHTML = '<textarea aria-label="File preview">File content</textarea><button>Close</button>';
+  main.after(preview); main.setAttribute(blocked, blocked === 'inert' ? '' : 'true');
+  await pause();
+  assert.equal(f.api.host.hidden, true);
+  assert.ok(states.every(state => state.ready), 'a modal does not disconnect the reference layer');
+  assert.equal(f.api.host.previousElementSibling, anchor, 'never mount on a preview editor');
+  assert.equal(f.editor.value, draft); assert.equal(f.context.attachments.url, true);
+  assert.deepEqual(f.submitted, []);
+  main.removeAttribute(blocked); preview.remove(); await pause();
+  assert.equal(f.api.host.hidden, false);
+  assert.equal(f.root.querySelector('.status').classList.contains('error'), false, f.root.querySelector('.status').textContent);
+  assert.match(f.root.querySelector('[data-chip][data-template-id]:not([data-template-id^="preset-"])').title, /快照/);
+  assert.equal(f.editor.value, draft); assert.ok(states.every(state => state.ready));
+  f.send(); await waitUntil(() => f.submitted.length === 1);
+  assert.ok(f.submitted[0].includes(draft)); assert.match(f.submitted[0], /https:\/\/example.com\/article/);
+});
+
+test('the real ChatGPT app-shell preview suspends references while the composer subtree is detached and restores its snapshots', async t => {
+  const states = [], f = fixture(t, { onReady: state => states.push(state) });
+  await pause(); await f.seed({ attachments: { url: true } }); await createTemplate(f, '读 {{title}}');
+  f.editor.value = '原问题'; openTemplates(f); f.click('#pane-body [data-template-id]:not([data-template-id^="preset-"])');
+  const snapshot = () => f.root.querySelector('[data-chip][data-template-id]:not([data-template-id^="preset-"])');
+  await waitUntil(() => snapshot()?.title.includes('快照'));
+  const draft = f.editor.value, document = f.window.document, main = f.editor.closest('main');
+  const viewer = document.createElement('section');
+  viewer.innerHTML = '<header data-testid="viewer-header" data-viewer-placement="overlay"><button aria-label="Close viewer"></button></header><form><textarea aria-label="Preview editor">File content</textarea><button data-testid="send-button">Send</button></form>';
+  document.body.append(viewer); main.remove(); await pause();
+  assert.equal(states.at(-1).suspended, true); assert.equal(states.at(-1).ready, false);
+  assert.equal(f.api.host.hidden, true); assert.equal(f.api.host.isConnected, false);
+  f.send('keydown', { target: viewer.querySelector('textarea') });
+  assert.deepEqual(f.submitted, []); assert.equal(f.editor.value, draft);
+  document.body.prepend(main); viewer.remove(); await pause();
+  assert.equal(states.at(-1).ready, true); assert.equal(f.api.host.hidden, false);
+  assert.match(snapshot().title, /快照/); assert.equal(f.editor.value, draft);
+  f.send(); await waitUntil(() => f.submitted.length === 1);
+  assert.match(f.submitted[0], /https:\/\/example.com\/article/);
+});
+
+for (const loss of ['removed', 'navigation', 'conversation', 'connection']) test(`a preview cannot mask ${loss} of a ready composer`, async t => {
+  const states = [], f = fixture(t, { onReady: state => states.push(state) });
+  await pause();
+  const document = f.window.document, main = f.editor.closest('main');
+  const preview = document.createElement('section');
+  preview.setAttribute('role', 'dialog'); preview.setAttribute('aria-modal', 'true');
+  main.after(preview); main.setAttribute('aria-hidden', 'true'); await pause();
+  assert.equal(states.at(-1).ready, true);
+  if (loss === 'removed') f.editor.remove();
+  if (loss === 'navigation') f.window.history.pushState({}, '', '/c/other');
+  if (loss === 'conversation') f.editor.setAttribute('data-conversation-id', 'other');
+  if (loss === 'connection') {
+    const alert = document.createElement('div'); alert.setAttribute('role', 'alert');
+    alert.textContent = 'WebSocket connection failed'; preview.append(alert);
+  }
+  f.window.dispatchEvent(new f.window.Event('resize')); await pause();
+  assert.equal(states.at(-1).ready, false);
+  assert.deepEqual(f.submitted, []);
+});
+
+test('a blocked composer without a modal is reported unavailable', async t => {
+  const states = [], f = fixture(t, { onReady: state => states.push(state) });
+  f.editor.closest('main').setAttribute('aria-hidden', 'true'); await pause();
+  assert.equal(states.at(-1).ready, false);
+});
+
 function claudeFixture(t, options = {}) {
   const states = [];
   const f = fixture(t, { site: BUILTIN_AI_SITES[2], ...options, onReady: state => states.push(state) });

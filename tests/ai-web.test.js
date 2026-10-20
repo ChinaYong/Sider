@@ -15,6 +15,19 @@ function fixture(t, html, site = custom()) {
 }
 
 const deepseekSite = custom({ name: 'DeepSeek', url: 'https://chat.deepseek.com/' });
+test('ChatGPT app-shell file previews suspend composer readiness without a dialog or existing editor', t => {
+  const f = fixture(t, '<section><header data-testid="viewer-header" data-viewer-placement="overlay"><button aria-label="Close viewer"></button></header><p>File preview</p></section>', BUILTIN_AI_SITES[0]);
+  assert.equal(f.document.querySelector('[role="dialog"],dialog'), null);
+  assert.equal(f.adapter.availability().reason, 'native-preview');
+  assert.equal(f.adapter.availability().suspended, true);
+  assert.equal(f.adapter.availability().ready, false, 'preview never authorizes a send');
+  f.document.querySelector('section').hidden = true;
+  assert.equal(f.adapter.availability().reason, 'composer-missing', 'hidden viewers do not mask an unavailable editor');
+  f.document.querySelector('section').hidden = false;
+  f.document.querySelector('button').remove();
+  assert.equal(f.adapter.availability().reason, 'composer-missing', 'require the native viewer close control');
+});
+
 const deepseekArrow = '<svg><path d="M8.3125 0.980206C8.66767 1.05312"></path></svg>';
 const deepseekMarkup = `<main><section><div id="shell" style="display:flex;flex-direction:column"><div><textarea></textarea></div><div><div role="button" class="ds-button ds-button--icon">Attach</div><div id="action" role="button" class="ds-button ds-button--primary ds-button--circle ds-button--disabled">${deepseekArrow}</div></div></div></section></main>`;
 function mockArrow(path) {

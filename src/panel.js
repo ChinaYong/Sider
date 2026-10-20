@@ -120,6 +120,7 @@ function failed(error) {
 function enhancementUnavailable(detail) {
   diagnostics.stage = `${activeSite.name} 已连接，网页引用尚未就绪`;
   diagnostics.enhancementReady = false;
+  diagnostics.enhancementSuspended = false;
   diagnostics.warning = `${detail} 可点击右上角 ↻ 重新连接或使用原站入口。`;
   status(`${activeSite.name} · 网页引用未就绪`, 'warning', diagnostics.warning);
   renderDiagnostics();
@@ -174,7 +175,13 @@ async function poll(run, startedAt) {
     if (run !== generation) return;
     diagnostics.rule = Boolean(result.compatibility);
     diagnostics.connected = Boolean(result.connected);
+    const suspended = Boolean(result.connected && result.enhancementSuspended && !result.enhancementReady);
+    if (diagnostics.enhancementReady !== Boolean(result.enhancementReady) || diagnostics.enhancementSuspended !== suspended || diagnostics.enhancementDetail !== (result.enhancementDetail || '')) {
+      traceFrame('enhancement-state', { ready: Boolean(result.enhancementReady), suspended, detail: result.enhancementDetail || '' });
+    }
     diagnostics.enhancementReady = Boolean(result.enhancementReady);
+    diagnostics.enhancementSuspended = suspended;
+    diagnostics.enhancementDetail = result.enhancementDetail || '';
     if (result.connected) {
       hasConnected = true;
       delete diagnostics.warning;
@@ -183,10 +190,13 @@ async function poll(run, startedAt) {
       $('#loading-screen').removeAttribute('data-inline');
       diagnostics.stage = result.enhancementReady ? `${activeSite.name} 与增强层就绪` : `${activeSite.name} 已连接`;
       status(result.enhancementReady ? `${activeSite.name} · 网页引用已就绪` : `${activeSite.name} · 正在准备网页引用`, 'connected');
-      if (!result.enhancementReady && result.enhancementDetail) enhancementUnavailable(result.enhancementDetail);
-    }
-    if (result.enhancementReady) {
-      reloadGuard.ready();
+      if (suspended) {
+        diagnostics.stage = `${activeSite.name} 已连接，正在预览文件`;
+        status(`${activeSite.name} · 文件预览中`, 'connected', result.enhancementDetail);
+      } else if (!result.enhancementReady && result.enhancementDetail) enhancementUnavailable(result.enhancementDetail);
+    } else if (hasConnected) enhancementUnavailable(result.enhancementDetail || 'AI 网页连接已中断。');
+    if (result.enhancementReady || suspended) {
+      if (result.enhancementReady) reloadGuard.ready();
       delete diagnostics.warning;
       renderDiagnostics();
       return;
@@ -197,7 +207,7 @@ async function poll(run, startedAt) {
         failed(`35 秒内没有收到 ${activeSite.name} 网页的连接回执。请检查网络、登录状态及扩展的 ${new URL(activeSite.origin).host} 访问权限。可在右上角“⋯”复制连接信息。`);
         return;
       }
-      enhancementUnavailable('网页引用没有完成加载。');
+      enhancementUnavailable(result.enhancementDetail || '网页引用没有完成加载。');
     } else renderDiagnostics();
     // Give a late enhancement layer time to recover, with fewer background checks.
     if (elapsed < 120000) timer = setTimeout(() => poll(run, startedAt), elapsed > 35000 ? 5000 : 700);

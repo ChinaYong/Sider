@@ -772,12 +772,12 @@ async function restoreEmbeds() {
 
 function embedStatus(bridgeId) {
   const ports = [...chatPorts].filter(entry => entry.bridgeId === bridgeId && entry.reportedEmbedded && embedRegistration(entry.port.sender, bridgeId));
-  return { ok: true, registered: embedRegistrations.has(bridgeId), compatibility: embedRuleInstalled, connected: ports.length > 0, enhancementReady: ports.some(entry => entry.enhancementReady), enhancementDetail: ports.find(entry => entry.enhancementDetail)?.enhancementDetail || '' };
+  return { ok: true, registered: embedRegistrations.has(bridgeId), compatibility: embedRuleInstalled, connected: ports.length > 0, enhancementReady: ports.some(entry => entry.enhancementReady), enhancementSuspended: ports.some(entry => entry.enhancementSuspended), enhancementDetail: ports.find(entry => entry.enhancementDetail)?.enhancementDetail || '' };
 }
 
 function notifyEmbedStatus(bridgeId) {
   const status = embedStatus(bridgeId);
-  try { panelPorts.get(bridgeId)?.postMessage({ type: 'SIDER_ENHANCEMENT_READY', bridgeId, ready: status.enhancementReady, detail: status.enhancementDetail }); } catch {}
+  try { panelPorts.get(bridgeId)?.postMessage({ type: 'SIDER_ENHANCEMENT_READY', bridgeId, ready: status.enhancementReady, suspended: status.enhancementSuspended, detail: status.enhancementDetail }); } catch {}
 }
 
 function registerEmbed(message) {
@@ -902,6 +902,7 @@ chrome.runtime.onConnect.addListener((port) => {
       registerChatFrame(message, port.sender);
     } else if (message?.type === 'SIDER_ENHANCEMENT_READY' && message.bridgeId === entry.bridgeId && entry.reportedEmbedded && embedRegistration(port.sender, entry.bridgeId)) {
       entry.enhancementReady = Boolean(message.ready);
+      entry.enhancementSuspended = Boolean(!message.ready && message.suspended);
       entry.enhancementDetail = typeof message.detail === 'string' ? message.detail.slice(0, 1000) : '';
       notifyEmbedStatus(entry.bridgeId);
     } else if (message?.type === 'SIDER_CHAT_RESULT' && typeof message.requestId === 'string') {

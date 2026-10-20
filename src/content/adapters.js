@@ -1,5 +1,5 @@
 import { BUILTIN_AI_SITES } from '../ai-web.js';
-import { findComposer as findChatGPTComposer, fillComposer, getComposerText, isUsableComposer } from './composer.js';
+import { findComposer as findChatGPTComposer, fillComposer, getComposerText, isUsableComposer, isChatGPTFilePreview } from './composer.js';
 import { createAttachmentManager } from './attachments.js';
 import { createNativeAttachmentDriver } from './attachment-drivers.js';
 import { createGenericAttachmentDriver } from './generic-attachments.js';
@@ -180,16 +180,17 @@ export function createWebAdapter(document, site = BUILTIN_AI_SITES[0]) {
     site, findComposer, findSendButton, findMountAnchor,
     readDraft: getComposerText,
     writeDraft(text, options = {}) { return fillComposer(document, text, options.mode || 'replace', { ...options, locate: findComposer, siteName: site.name }); },
-    sessionKey() { const editor = findComposer(); return `${document.defaultView.location.href}|${editor?.getAttribute('data-conversation-id') || editor?.closest('[data-chat-id]')?.getAttribute('data-chat-id') || ''}`; },
+    sessionKey(editor = findComposer()) { return `${document.defaultView.location.href}|${editor?.getAttribute('data-conversation-id') || editor?.closest('[data-chat-id]')?.getAttribute('data-chat-id') || ''}`; },
     availability() {
+      const connectionDetail = connectionIssue();
+      if (connectionDetail) return { ready: false, detail: connectionDetail, reason: 'site-connection-error' };
+      if (site.adapter === 'chatgpt' && isChatGPTFilePreview(document)) return { ready: false, suspended: true, detail: '正在预览文件，关闭预览后可继续使用网页引用。', reason: 'native-preview' };
       const composer = findComposer();
       if (!composer) return { ready: false, detail: diagnostic, reason: diagnosticReason };
       const send = findSendButton({ includeDisabled: true });
       const sendDetail = diagnostic;
       const sendReason = diagnosticReason;
       if (!findMountAnchor()) return { ready: false, detail: diagnostic, reason: diagnosticReason };
-      const connectionDetail = connectionIssue();
-      if (connectionDetail) return { ready: false, detail: connectionDetail, reason: 'site-connection-error' };
       // Native idle and generation controls replace Send without disconnecting
       // the composer. Custom selectors remain strict about missing send targets.
       const scope = composerRoot(composer);

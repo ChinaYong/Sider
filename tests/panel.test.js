@@ -327,6 +327,30 @@ test('late webpage enhancements recover after a non-blocking timeout warning', a
   assert.ok(![...f.timers.values()].some(timer => timer.delay === 5000));
 });
 
+test('an app-shell file preview is connected and suspended, never a timeout warning, and recovers on close', async t => {
+  const f = await fixture(t); await f.resolve(0, { ok: true, compatibility: true });
+  f.advanceTime(36000);
+  await f.resolve(1, { ok: true, compatibility: true, connected: true, enhancementReady: false, enhancementSuspended: true, enhancementDetail: '正在预览文件，关闭预览后可继续使用网页引用。' });
+  const status = f.document.querySelector('#connection-status');
+  assert.equal(status.className, 'connected'); assert.match(status.textContent, /文件预览中/);
+  assert.doesNotMatch(f.document.querySelector('#diagnostics-text').textContent, /warning:/);
+  assert.ok(![...f.timers.values()].some(timer => [700, 5000].includes(timer.delay)));
+  f.ports[0].receive({ type: 'SIDER_ENHANCEMENT_READY', bridgeId: f.calls[0].message.bridgeId }); await settle();
+  await f.resolve(f.calls.length - 1, { ok: true, compatibility: true, connected: true, enhancementReady: true, enhancementSuspended: false });
+  assert.match(status.textContent, /网页引用已就绪/);
+});
+
+test('a readiness timeout preserves the specific enhancement failure and records state transitions', async t => {
+  const f = await fixture(t);
+  await f.resolve(0, { ok: true, compatibility: true });
+  f.advanceTime(36000);
+  await f.resolve(1, { ok: true, compatibility: true, connected: true, enhancementReady: false, enhancementDetail: '没有找到可用的 ChatGPT 输入框。' });
+  const status = f.document.querySelector('#connection-status');
+  assert.match(status.title, /没有找到可用的 ChatGPT 输入框/);
+  assert.doesNotMatch(status.title, /没有完成加载/);
+  assert.match(f.document.querySelector('#diagnostics-text').textContent, /enhancement-state.*"ready":false.*输入框/);
+});
+
 test('an unavailable enhancement stops checking after two minutes while ChatGPT remains visible', async t => {
   const f = await fixture(t);
   await f.resolve(0, { ok: true, compatibility: true });
@@ -383,7 +407,7 @@ test('an owning lifecycle report updates failures and recovery after the initial
   f.ports[0].receive({ type: 'SIDER_ENHANCEMENT_READY', bridgeId, ready: false });
   await settle(); await f.resolve(f.calls.length - 1, { ok: true, compatibility: true, connected: true, enhancementReady: true });
   assert.match(f.document.querySelector('#connection-status').textContent, /网页引用已就绪/);
-  assert.doesNotMatch(f.document.querySelector('#diagnostics-text').textContent, /实时连接失败/);
+  assert.doesNotMatch(f.document.querySelector('#diagnostics-text').textContent.split('\nframeTrace:')[0], /实时连接失败/);
 });
 
 test('a newer lifecycle report supersedes pending status reads and a disconnected port cannot update the panel', async t => {

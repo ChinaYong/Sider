@@ -63,6 +63,52 @@ try {
   const editor=()=>chat.getByRole('textbox',{name:'Prompt',exact:true});
   const waitSent=async()=>chat.locator('body').evaluate(()=>window.sent);
   const reselect=async()=>{await send({type:'SIDER_TAB_ATTACHMENT_SET',tabId:sourceTab.id,kind:'url',enabled:true});await send({type:'SIDER_TAB_ATTACHMENT_SET',tabId:sourceTab.id,kind:'page',enabled:true});await chat.locator('[data-chip="page"]').waitFor();};
+  await panel.locator('#connection-status').filter({hasText:'网页引用已就绪'}).waitFor();
+  await chat.locator('body').evaluate(() => {
+    window.referenceHost = document.querySelector('#sider-enhancement');
+    const open = document.createElement('button'); open.type = 'button'; open.id = 'open-file-preview'; open.textContent = 'Preview user.txt';
+    const dialog = document.createElement('dialog'); dialog.id = 'file-preview'; dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true');
+    dialog.innerHTML = '<p>File preview</p><textarea aria-label="Preview text">File content</textarea><button type="button">Close preview</button>';
+    open.onclick = () => {
+      const main = document.querySelector('main');
+      if (window.previewMode === 'app-shell') {
+        dialog.remove();
+        const viewer = document.createElement('section'); viewer.id = 'native-viewer'; viewer.style = 'position:fixed;inset:0;background:white;z-index:100;padding:18px';
+        viewer.innerHTML = '<header data-testid="viewer-header" data-viewer-placement="overlay"><button type="button" aria-label="Close viewer">×</button></header><p>File preview content</p>';
+        viewer.querySelector('button').onclick = () => { viewer.remove(); document.body.prepend(main); };
+        document.body.append(viewer); main.remove(); return;
+      }
+      if (window.previewMode === 'native') dialog.showModal();
+      else { main.setAttribute(window.previewMode, window.previewMode === 'inert' ? '' : 'true'); dialog.setAttribute('open', ''); }
+    };
+    dialog.querySelector('button').onclick = () => { dialog.close(); document.querySelector('main').removeAttribute('aria-hidden'); document.querySelector('main').removeAttribute('inert'); };
+    document.body.append(open, dialog); userFile();
+  });
+  await panel.evaluate(() => {
+    window.previewStatusChanges = [];
+    new MutationObserver(() => previewStatusChanges.push(document.querySelector('#connection-status').textContent)).observe(document.querySelector('#connection-status'), {subtree:true, childList:true, characterData:true});
+  });
+  for (const mode of ['aria-hidden', 'inert', 'native', 'app-shell']) {
+    await editor().fill(`Draft during ${mode} preview`);
+    await chat.locator('body').evaluate((_body, mode) => { window.previewMode = mode; }, mode);
+    await chat.locator('#open-file-preview').click();
+    await chat.locator('#sider-enhancement').waitFor({state:'hidden'});
+    await panel.locator('#connection-status').filter({hasText:mode === 'app-shell' ? '文件预览中' : '网页引用已就绪'}).waitFor();
+    if (mode === 'app-shell') {
+      assert.equal(await chat.locator('[role="dialog"],dialog[open],main').count(), 0);
+      await panel.screenshot({path:'tmp/browser/chatgpt-file-preview-suspended-420.png'});
+    }
+    await chat.getByRole('button',{name:mode === 'app-shell' ? 'Close viewer' : 'Close preview',exact:true}).click();
+    await chat.locator('#sider-enhancement').waitFor({state:'visible'});
+    await panel.locator('#connection-status').filter({hasText:'网页引用已就绪'}).waitFor();
+    assert.equal(await chat.locator('body').evaluate(() => window.referenceHost === document.querySelector('#sider-enhancement')), true);
+    assert.equal(await editor().inputValue(), `Draft during ${mode} preview`);
+    assert.equal(await chat.locator('[data-chip="page"]').count(), 1);
+    assert.equal(await chat.getByRole('button',{name:'user.txt',exact:true}).count(), 1);
+    assert.deepEqual(await waitSent(), []);
+    passed(`ChatGPT ${mode} file preview keeps reference readiness, draft, references and user attachment`);
+  }
+  assert.ok((await panel.evaluate(() => previewStatusChanges)).every(status => status.includes('网页引用已就绪') || status.includes('文件预览中')));
   await editor().fill('ChatGPT question');await editor().press('Enter');
   await chat.locator('body').evaluate(()=>new Promise((resolve,reject)=>{const started=Date.now();const timer=setInterval(()=>{if(sent.length){clearInterval(timer);resolve()}else if(Date.now()-started>5000){clearInterval(timer);reject(new Error('No send'))}},20)}));
   assert.ok((await waitSent())[0].includes(sourceURL)); assert.ok((await chat.locator('body').evaluate(()=>uploaded[0].text)).includes(marker));passed('ChatGPT native Enter and complete body attachment');

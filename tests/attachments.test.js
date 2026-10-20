@@ -286,6 +286,37 @@ test('changing the draft while uploading cancels preparation', async t => {
   assert.equal(f.area.children.length, 0);
 });
 
+test('a native file preview preserves ownership of a prepared attachment without enabling a new upload', async t => {
+  const f = fixture(t), spec = pageSpec();
+  const user = f.addCard('mine.txt', { ready: true });
+  await f.manager.prepare(spec); const owned = f.area.lastElementChild;
+  const main = f.editor.closest('main'), preview = f.document.createElement('section');
+  preview.setAttribute('role', 'dialog'); preview.setAttribute('aria-modal', 'true');
+  preview.getClientRects = () => [{}]; main.after(preview); main.setAttribute('aria-hidden', 'true');
+  await pause(20);
+  assert.equal(f.manager.isReady(spec), true);
+  assert.deepEqual(f.manager.missingIds(), []);
+  await assert.rejects(f.manager.prepare(pageSpec('different')), /输入框/);
+  main.removeAttribute('aria-hidden'); preview.remove(); await pause(20);
+  await f.manager.prepare(spec);
+  assert.equal(f.uploads.length, 1); assert.equal(f.area.lastElementChild, owned);
+  assert.equal(user.card.isConnected, true); assert.deepEqual(f.removes, []);
+});
+
+for (const restore of [true, false]) test(`ChatGPT app-shell preview defers attachment invalidation and ${restore ? 'restores the original upload' : 'rejects a replaced composer'}`, async t => {
+  const f = fixture(t), spec = pageSpec(); await f.manager.prepare(spec);
+  const main = f.editor.closest('main'), viewer = f.document.createElement('section');
+  viewer.innerHTML = '<header data-testid="viewer-header" data-viewer-placement="overlay"><button aria-label="Close viewer"></button></header>';
+  viewer.firstElementChild.getClientRects = () => [{}];
+  f.document.body.append(viewer); main.remove(); await pause(20);
+  assert.equal(f.manager.isReady(spec), false); assert.deepEqual(f.manager.missingIds(), []);
+  await assert.rejects(f.manager.prepare(pageSpec('new')), /关闭后重试/);
+  if (!restore) f.editor.replaceWith(f.editor.cloneNode(true));
+  f.document.body.prepend(main); viewer.remove(); await pause(20);
+  assert.equal(f.manager.isReady(spec), restore);
+  if (restore) { await f.manager.prepare(spec); assert.equal(f.uploads.length, 1); }
+});
+
 test('conversation changes invalidate readiness and do not claim a new same-name user card', async t => {
   const f = fixture(t);
   const result = await f.manager.prepare(pageSpec());

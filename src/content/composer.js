@@ -15,6 +15,34 @@ const COMPOSER_SELECTORS = [
 
 const filling = new WeakSet();
 
+/** ChatGPT's app-shell file viewer is not an ARIA/native dialog. */
+export function isChatGPTFilePreview(document) {
+  const header = document.querySelector('[data-testid="viewer-header"][data-viewer-placement="overlay"]');
+  if (!header?.querySelector('button[aria-label="Close viewer"]') || !header.getClientRects().length
+    || header.closest('[hidden],[inert],[aria-hidden="true"]')) return false;
+  for (let current = header; current; current = current.parentElement) {
+    const style = document.defaultView.getComputedStyle(current);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+  }
+  return true;
+}
+
+/** A known editor behind a native modal still belongs to the same conversation. */
+export function isComposerObscuredByModal(element) {
+  if (!element?.isConnected) return false;
+  const document = element.ownerDocument, view = document.defaultView;
+  const blocked = Boolean(element.closest('[inert],[aria-hidden="true"]'));
+  return [...document.querySelectorAll('dialog[open],[role="dialog"],[role="alertdialog"]')].some(dialog => {
+    if (dialog.contains(element) || dialog.closest('[hidden],[inert],[aria-hidden="true"],[data-sider-enhancement]') || !dialog.getClientRects().length) return false;
+    for (let current = dialog; current; current = current.parentElement) {
+      const style = view.getComputedStyle(current);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+    }
+    // showModal() makes the rest of the document inert without adding attributes.
+    return blocked || dialog.getAttribute('aria-modal') === 'true' || dialog.matches(':modal');
+  });
+}
+
 export function isUsableComposer(element) {
   if (element.disabled || element.readOnly || element.getAttribute('aria-disabled') === 'true') return false;
   const editable = element.getAttribute('contenteditable');

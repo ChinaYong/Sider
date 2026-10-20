@@ -1,5 +1,6 @@
 import { TAB_CONTEXT_PREFIX, normalizeContext, normalizeContextSettings, composeTemplatePrompt, expandTemplateItem, applyAttachmentFilename } from '../context.js';
 import { createWebAdapter } from './adapters.js';
+import { isComposerObscuredByModal } from './composer.js';
 import { installTextDrop } from './text-drop.js';
 import { downloadText, safeFilename } from '../export-file.js';
 import { VARIABLES, needsPageVariables, needsTemplateSelection } from '../variables.js';
@@ -24,12 +25,14 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   let context = null;
   let settings = normalizeContextSettings();
   let composer;
+  let mountedAnchor, mountedSession;
   let pane;
   let disposed = false;
   let mountFrame = null, positionFrame = null;
   let chipInputs = null, templatesIdentity = '', previewInputs = null;
   let statusPersistent = false;
   let ready = false;
+  let suspended = false;
   let readinessDetail = '';
   let statusTimer;
   let replaying = false;
@@ -771,10 +774,26 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     mountFrame = null;
     if (disposed) return;
     const current = findComposer(document);
-    const availability = displayAvailability(current, adapter.availability());
-    if (ready !== availability.ready || readinessDetail !== availability.detail) {
+    const rawAvailability = adapter.availability();
+    if (rawAvailability.suspended) {
+      if (!suspended || ready || readinessDetail !== rawAvailability.detail) {
+        ready = false; suspended = true; readinessDetail = rawAvailability.detail;
+        onReady({ ready: false, suspended: true, detail: readinessDetail });
+      }
+      clearSendGap(); setHidden(host, true); showPane(null, { immediate: true, restoreFocus: false });
+      delivery?.abort.abort(); return;
+    }
+    // Preview/settings dialogs temporarily block the native composer. Keep the
+    // established reference connection, and never adopt an editor in the dialog.
+    if (ready && rawAvailability.reason !== 'site-connection-error' && mountedAnchor?.isConnected
+      && mountedAnchor.contains(composer) && mountedSession === adapter.sessionKey(composer) && isComposerObscuredByModal(composer)) {
+      clearSendGap(); setHidden(host, true); showPane(null, { immediate: true, restoreFocus: false });
+      delivery?.abort.abort(); return;
+    }
+    const availability = displayAvailability(current, rawAvailability);
+    if (suspended || ready !== availability.ready || readinessDetail !== availability.detail) {
       if (availability.ready && readinessDetail && $('.status').textContent === readinessDetail) report('');
-      ready = availability.ready; readinessDetail = availability.detail;
+      ready = availability.ready; suspended = false; readinessDetail = availability.detail;
       onReady({ ready: availability.ready, detail: availability.detail });
     }
     if (!current) { setHidden(host, true); showPane(null, { immediate: true, restoreFocus: false }); delivery?.abort.abort(); return; }
@@ -789,6 +808,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     // outside that form, while remaining next to the original editor.
     const anchor = adapter.findMountAnchor();
     if (!anchor) { setHidden(host, true); showPane(null, { immediate: true, restoreFocus: false }); return; }
+    mountedAnchor = anchor; mountedSession = adapter.sessionKey(current);
     if (!host.isConnected || host.previousElementSibling !== anchor) anchor.after(host);
     setHidden(host, false);
     host.toggleAttribute('data-dark', document.documentElement.classList.contains('dark') || view.matchMedia?.('(prefers-color-scheme:dark)').matches);
@@ -884,6 +904,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
 
   function nativeSend(event) {
     if (replaying || !event.isTrusted) return;
+    if (suspended || isComposerObscuredByModal(composer)) return;
     const current = findComposer(document); if (!current) return;
     if (!adapter.isSendIntent(event, current)) return;
     const draft = getComposerText(current);
@@ -1105,7 +1126,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
   chrome.storage.onChanged.addListener(storageChanged);
   // Streaming text elsewhere in the conversation cannot replace an editor or
   // sender. Still scan added controls, ancestor visibility and explicit targets.
-  const controlSelector = ['textarea', '[contenteditable]', 'button', 'input', '[tabindex]', '[data-action]', '[role="button"]', '[role="textbox"]', '[role="alert"]', '[role="status"]', 'form', ...Object.values(adapter.site.selectors || {}).filter(Boolean)].join(',');
+  const controlSelector = ['textarea', '[contenteditable]', 'button', 'input', '[tabindex]', '[data-action]', '[role="button"]', '[role="textbox"]', '[role="alert"]', '[role="status"]', 'dialog', '[role="dialog"]', '[role="alertdialog"]', 'form', ...Object.values(adapter.site.selectors || {}).filter(Boolean)].join(',');
   const relevant = record => {
     if (record.target === host) return false;
     if (!composer?.isConnected || !host.isConnected) return true;
@@ -1115,7 +1136,7 @@ export function installEnhancement({ document, chrome, bridgeId, onReady = () =>
     return [...record.addedNodes, ...record.removedNodes].some(node => node.nodeType === 1 && (node.matches(controlSelector) || node.querySelector(controlSelector)));
   };
   const observer = new view.MutationObserver(records => { if (records.some(relevant)) scheduleMount(); });
-  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'hidden', 'contenteditable', 'style', 'id', 'role', 'aria-label', 'aria-disabled', 'disabled', 'data-testid', 'data-test-id', 'title'] });
+  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'hidden', 'inert', 'aria-hidden', 'aria-modal', 'open', 'contenteditable', 'style', 'id', 'role', 'aria-label', 'aria-disabled', 'disabled', 'data-testid', 'data-test-id', 'data-viewer-placement', 'data-conversation-id', 'data-chat-id', 'title'] });
   const resized = () => { scheduleMount(); schedulePosition(); };
   const resizeObserver = view.ResizeObserver ? new view.ResizeObserver(schedulePosition) : null;
   resizeObserver?.observe(host); resizeObserver?.observe(popup);

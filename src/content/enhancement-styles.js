@@ -11,6 +11,7 @@ export const enhancementStyles = `
   --focus:#4f46c8; --accent-hover:#4138b1; --highlight:#efedff; --accent-line:#c6c1f0; --on-accent:#fff;
   --danger:#b42335; --danger-soft:#fff0f1;
 }
+:host([hidden]) { display:none!important; }
 :host([data-dark]) {
   --canvas:#17171c; --surface:#202027; --subtle:#27272f; --inset:#1b1b22; --hover:#34343f;
   --line:#3b3b48; --control-line:#666677; --ink:#f0eff7; --muted:#b5b3c4;
