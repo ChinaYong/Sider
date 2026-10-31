@@ -10,6 +10,8 @@ npm run test:browser
 
 Linux CI 安装系统依赖可用 `npx --no-install playwright install --with-deps chromium --no-shell`。项目固定 Playwright 1.60.0，随包安装 Chromium 148.0.7778.96，以支持权限用例使用的 `Extensions.triggerAction` 调试接口；安装前先执行 `npm ci`，避免沿用旧依赖下载 Chromium 145。脚本使用完整 Chromium 通道，以支持扩展；不使用无头 shell。浏览器缺失时，失败信息会给出安装命令。
 
+GitHub Actions 的浏览器测试任务固定使用 `ubuntu-24.04`，发布流程也复用该任务。`ubuntu-latest` 会随 [GitHub 的系统迁移](https://github.com/actions/runner-images/issues/14748) 切换到 Ubuntu 26.04，导致 Playwright 1.60.0 在安装依赖或 Chromium 时失败；调整 runner 时需确认与固定的 Playwright 版本兼容。
+
 可以设置 `SIDER_CHROMIUM` 指定支持扩展调试的 Chromium 可执行文件。它仍使用新建的隔离配置，不能指向用户的浏览器配置目录。也可设置 `PLAYWRIGHT_BROWSERS_PATH` 指定下载位置；安装和运行时必须使用同一值。
 
 单独运行某组用例时，先构建，再使用：
