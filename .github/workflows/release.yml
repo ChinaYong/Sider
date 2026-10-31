@@ -8,6 +8,7 @@ on:
       - package.json
       - package-lock.json
       - manifest.json
+      - .github/workflows/check.yml
       - .github/workflows/release.yml
       - scripts/release.mjs
   workflow_dispatch:

@@ -2,9 +2,11 @@
 
 更新版本文件并推送到 `main` 后，GitHub Actions 会读取版本号、运行单元测试和隔离浏览器回归；通过后自动创建对应的 `vX.Y.Z` 标签，并将同一份通过测试的 `dist/` 打包为 GitHub Release 附件。本地无需手动打标签、压缩或上传。
 
+版本号需要手动指定，工作流不会自动递增。运行 `npm run version:set -- X.Y.Z` 会同步修改 `package.json`、`package-lock.json`（包括根包记录）和 `manifest.json`；将这些文件与本次改动一起提交并推送到 `main`，即可触发自动发布。
+
 ## 每次发布的操作步骤
 
-当前版本为 **0.7.3**，包含 ChatGPT 文件预览期间的引用状态识别与恢复修复。以下以发布 **0.7.3** 为例；每次将命令中的版本号替换为新的版本号。命令在项目根目录的 PowerShell 中执行，不需要在本机安装 GitHub CLI。
+当前版本为 **0.7.4**，包含当前主分支的功能修复，并固定浏览器测试环境、完善发布触发条件。以下以发布 **0.7.4** 为例；每次将命令中的版本号替换为新的版本号。命令在项目根目录的 PowerShell 中执行，不需要在本机安装 GitHub CLI。
 
 ### 1. 更新代码和版本
 
@@ -15,8 +17,8 @@ Set-Location Q:\1Coding\Sider
 git switch main
 git pull --ff-only origin main
 npm ci
-npm run version:set -- 0.7.3
-npm run version:check -- v0.7.3
+npm run version:set -- 0.7.4
+npm run version:check -- v0.7.4
 npm run check
 ```
 
@@ -31,7 +33,7 @@ git diff --check
 git diff
 git add package.json package-lock.json manifest.json
 git status --short
-git commit -m "Release v0.7.3"
+git commit -m "Release v0.7.4"
 git push origin main
 ```
 
@@ -52,18 +54,20 @@ git push origin main
 
 网络等临时故障可在失败的 Actions 页面选择 **Re-run failed jobs**。也可以在 Release 工作流页面选择 **Run workflow**，使用 `main` 上的当前版本重新检查；已有正式 Release 会自动跳过。
 
+**Re-run failed jobs** 使用原运行的提交和工作流定义。修复代码或工作流并推送后，需要从 `main` 启动新的 Release 运行，才能使用修复后的内容。
+
 仍支持手动推送版本标签触发发布。先确认本地和远端均没有使用过该标签：
 
 ```powershell
-git tag --list v0.7.3
-git ls-remote origin refs/tags/v0.7.3
+git tag --list v0.7.4
+git ls-remote origin refs/tags/v0.7.4
 ```
 
 两条命令均无输出表示该标签尚未使用，然后执行：
 
 ```powershell
-git tag -a v0.7.3 -m "Sider v0.7.3"
-git push origin v0.7.3
+git tag -a v0.7.4 -m "Sider v0.7.4"
+git push origin v0.7.4
 ```
 
 此方式要求标签与代码中的版本一致。自动发布已经创建标签后，无需再执行上述命令；只创建本地标签不会触发发布。
@@ -72,13 +76,13 @@ git push origin v0.7.3
 
 到仓库的 [Actions → Release](https://github.com/ChinaYong/Sider/actions/workflows/release.yml) 查看进度。成功后，[Releases](https://github.com/ChinaYong/Sider/releases) 自动出现：
 
-- `Sider-v0.7.3.zip`：可加载的扩展文件，`manifest.json` 直接位于 ZIP 根目录。
-- `Sider-v0.7.3.zip.sha256`：ZIP 的 SHA-256 校验值。
+- `Sider-v0.7.4.zip`：可加载的扩展文件，`manifest.json` 直接位于 ZIP 根目录。
+- `Sider-v0.7.4.zip.sha256`：ZIP 的 SHA-256 校验值。
 - GitHub 自动生成的更新说明，可在 Release 页面继续编辑。
 
 下载扩展附件并解压，再加载包含 `manifest.json` 的目录。GitHub 自动附带的 **Source code** 是源码归档，不能代替构建好的扩展 ZIP。
 
-如需校验下载是否完整，在下载目录执行 `Get-FileHash .\Sider-v0.7.3.zip -Algorithm SHA256`，将结果与 `.sha256` 文件中的值比较。更新已有扩展时，解压到固定目录后在扩展管理页面点击“重新加载”，并重开旧侧栏。
+如需校验下载是否完整，在下载目录执行 `Get-FileHash .\Sider-v0.7.4.zip -Algorithm SHA256`，将结果与 `.sha256` 文件中的值比较。更新已有扩展时，解压到固定目录后在扩展管理页面点击“重新加载”，并重开旧侧栏。
 
 ## 版本号规则
 
@@ -88,7 +92,7 @@ git push origin v0.7.3
 
 ```sh
 npm run version:check
-npm run version:check -- v0.7.3
+npm run version:check -- v0.7.4
 ```
 
 普通构建也会检查版本一致性。版本不匹配时立即失败，避免发布标签与扩展内部显示的版本不同。
@@ -97,7 +101,7 @@ npm run version:check -- v0.7.3
 
 [`release.yml`](../.github/workflows/release.yml) 调用现有的 [`check.yml`](../.github/workflows/check.yml)，测试通过后保存构建产物，再由发布任务下载同一份产物、生成 ZIP 和校验值。测试失败会停止发布，浏览器失败证据保存在 Actions 的 `browser-evidence` 附件中。
 
-普通分支推送和 Pull Request 继续执行检查。`main` 上修改版本文件、发布工作流或 `scripts/release.mjs` 时会检查是否需要发布，也支持 `v*` 标签推送及手动运行。发布流程串行执行；已有正式 Release 自动跳过，不覆盖已发布文件。
+普通分支推送和 Pull Request 继续执行检查。`main` 上修改版本文件、检查或发布工作流、`scripts/release.mjs` 时会检查是否需要发布，也支持 `v*` 标签推送及手动运行。检查工作流修复也会重新尝试发布当前尚未发布的版本。发布流程串行执行；已有正式 Release 自动跳过，不覆盖已发布文件。
 
 使用 GitHub 自动提供的 `GITHUB_TOKEN`，无需配置个人访问令牌。计划与测试任务只有仓库读取权限；发布任务单独获得 `contents: write`，使用 GitHub CLI 创建标签与 Release。标签创建和 Release 发布在同一流程内完成，不依赖令牌创建的标签再次触发工作流。仓库须启用 Actions，且仓库或组织策略允许此写入权限。实现参考 [GitHub 的工作流触发规则](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow)、[可复用工作流说明](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows)和 [GitHub CLI 的 Release 创建说明](https://cli.github.com/manual/gh_release_create)。
 
