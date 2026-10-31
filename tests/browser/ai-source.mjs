@@ -6,7 +6,11 @@ import { chromium } from './browser.js';
 import { TAB_CONTEXT_PREFIX } from '../../src/context.js';
 
 const html = `<!doctype html><meta charset="utf-8"><title>ChatGPT AI source fixture</title>
-<main><article><h1>当前 AI 会话</h1><p id="quote">ChatGPT 回答中的第一段划词。</p><p id="replacement">ChatGPT 回答中的第二段划词。</p></article>
+<main><article><h1>当前 AI 会话</h1><p id="quote">ChatGPT 回答中的第一段划词。</p><p id="replacement">ChatGPT 回答中的第二段划词。</p>
+<pre id="code-first"><code><span>@Component</span>\n@Scope("prototype")\npublic class Task {\n}</code></pre>
+<section><button aria-hidden="true" aria-label="Scroll to bottom" style="user-select:none"><svg aria-hidden="true"><use href="#arrow"></use></svg></button>
+<header><svg aria-hidden="true"><use href="#code"></use></svg><span>Java</span><button aria-label="Enable word wrap" style="user-select:none"><svg aria-hidden="true"></svg></button><button aria-label="Copy code" style="user-select:none"><svg aria-hidden="true"></svg></button></header>
+<pre id="code-second"><code>@Service\npublic class TaskService {\n    private final Task task;\n}</code></pre></section></article>
 <form><div data-composer-body><textarea id="prompt-textarea" aria-label="Ask ChatGPT"></textarea></div>
 <input type="file" aria-label="User file"><button type="submit" data-testid="send-button">Send</button></form></main>
 <script>window.sent=[];window.identity=crypto.randomUUID();document.querySelector('form').onsubmit=event=>{event.preventDefault();sent.push(document.querySelector('textarea').value)};</script>`;
@@ -80,6 +84,24 @@ try {
   await panel.bringToFront();
   await chat.locator('.selection-chip').filter({ hasText: 'ChatGPT 回答中的第二段划词。' }).waitFor();
   checked('later selections on the AI main page update the open sidebar through content notifications');
+
+  await select('#code-first');
+  const codeQuote = await source.evaluate(() => {
+    const first = document.querySelector('#code-first code'), second = document.querySelector('#code-second code');
+    const selection = getSelection(), range = document.createRange();
+    range.setStart(first.firstChild.firstChild, 0); range.setEnd(second.firstChild, second.textContent.length);
+    selection.removeAllRanges(); selection.addRange(range); document.dispatchEvent(new Event('selectionchange'));
+    return selection.toString().trim();
+  });
+  assert.match(codeQuote, /@Component/); assert.match(codeQuote, /private final Task task;/);
+  await eventually(async () => {
+    const current = await worker.evaluate(key => chrome.storage.session.get(key), TAB_CONTEXT_PREFIX + tab.id);
+    assert.equal(Object.values(current)[0]?.selection?.content, codeQuote);
+  });
+  await panel.bringToFront();
+  await chat.locator('.selection-chip').filter({ hasText: '@Component' }).filter({ hasText: 'TaskService' }).waitFor();
+  assert.equal((await snapshot()).context.selection?.content, codeQuote);
+  checked('a cross-code quote passes textless ChatGPT toolbar buttons and icons and remains available after sidebar focus');
 
   await chat.getByRole('button', { name: '预设', exact: true }).click();
   await chat.getByRole('button', { name: '切换引用来源标签页', exact: true }).click();

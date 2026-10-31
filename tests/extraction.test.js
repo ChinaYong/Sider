@@ -43,6 +43,38 @@ test('cross-paragraph capture bounds surrounding context and rejects selected hi
   }
 });
 
+test('cross-code selections tolerate textless toolbar controls and decorative icons', t => {
+  const dom = page('<main><pre id="first"><code>@Component\n@Scope("prototype")\npublic class Task {\n}</code></pre><section><button aria-hidden="true" aria-label="Scroll to bottom"><svg aria-hidden="true"><use href="#arrow"></use></svg></button><header><svg aria-hidden="true"><use href="#code"></use></svg><span>Java</span><button aria-label="Enable word wrap"><svg aria-hidden="true"></svg></button><button aria-label="Copy code"><svg aria-hidden="true"></svg></button></header><pre id="second"><code>@Service\npublic class TaskService {\n    private final Task task;\n}</code></pre></section></main>');
+  t.after(() => dom.window.close());
+  const { document } = dom.window, selection = dom.window.getSelection();
+  const first = document.querySelector('#first code').firstChild, second = document.querySelector('#second code').firstChild;
+  const range = document.createRange(); range.setStart(first, 0); range.setEnd(second, second.length);
+  selection.addRange(range);
+  const content = first.textContent + 'Java' + second.textContent;
+  assert.equal(captureSelection(document)?.content, content);
+  assert.equal(captureReference(document, 'selection').content, content);
+  selection.collapse(second, second.length); selection.extend(first, 0);
+  assert.equal(captureSelection(document)?.content, content, 'Reverse dragging across the same controls remains readable');
+});
+
+test('textless controls do not allow selected hidden or control text to pass exclusion checks', t => {
+  const dom = page('<main><p id="first">可见前文</p><button><svg aria-hidden="true"></svg></button><p id="last">可见后文</p></main>');
+  t.after(() => dom.window.close());
+  const { document } = dom.window, range = document.createRange();
+  const first = document.querySelector('#first').firstChild, last = document.querySelector('#last').firstChild;
+  range.setStart(first, 0); range.setEnd(last, last.length);
+  dom.window.getSelection().addRange(range);
+  const button = document.querySelector('button');
+  button.append('不应引用的按钮文字');
+  assert.equal(captureSelection(document), null);
+  assert.throws(() => captureReference(document, 'selection'), /隐藏内容/);
+  button.textContent = '';
+  const hidden = document.createElement('span'); hidden.hidden = true; hidden.textContent = 'HIDDEN_SECRET'; button.after(hidden);
+  assert.equal(captureSelection(document), null);
+  hidden.remove();
+  assert.equal(captureSelection(document)?.content, '可见前文可见后文');
+});
+
 test('element-boundary and reverse selections keep inline, line-break and duplicate quote locators', t => {
   const dom = page('<p>第一处前文</p><p class="quote"><b>相同</b><br><span>词句</span></p><p>第二处前文</p><p class="quote"><b>相同</b><br><span>词句</span></p>');
   t.after(() => dom.window.close());

@@ -574,7 +574,9 @@ function isSelectionExcluded(selection) {
       acceptNode: element => range.intersectsNode(element) ? 1 : 2,
     });
     let element;
-    while ((element = walker.nextNode())) if (isExcluded(element)) return true;
+    // Passing textless toolbar buttons or decorative icons does not select any
+    // excluded text. Keep rejecting hidden/editable/control text in the range.
+    while ((element = walker.nextNode())) if (isExcluded(element) && element.textContent.trim()) return true;
   }
   return false;
 }

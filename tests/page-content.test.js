@@ -209,6 +209,21 @@ test('a pending quote that becomes hidden before sidebar focus clears the older 
   assert.equal(env.sent.at(-1).reference, null);
 });
 
+test('cross-code quotes survive textless toolbars and immediate sidebar focus', t => {
+  const env = environment(t); env.inject();
+  const { document } = env.window;
+  document.body.insertAdjacentHTML('beforeend', '<section><pre><code>@Component\nclass Task {}</code></pre><header><svg aria-hidden="true"></svg><span>Java</span><button aria-label="Copy code"><svg aria-hidden="true"></svg></button></header><pre><code>@Service\nclass TaskService {}</code></pre></section>');
+  const [first, second] = document.querySelectorAll('code'), range = document.createRange();
+  range.setStart(first.firstChild, 0); range.setEnd(second.firstChild, second.textContent.length);
+  env.window.getSelection().addRange(range);
+  document.dispatchEvent(new env.window.Event('selectionchange'));
+  env.setFocused(false); env.window.getSelection().removeAllRanges();
+  const content = first.textContent + 'Java' + second.textContent;
+  assert.equal(env.request({ type: 'SIDER_PAGE_SELECTION_GET' }).response.reference?.content, content);
+  assert.equal(env.sent.at(-1).reference?.content, content);
+  assert.equal(env.request({ type: 'SIDER_PAGE_CAPTURE', kind: 'selection' }).response.reference?.content, content);
+});
+
 test('selecting hidden content clears the previous readable quote and never publishes hidden text', async t => {
   const env = environment(t);
   env.selectTarget();

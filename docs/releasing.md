@@ -4,7 +4,7 @@
 
 ## 每次发布的操作步骤
 
-当前版本为 **0.7.2**，包含划词“总是选中”和扩展重载后的重复悬浮球修复。以下以发布 **0.7.2** 为例；每次将命令中的版本号替换为新的版本号。命令在项目根目录的 PowerShell 中执行，不需要在本机安装 GitHub CLI。
+当前版本为 **0.7.3**，包含 ChatGPT 文件预览期间的引用状态识别与恢复修复。以下以发布 **0.7.3** 为例；每次将命令中的版本号替换为新的版本号。命令在项目根目录的 PowerShell 中执行，不需要在本机安装 GitHub CLI。
 
 ### 1. 更新代码和版本
 
@@ -15,8 +15,8 @@ Set-Location Q:\1Coding\Sider
 git switch main
 git pull --ff-only origin main
 npm ci
-npm run version:set -- 0.7.2
-npm run version:check -- v0.7.2
+npm run version:set -- 0.7.3
+npm run version:check -- v0.7.3
 npm run check
 ```
 
@@ -31,7 +31,7 @@ git diff --check
 git diff
 git add package.json package-lock.json manifest.json
 git status --short
-git commit -m "Release v0.7.2"
+git commit -m "Release v0.7.3"
 git push origin main
 ```
 
@@ -55,15 +55,15 @@ git push origin main
 仍支持手动推送版本标签触发发布。先确认本地和远端均没有使用过该标签：
 
 ```powershell
-git tag --list v0.7.2
-git ls-remote origin refs/tags/v0.7.2
+git tag --list v0.7.3
+git ls-remote origin refs/tags/v0.7.3
 ```
 
 两条命令均无输出表示该标签尚未使用，然后执行：
 
 ```powershell
-git tag -a v0.7.2 -m "Sider v0.7.2"
-git push origin v0.7.2
+git tag -a v0.7.3 -m "Sider v0.7.3"
+git push origin v0.7.3
 ```
 
 此方式要求标签与代码中的版本一致。自动发布已经创建标签后，无需再执行上述命令；只创建本地标签不会触发发布。
@@ -72,13 +72,13 @@ git push origin v0.7.2
 
 到仓库的 [Actions → Release](https://github.com/ChinaYong/Sider/actions/workflows/release.yml) 查看进度。成功后，[Releases](https://github.com/ChinaYong/Sider/releases) 自动出现：
 
-- `Sider-v0.7.2.zip`：可加载的扩展文件，`manifest.json` 直接位于 ZIP 根目录。
-- `Sider-v0.7.2.zip.sha256`：ZIP 的 SHA-256 校验值。
+- `Sider-v0.7.3.zip`：可加载的扩展文件，`manifest.json` 直接位于 ZIP 根目录。
+- `Sider-v0.7.3.zip.sha256`：ZIP 的 SHA-256 校验值。
 - GitHub 自动生成的更新说明，可在 Release 页面继续编辑。
 
 下载扩展附件并解压，再加载包含 `manifest.json` 的目录。GitHub 自动附带的 **Source code** 是源码归档，不能代替构建好的扩展 ZIP。
 
-如需校验下载是否完整，在下载目录执行 `Get-FileHash .\Sider-v0.7.2.zip -Algorithm SHA256`，将结果与 `.sha256` 文件中的值比较。更新已有扩展时，解压到固定目录后在扩展管理页面点击“重新加载”，并重开旧侧栏。
+如需校验下载是否完整，在下载目录执行 `Get-FileHash .\Sider-v0.7.3.zip -Algorithm SHA256`，将结果与 `.sha256` 文件中的值比较。更新已有扩展时，解压到固定目录后在扩展管理页面点击“重新加载”，并重开旧侧栏。
 
 ## 版本号规则
 
@@ -88,7 +88,7 @@ git push origin v0.7.2
 
 ```sh
 npm run version:check
-npm run version:check -- v0.7.2
+npm run version:check -- v0.7.3
 ```
 
 普通构建也会检查版本一致性。版本不匹配时立即失败，避免发布标签与扩展内部显示的版本不同。
