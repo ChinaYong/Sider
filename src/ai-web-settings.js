@@ -1,4 +1,6 @@
-import { GEMINI_MODE_NORMAL, GEMINI_MODE_SPARK, GEMINI_MODEL_OPTIONS, GEMINI_THINKING_OPTIONS, normalizeAIWebSettings, listAISites, selectedAISite, normalizeCustomAISite, validateAIWebSettings, aiSitePattern } from './ai-web.js';
+import { GEMINI_MODE_NORMAL, GEMINI_MODE_SPARK, normalizeAIWebSettings, listAISites, selectedAISite, normalizeCustomAISite, validateAIWebSettings, aiSitePattern } from './ai-web.js';
+import { GEMINI_CATALOG_KEY, geminiLevelNumber, geminiModelValue, resolveGeminiModel, validateGeminiCatalog } from './gemini-catalog.js';
+import { CHATGPT_CATALOG_KEY, chatgptModelId, chatgptModelValue, chatgptPresetValue, validateChatGPTCatalog } from './chatgpt-catalog.js';
 import { installSettingsNavigation } from './settings-navigation.js';
 
 export function installAIWebSettings({ document, chrome, onSaved, pickSendButton }) {
@@ -7,6 +9,7 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
   const siteMenu = $('#ai-site-settings');
   const siteGroups = $('#ai-site-groups');
   const geminiOptions = $('#ai-gemini-options');
+  const chatgptOptions = $('#ai-chatgpt-options');
   const siteEditor = $('#ai-custom-fields');
   const editorHome = $('#ai-editor-home');
   const navigation = installSettingsNavigation(document);
@@ -18,6 +21,8 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
   let picking = false;
   let disposed = false;
   let editOpener = null;
+  let geminiCatalog = null, catalogRevision = 0, geminiEdited = false;
+  let chatgptCatalog = null, chatgptCatalogRevision = 0, chatgptEdited = false;
   document.defaultView.addEventListener('pagehide', () => { disposed = true; });
   const error = message => { $('#ai-settings-error').textContent = message; $('#ai-settings-error').hidden = !message; };
   const status = message => { $('#ai-settings-status').textContent = message; $('#ai-settings-status').hidden = !message; };
@@ -55,9 +60,9 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
   }
   function renderSiteGroups() {
     const expanded = new Set([...siteGroups.children].filter(group => group.open).map(group => group.dataset.siteId));
-    // Keep the shared editor and Gemini controls (and their listeners) when rebuilding the list.
+    // Keep the shared editor and website controls (and their listeners) when rebuilding the list.
     editorHome.append(siteEditor);
-    geminiOptions.remove();
+    geminiOptions.remove(); chatgptOptions.remove();
     siteGroups.replaceChildren();
     for (const site of listAISites(draft)) {
       const group = document.createElement('details');
@@ -71,6 +76,7 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
       summary.append(name, badge);
       const content = document.createElement('div'); content.className = 'site-settings-content';
       if (site.id === 'gemini') content.append(geminiOptions);
+      if (site.id === 'chatgpt') content.append(chatgptOptions);
       const controls = document.createElement('section'); controls.className = 'setting-block';
       const title = document.createElement('h3'); title.textContent = '网站控件';
       const description = document.createElement('p'); description.className = 'setting-help';
@@ -82,17 +88,88 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
       actions.append(configure); controls.append(title, description, actions); content.append(controls); group.append(summary, content); siteGroups.append(group);
     }
   }
+  function renderGeminiOptions() {
+    const model = $('#ai-gemini-model'), thinking = $('#ai-gemini-thinking');
+    model.replaceChildren(); thinking.replaceChildren();
+    const add = (select, value, label, disabled = false) => {
+      const option = document.createElement('option'); option.value = value; option.textContent = label; option.disabled = disabled; select.append(option);
+    };
+    if (!geminiCatalog) {
+      add(model, '', '请先打开或刷新 Gemini 页面', true);
+      add(thinking, '', '等待网页提供可用等级', true);
+      model.disabled = thinking.disabled = true;
+      $('#ai-gemini-catalog-status').textContent = '打开或刷新 Gemini 后，模型和思考等级会自动读取。';
+      return;
+    }
+    model.disabled = false;
+    const selected = resolveGeminiModel(geminiCatalog.models, draft.geminiModel);
+    if (!selected) add(model, '__missing__', '已保存的模型在当前页面不可用', true);
+    for (const entry of geminiCatalog.models) add(model, geminiModelValue(entry.id), entry.available ? entry.label : `${entry.label}（需升级或不可用）`, !entry.available);
+    model.value = selected ? geminiModelValue(selected.id) : '__missing__';
+    $('#ai-gemini-catalog-status').textContent = selected?.available === false
+      ? '已保存的模型在当前账号不可用，请选择其他模型。' : '已从最近加载的 Gemini 页面读取；重新加载网页时自动更新。';
+    if (!selected?.available || !selected.levels.length) {
+      add(thinking, 'site-default', selected?.available ? '网页未提供思考等级' : '当前模型没有可用等级', true);
+      thinking.value = 'site-default'; thinking.disabled = true; return;
+    }
+    thinking.disabled = false;
+    add(thinking, 'site-default', '跟随网页默认');
+    const level = geminiLevelNumber(draft.geminiThinkingLevel);
+    const matched = level !== null && selected.levels.some(item => item.id === level);
+    if (draft.geminiThinkingLevel !== 'site-default' && !matched) add(thinking, '__missing__', '已保存的等级不适用于此模型', true);
+    for (const item of selected.levels) add(thinking, `level:${item.id}`, item.label);
+    thinking.value = draft.geminiThinkingLevel === 'site-default' ? 'site-default' : matched ? `level:${level}` : '__missing__';
+  }
+  function receiveGeminiCatalog(raw) {
+    catalogRevision++;
+    geminiCatalog = validateGeminiCatalog(raw);
+    if (dialog.open && !saving) renderGeminiOptions();
+  }
+  function renderChatGPTOptions() {
+    const model = $('#ai-chatgpt-model'), preset = $('#ai-chatgpt-preset');
+    model.replaceChildren(); preset.replaceChildren();
+    const add = (select, value, text, disabled = false) => {
+      const option = document.createElement('option'); option.value = value; option.textContent = text; option.disabled = disabled; select.append(option);
+    };
+    add(model, 'site-default', '跟随网页默认');
+    const selected = chatgptCatalog?.versions.find(item => item.id === chatgptModelId(draft.chatgptModel));
+    if (draft.chatgptModel !== 'site-default' && !selected) add(model, '__missing__', '已保存的模型在当前页面不可用', true);
+    for (const version of chatgptCatalog?.versions || []) add(model, chatgptModelValue(version.id), version.available ? version.label : `${version.label}（不可用）`, !version.available);
+    model.value = draft.chatgptModel === 'site-default' ? 'site-default' : selected ? chatgptModelValue(selected.id) : '__missing__';
+    model.disabled = false;
+    const message = !chatgptCatalog ? '打开或刷新 ChatGPT 后，模型和推理档位会自动读取。'
+      : selected?.available === false ? '已保存的模型在当前账号不可用，请重新选择。'
+        : '已从最近加载的 ChatGPT 页面读取；重新加载网页时自动更新。';
+    $('#ai-chatgpt-catalog-status').textContent = message;
+    if (draft.chatgptModel === 'site-default') {
+      add(preset, 'site-default', '跟随网页默认'); preset.value = 'site-default'; preset.disabled = true; return;
+    }
+    if (!selected?.available) {
+      add(preset, '', '当前模型没有可用档位', true); preset.value = ''; preset.disabled = true; return;
+    }
+    add(preset, 'site-default', '请选择推理档位', true);
+    const match = selected.presets.find(item => chatgptPresetValue(item) === draft.chatgptPreset);
+    if (draft.chatgptPreset !== 'site-default' && !match) add(preset, '__missing__', '已保存的档位不适用于此模型', true);
+    for (const item of selected.presets) add(preset, chatgptPresetValue(item), item.available ? item.label : `${item.label}（不可用）`, !item.available);
+    preset.value = draft.chatgptPreset === 'site-default' ? 'site-default' : match ? chatgptPresetValue(match) : '__missing__';
+    preset.disabled = false;
+  }
+  function receiveChatGPTCatalog(raw) {
+    chatgptCatalogRevision++;
+    chatgptCatalog = validateChatGPTCatalog(raw);
+    if (dialog.open && !saving) renderChatGPTOptions();
+  }
+  chrome?.storage?.onChanged?.addListener((changes, area) => {
+    if (area === 'session' && changes[GEMINI_CATALOG_KEY]) receiveGeminiCatalog(changes[GEMINI_CATALOG_KEY].newValue);
+    if (area === 'session' && changes[CHATGPT_CATALOG_KEY]) receiveChatGPTCatalog(changes[CHATGPT_CATALOG_KEY].newValue);
+  });
   function render() {
     const select = $('#ai-active-site'); select.replaceChildren();
     for (const site of listAISites(draft)) { const option = document.createElement('option'); option.value = site.id; option.textContent = site.name; select.append(option); }
     select.value = draft.activeSiteId;
     $('#ai-gemini-spark').checked = draft.geminiMode === GEMINI_MODE_SPARK;
-    const model = $('#ai-gemini-model'); model.replaceChildren();
-    for (const optionData of GEMINI_MODEL_OPTIONS) { const option = document.createElement('option'); option.value = optionData.value; option.textContent = optionData.label; model.append(option); }
-    model.value = draft.geminiModel;
-    const thinking = $('#ai-gemini-thinking'); thinking.replaceChildren();
-    for (const optionData of GEMINI_THINKING_OPTIONS) { const option = document.createElement('option'); option.value = optionData.value; option.textContent = optionData.label; thinking.append(option); }
-    thinking.value = draft.geminiThinkingLevel;
+    renderGeminiOptions();
+    renderChatGPTOptions();
     $('#reference-hide-unavailable-tabs').checked = draft.hideUnavailableTabs;
     const custom = !selectedAISite(draft).builtin;
     $('#ai-edit-site').hidden = false; $('#ai-edit-site').textContent = custom ? '编辑网站' : '配置网站'; $('#ai-remove-site').hidden = !custom;
@@ -124,7 +201,7 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
   }
   async function open() {
     if (picking || dialog.open) return;
-    error(''); status(''); $('#ai-custom-fields').hidden = true; editingId = null;
+    error(''); status(''); $('#ai-custom-fields').hidden = true; editingId = null; geminiEdited = false; chatgptEdited = false;
     $('#settings-discard').hidden = true;
     navigation.activate('ai', { reset: true });
     siteMenu.open = true;
@@ -132,6 +209,14 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
     dialog.showModal();
     $('#ai-save-settings').disabled = true;
     try {
+      const revision = catalogRevision;
+      void chrome.runtime.sendMessage({ type: 'SIDER_GEMINI_CATALOG_GET' }).then(result => {
+        if (!disposed && catalogRevision === revision) receiveGeminiCatalog(result?.catalog);
+      }).catch(() => {});
+      const chatgptRevision = chatgptCatalogRevision;
+      void chrome.runtime.sendMessage({ type: 'SIDER_CHATGPT_CATALOG_GET' }).then(result => {
+        if (!disposed && chatgptCatalogRevision === chatgptRevision) receiveChatGPTCatalog(result?.catalog);
+      }).catch(() => {});
       const response = await chrome.runtime.sendMessage({ type: 'SIDER_AI_WEB_SETTINGS_GET' });
       if (!response?.ok) throw new Error(response?.error || '无法读取 AI 网站设置。');
       draft = normalizeAIWebSettings(response.settings); savedDraft = JSON.stringify(draft); render();
@@ -149,8 +234,18 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
     draft.activeSiteId = $('#ai-active-site').value; error(''); status('网站已选择，保存后生效。'); render();
   });
   $('#ai-gemini-spark').addEventListener('change', () => { draft.geminiMode = $('#ai-gemini-spark').checked ? GEMINI_MODE_SPARK : GEMINI_MODE_NORMAL; error(''); });
-  $('#ai-gemini-model').addEventListener('change', () => { draft.geminiModel = $('#ai-gemini-model').value; error(''); });
-  $('#ai-gemini-thinking').addEventListener('change', () => { draft.geminiThinkingLevel = $('#ai-gemini-thinking').value; error(''); });
+  $('#ai-gemini-model').addEventListener('change', () => {
+    draft.geminiModel = $('#ai-gemini-model').value; geminiEdited = true;
+    const selected = resolveGeminiModel(geminiCatalog?.models || [], draft.geminiModel);
+    if (selected && !selected.levels.length) draft.geminiThinkingLevel = 'site-default';
+    error(''); renderGeminiOptions();
+  });
+  $('#ai-gemini-thinking').addEventListener('change', () => { draft.geminiThinkingLevel = $('#ai-gemini-thinking').value; geminiEdited = true; error(''); });
+  $('#ai-chatgpt-model').addEventListener('change', () => {
+    draft.chatgptModel = $('#ai-chatgpt-model').value; draft.chatgptPreset = 'site-default'; chatgptEdited = true;
+    error(''); renderChatGPTOptions();
+  });
+  $('#ai-chatgpt-preset').addEventListener('change', () => { draft.chatgptPreset = $('#ai-chatgpt-preset').value; chatgptEdited = true; error(''); });
   $('#reference-hide-unavailable-tabs').addEventListener('change', () => { draft.hideUnavailableTabs = $('#reference-hide-unavailable-tabs').checked; error(''); });
   $('#ai-add-site').addEventListener('click', () => { error(''); edit(); });
   $('#ai-edit-site').addEventListener('click', () => { error(''); edit(selectedAISite(draft)); });
@@ -211,6 +306,17 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
     controls.forEach(control => { control.disabled = true; });
     try {
       const settings = validateAIWebSettings(draft);
+      if (geminiEdited) {
+        const model = resolveGeminiModel(geminiCatalog?.models || [], settings.geminiModel);
+        const level = geminiLevelNumber(settings.geminiThinkingLevel);
+        if (!model?.available) throw new Error('所选 Gemini 模型当前不可用，请重新选择。');
+        if (settings.geminiThinkingLevel !== 'site-default' && !model.levels.some(item => item.id === level)) throw new Error('请选择此模型支持的思考等级。');
+      }
+      if (chatgptEdited && settings.chatgptModel !== 'site-default') {
+        const version = chatgptCatalog?.versions.find(item => item.id === chatgptModelId(settings.chatgptModel));
+        const preset = version?.presets.find(item => item.available && chatgptPresetValue(item) === settings.chatgptPreset);
+        if (!version?.available || !preset) throw new Error('请选择当前 ChatGPT 模型支持的推理档位。');
+      }
       const site = selectedAISite(settings);
       // Keep the permission request directly in the Save click's user gesture.
       const granted = await chrome.permissions.request({ origins: [aiSitePattern(site)] });
@@ -219,7 +325,7 @@ export function installAIWebSettings({ document, chrome, onSaved, pickSendButton
       if (!result?.ok) throw new Error(result?.error || '设置保存失败，请重试。');
       savedDraft = JSON.stringify(draft); updateSaveHint(); dialog.close(); onSaved?.(normalizeAIWebSettings(result.settings));
     } catch (cause) { error(cause.message); }
-    finally { saving = false; button.disabled = false; button.textContent = '保存更改'; button.removeAttribute('aria-busy'); controls.forEach((control, index) => { control.disabled = disabled[index]; }); }
+    finally { saving = false; button.disabled = false; button.textContent = '保存更改'; button.removeAttribute('aria-busy'); controls.forEach((control, index) => { control.disabled = disabled[index]; }); if (dialog.open) { renderGeminiOptions(); renderChatGPTOptions(); } }
   });
   render();
 }

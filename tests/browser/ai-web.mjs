@@ -53,6 +53,7 @@ try {
   const sourceTab=await worker.evaluate(async url=>(await chrome.tabs.query({})).find(tab=>tab.url===url),sourceURL);assert.ok(sourceTab);
   const panel=await context.newPage();panel.on('pageerror',error=>errors.push(error.message));
   await panel.goto(`chrome-extension://${id}/panel.html?sourceTab=${sourceTab.id}`);
+  await panel.evaluate(() => chrome.storage.session.set({ 'sider.geminiCatalog.v1': { models: ['flash-lite','flash','pro','argon'].map(id => ({ id, label:id, available:true, levels:[{id:1,label:'低'},{id:4,label:'中'},{id:2,label:'高'}] })) } }));
   const chat=panel.frameLocator('iframe');
   const send=async message=>panel.evaluate(message=>chrome.runtime.sendMessage(message),message);
   await chat.locator('#sider-enhancement').waitFor();
@@ -153,8 +154,8 @@ try {
   assert.equal(await panel.locator('#ai-site-groups > details').count(),4);
   await panel.locator('[data-site-id="gemini"] > summary').click();
   assert.equal(await panel.locator('#ai-gemini-spark').isVisible(),true);
-  await panel.locator('#ai-gemini-model').selectOption('argon');
-  await panel.locator('#ai-gemini-thinking').selectOption('medium');
+  await panel.locator('#ai-gemini-model').selectOption('id:argon');
+  await panel.locator('#ai-gemini-thinking').selectOption('level:4');
   await panel.locator('[data-site-id="gemini"] > summary').click();
   assert.equal(await panel.locator('#ai-gemini-spark').isVisible(),false);
   await panel.getByRole('button',{name:'编辑网站',exact:true}).click();await panel.locator('#ai-custom-fields summary').click();
@@ -165,7 +166,7 @@ try {
   await send({type:'SIDER_TAB_ATTACHMENT_SET',tabId:sourceTab.id,kind:'page',enabled:true});await chat.locator('#question').fill('Custom question');await chat.locator('#question').press('Control+Enter');
   await chat.locator('body').evaluate(()=>new Promise(resolve=>{const timer=setInterval(()=>{if(sent.length){clearInterval(timer);resolve()}},20)}));
   assert.ok((await waitSent())[0].includes(marker));assert.equal(await chat.locator('body').evaluate(()=>uploaded.length),0);assert.match(await chat.locator('.status').innerText(),/完整文本/);passed('custom configured shortcut and complete-text fallback');
-  const saved=(await send({type:'SIDER_AI_WEB_SETTINGS_GET'})).settings;assert.equal(saved.activeSiteId,customId);assert.equal(saved.customSites[0].selectors.composer,'#question');assert.equal(saved.geminiModel,'argon');assert.equal(saved.geminiThinkingLevel,'medium');
+  const saved=(await send({type:'SIDER_AI_WEB_SETTINGS_GET'})).settings;assert.equal(saved.activeSiteId,customId);assert.equal(saved.customSites[0].selectors.composer,'#question');assert.equal(saved.geminiModel,'id:argon');assert.equal(saved.geminiThinkingLevel,'level:4');
   passed('per-site settings stay hidden until expanded and preserve changes after collapsing');
   await worker.evaluate(()=>{globalThis.originalTabsSend=chrome.tabs.sendMessage.bind(chrome.tabs);});
   assert.deepEqual(errors,[]);passed('no panel page errors');

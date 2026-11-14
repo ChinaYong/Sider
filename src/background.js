@@ -3,6 +3,8 @@ import { TAB_CONTEXT_PREFIX, expandTemplateItem } from './context.js';
 import { getTabContext, updateTabSelection, setTabAttachment, applyTemplateDefaults, setTabTemplate, clearTabTemplates, requestTabPage, invalidateTabSource, clearTabSelection, resetTabContext, removeTabContext, getContextSettings, patchContextSettings, syncTemplateDemand } from './context-store.js';
 import { createReferenceSessions, referenceSource, REFERENCE_SESSIONS_KEY } from './reference-sessions.js';
 import { AI_WEB_SETTINGS_KEY, BUILTIN_AI_SITES, aiSiteURL, normalizeAIWebSettings, validateAIWebSettings, normalizeCustomAISite, listAISites, selectedAISite, siteForURL, aiSitePattern } from './ai-web.js';
+import { GEMINI_CATALOG_KEY, validateGeminiCatalog } from './gemini-catalog.js';
+import { CHATGPT_CATALOG_KEY, validateChatGPTCatalog } from './chatgpt-catalog.js';
 import { UNIFIED_TEMPLATES_KEY, PRESET_IDS, getTemplates, validateTemplates, alwaysIncludeSelection } from './prompt-templates.js';
 import { needsPageVariables, needsTemplateSelection } from './variables.js';
 import { CONFIGURATION_KEYS, ENABLED_ORIGINS_KEY, exportConfiguration, validateConfiguration, configurationStorage } from './configuration.js';
@@ -41,6 +43,8 @@ let installedEmbedSignature = '';
 let installedEmbedRuleIds = [EMBED_RULE_ID];
 let aiScriptsQueue = Promise.resolve();
 let configurationQueue = Promise.resolve();
+let geminiCatalogQueue = Promise.resolve();
+let chatgptCatalogQueue = Promise.resolve();
 function configurationOperation(operation) {
   const pending = configurationQueue.then(operation);
   configurationQueue = pending.catch(() => {}); return pending;
@@ -93,8 +97,17 @@ async function performAIScriptSync(settings) {
   for (const registration of embedRegistrations.values()) if (registration.site) sites.set(registration.site.origin, registration.site);
   const desired = [];
   for (const site of sites.values()) {
-    if (site.id === 'chatgpt' || !await chrome.permissions.contains({ origins: [aiSitePattern(site)] })) continue;
+    if (site.id === 'chatgpt') {
+      desired.push({ id: 'sider-ai-chatgpt-preference-main', matches: [aiSitePattern(site)], js: ['chatgpt-preference-main.js'], world: 'MAIN', runAt: 'document_start', allFrames: true, persistAcrossSessions: true });
+      desired.push({ id: 'sider-ai-chatgpt-preference-bridge', matches: [aiSitePattern(site)], js: ['chatgpt-preference-bridge.js'], runAt: 'document_start', allFrames: true, persistAcrossSessions: true });
+      continue;
+    }
+    if (!await chrome.permissions.contains({ origins: [aiSitePattern(site)] })) continue;
     desired.push({ id: `sider-ai-drop-${encodeURIComponent(site.origin)}`, matches: [aiSitePattern(site)], js: ['file-drop-main.js'], world: 'MAIN', runAt: 'document_start', allFrames: true, persistAcrossSessions: true });
+    if (site.id === 'gemini') {
+      desired.push({ id: `sider-ai-gemini-main-${encodeURIComponent(site.origin)}`, matches: [aiSitePattern(site)], js: ['gemini-preference-main.js'], world: 'MAIN', runAt: 'document_start', allFrames: true, persistAcrossSessions: true });
+      desired.push({ id: `sider-ai-gemini-bridge-${encodeURIComponent(site.origin)}`, matches: [aiSitePattern(site)], js: ['gemini-preference-bridge.js'], runAt: 'document_start', allFrames: true, persistAcrossSessions: true });
+    }
     desired.push({ id: `sider-ai-${encodeURIComponent(site.origin)}`, matches: [aiSitePattern(site)], js: ['ai-content.js'], runAt: 'document_idle', allFrames: true, persistAcrossSessions: true });
   }
   const current = (await chrome.scripting.getRegisteredContentScripts()).filter(script => script.id.startsWith('sider-ai-'));
@@ -156,6 +169,11 @@ function authorize(message, sender) {
   if (isExtensionSender(sender)) return;
   if (message.type === 'SIDER_CHAT_READY' && isChatSender(sender)) return;
   if (message.type === 'SIDER_GEMINI_DEFAULTS_GET' && isChatSender(sender)) return;
+  if ((message.type === 'SIDER_CHATGPT_DEFAULTS_GET' || message.type === 'SIDER_CHATGPT_CATALOG_PUBLISH')
+    && isChatSender(sender) && parseURL(sender.url)?.origin === 'https://chatgpt.com') return;
+  if (message.type === 'SIDER_GEMINI_CATALOG_PUBLISH' && isChatSender(sender)
+    && parseURL(sender.url)?.origin === 'https://gemini.google.com'
+    && /^(?:\/u\/\d+)?\/app(?:\/|$)/.test(parseURL(sender.url).pathname)) return;
   if (message.type === 'SIDER_ENHANCEMENT_REQUEST' && isChatSender(sender) && message.embedded && embedRegistration(sender, message.bridgeId)) return;
   if (isSourcePageSender(sender) && CONTENT_MESSAGES.has(message.type)) {
     if (message.type === 'SIDER_CAPTURE' && message.tabId != null && message.tabId !== sender.tab.id) {
@@ -167,6 +185,36 @@ function authorize(message, sender) {
     return;
   }
   throw new Error('拒绝来自非扩展页面的请求。');
+}
+
+function publishGeminiCatalog(raw, sender) {
+  const catalog = raw === null ? null : validateGeminiCatalog(raw);
+  if (raw !== null && !catalog) throw new Error('Gemini 模型列表格式无效。');
+  const path = parseURL(sender.url)?.pathname || '';
+  const account = path.match(/^\/u\/(\d+)\//)?.[1] || 'default';
+  const operation = geminiCatalogQueue.then(async () => {
+    if (!catalog) { await chrome.storage.session.remove(GEMINI_CATALOG_KEY); return { ok: true }; }
+    const previous = (await chrome.storage.session.get(GEMINI_CATALOG_KEY))[GEMINI_CATALOG_KEY];
+    if (previous?.account === account && JSON.stringify(previous.models) === JSON.stringify(catalog.models)) return { ok: true };
+    await chrome.storage.session.set({ [GEMINI_CATALOG_KEY]: { ...catalog, account, capturedAt: Date.now() } });
+    return { ok: true };
+  });
+  geminiCatalogQueue = operation.catch(() => {});
+  return operation;
+}
+
+function publishChatGPTCatalog(raw) {
+  const catalog = raw === null ? null : validateChatGPTCatalog(raw);
+  if (raw !== null && !catalog) throw new Error('ChatGPT 模型列表格式无效。');
+  const operation = chatgptCatalogQueue.then(async () => {
+    if (!catalog) { await chrome.storage.session.remove(CHATGPT_CATALOG_KEY); return { ok: true }; }
+    const previous = (await chrome.storage.session.get(CHATGPT_CATALOG_KEY))[CHATGPT_CATALOG_KEY];
+    if (JSON.stringify(previous?.versions) === JSON.stringify(catalog.versions)) return { ok: true };
+    await chrome.storage.session.set({ [CHATGPT_CATALOG_KEY]: { ...catalog, capturedAt: Date.now() } });
+    return { ok: true };
+  });
+  chatgptCatalogQueue = operation.catch(() => {});
+  return operation;
 }
 
 function rememberSource(tab) {
@@ -1221,6 +1269,19 @@ async function handleMessage(message, sender) {
     case 'SIDER_CONFIGURATION_EXPORT': await getTemplates(); return { ok: true, backup: exportConfiguration(await chrome.storage.local.get(CONFIGURATION_KEYS)) };
     case 'SIDER_CONFIGURATION_IMPORT': return importConfiguration(message);
     case 'SIDER_GEMINI_DEFAULTS_GET': return { ok: true, settings: { geminiModel: aiWebSettings.geminiModel, geminiThinkingLevel: aiWebSettings.geminiThinkingLevel } };
+    case 'SIDER_CHATGPT_DEFAULTS_GET': return { ok: true, settings: { chatgptModel: aiWebSettings.chatgptModel, chatgptPreset: aiWebSettings.chatgptPreset } };
+    case 'SIDER_CHATGPT_CATALOG_PUBLISH': return publishChatGPTCatalog(message.catalog);
+    case 'SIDER_CHATGPT_CATALOG_GET': {
+      const saved = (await chrome.storage.session.get(CHATGPT_CATALOG_KEY))[CHATGPT_CATALOG_KEY];
+      const catalog = validateChatGPTCatalog(saved);
+      return { ok: true, catalog: catalog ? { ...catalog, capturedAt: saved.capturedAt } : null };
+    }
+    case 'SIDER_GEMINI_CATALOG_PUBLISH': return publishGeminiCatalog(message.catalog, sender);
+    case 'SIDER_GEMINI_CATALOG_GET': {
+      const saved = (await chrome.storage.session.get(GEMINI_CATALOG_KEY))[GEMINI_CATALOG_KEY];
+      const catalog = validateGeminiCatalog(saved);
+      return { ok: true, catalog: catalog ? { ...catalog, account: saved.account, capturedAt: saved.capturedAt } : null };
+    }
     case 'SIDER_ENHANCEMENT_REQUEST': return enhancementRequest(message, sender);
     case 'SIDER_SELECTION_CHANGED': return receiveSelection(message, sender);
     case 'SIDER_OPEN_SOURCE_PANEL': return changeTabAttachment(sender.tab.id, 'selection', true);

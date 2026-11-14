@@ -50,6 +50,15 @@
         <details id="ai-site-settings" class="site-settings-menu">
           <summary><span class="summary-copy"><strong>网站专属设置</strong><span>按网站调整界面、模型与控件</span></span></summary>
           <div id="ai-site-groups"></div>
+          <div id="ai-chatgpt-options">
+            <section class="setting-block" aria-labelledby="chatgpt-response-title">
+              <h3 id="chatgpt-response-title">模型与推理</h3>
+              <label for="ai-chatgpt-model">默认模型</label><select id="ai-chatgpt-model"></select>
+              <label for="ai-chatgpt-preset">推理档位</label><select id="ai-chatgpt-preset" aria-describedby="ai-chatgpt-model-help"></select>
+              <p id="ai-chatgpt-catalog-status" class="setting-help" role="status"></p>
+              <p id="ai-chatgpt-model-help" class="setting-help">列表随最近加载的 ChatGPT 页面更新；选择将在普通新对话首页尝试应用，也影响普通浏览器标签页。</p>
+            </section>
+          </div>
           <div id="ai-gemini-options">
             <section class="setting-block" aria-labelledby="gemini-interface-title">
               <h3 id="gemini-interface-title">界面偏好</h3>
@@ -60,7 +69,8 @@
               <h3 id="gemini-response-title">模型与思考</h3>
               <label for="ai-gemini-model">默认模型</label><select id="ai-gemini-model"></select>
               <label for="ai-gemini-thinking">思考等级</label><select id="ai-gemini-thinking" aria-describedby="ai-gemini-model-help"></select>
-              <p id="ai-gemini-model-help" class="setting-help">加载后尝试应用，是否可用取决于账号和原站版本。</p>
+              <p id="ai-gemini-catalog-status" class="setting-help" role="status"></p>
+              <p id="ai-gemini-model-help" class="setting-help">列表随最近加载的 Gemini 页面更新，账号不同可用项可能不同。设置也会作用于普通浏览器标签页。</p>
             </section>
           </div>
         </details>
@@ -162,7 +172,7 @@
   <dialog id="configuration-dialog" aria-labelledby="configuration-title">
     <div class="dialog-title"><strong id="configuration-title">配置导入／导出</strong><button id="configuration-close" type="button" aria-label="关闭配置备份">×</button></div>
     <p>导入会完整替换可自定义配置。选择文件后先检查变更，再执行替换；当前会话和草稿保留。</p>
-    <p>备份包含预设、附件设置、AI 网站与控件、Gemini 选项、自动划词网站和悬浮球设置；不包含登录、权限、聊天或正文缓存。</p>
+    <p>备份包含预设、附件设置、AI 网站与控件、ChatGPT 和 Gemini 选项、自动划词网站和悬浮球设置；不包含登录、权限、聊天或正文缓存。</p>
     <button id="configuration-export" type="button">导出完整配置</button>
     <label for="configuration-file">选择 Sider JSON 配置文件</label><input id="configuration-file" type="file" accept=".json,application/json">
     <pre id="configuration-preview"></pre>

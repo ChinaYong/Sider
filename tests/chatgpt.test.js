@@ -287,6 +287,10 @@ test('AI settings are privileged, require the selected origin, and preserve exis
   assert.ok([...f.scripts.values()].some(script => script.matches[0] === 'https://gemini.google.com/*'));
   const drop = [...f.scripts.values()].find(script => script.matches[0] === 'https://gemini.google.com/*' && script.world === 'MAIN');
   assert.deepEqual(drop.js, ['file-drop-main.js']); assert.equal(drop.runAt, 'document_start'); assert.equal(drop.allFrames, true);
+  const main = [...f.scripts.values()].find(script => script.js.includes('gemini-preference-main.js'));
+  const bridge = [...f.scripts.values()].find(script => script.js.includes('gemini-preference-bridge.js'));
+  assert.equal(main.world, 'MAIN'); assert.equal(main.runAt, 'document_start'); assert.equal(main.allFrames, true);
+  assert.equal(bridge.world || 'ISOLATED', 'ISOLATED'); assert.equal(bridge.runAt, 'document_start'); assert.equal(bridge.allFrames, true);
 });
 
 test('Gemini pages can read only the saved default model settings', async t => {
@@ -296,6 +300,45 @@ test('Gemini pages can read only the saved default model settings', async t => {
   const source = { id: f.api.runtime.id, url: 'https://gemini.google.com/app', frameId: 0 };
   const result = await f.send({ type: 'SIDER_GEMINI_DEFAULTS_GET' }, source);
   assert.deepEqual(result, { ok: true, settings: { geminiModel: 'pro', geminiThinkingLevel: 'high' } });
+});
+
+test('only Gemini can publish bounded live catalog metadata to extension settings', async t => {
+  const f = await aiWorker(t);
+  const catalog = { models: [{ id: 'argon', label: '4 Argon', available: true, levels: [{ id: 2, label: '高' }] }] };
+  const gemini = { id: f.api.runtime.id, url: 'https://gemini.google.com/u/1/app', frameId: 0 };
+  assert.equal((await f.send({ type: 'SIDER_GEMINI_CATALOG_PUBLISH', catalog }, gemini)).ok, true);
+  const saved = await f.send({ type: 'SIDER_GEMINI_CATALOG_GET' });
+  assert.deepEqual(saved.catalog.models, catalog.models);
+  assert.equal(saved.catalog.account, '1');
+  assert.equal(Object.hasOwn(f.values, 'sider.geminiCatalog.v1'), false);
+  const wrongSite = { id: f.api.runtime.id, url: 'https://chatgpt.com/', frameId: 0 };
+  assert.equal((await f.send({ type: 'SIDER_GEMINI_CATALOG_PUBLISH', catalog }, wrongSite)).ok, false);
+  assert.equal((await f.send({ type: 'SIDER_GEMINI_CATALOG_GET' }, gemini)).ok, false);
+  assert.equal((await f.send({ type: 'SIDER_GEMINI_CATALOG_PUBLISH', catalog: { models: [{ ...catalog.models[0], id: '../bad' }] } }, gemini)).ok, false);
+  assert.deepEqual((await f.send({ type: 'SIDER_GEMINI_CATALOG_GET' })).catalog.models, catalog.models);
+  assert.equal((await f.send({ type: 'SIDER_GEMINI_CATALOG_PUBLISH', catalog: null }, wrongSite)).ok, false);
+  assert.equal((await f.send({ type: 'SIDER_GEMINI_CATALOG_PUBLISH', catalog: null }, gemini)).ok, true);
+  assert.equal((await f.send({ type: 'SIDER_GEMINI_CATALOG_GET' })).catalog, null);
+});
+
+test('only ChatGPT can publish bounded picker metadata and read its defaults', async t => {
+  const f = await aiWorker(t);
+  const catalog = { versions: [{ id: 'latest', label: 'GPT New', available: true,
+    presets: [{ slug: 'new-thinking', effort: 'standard', label: 'Medium', available: true }] }] };
+  const chatgpt = { id: f.api.runtime.id, url: 'https://chatgpt.com/', frameId: 0 };
+  const gemini = { id: f.api.runtime.id, url: 'https://gemini.google.com/app', frameId: 0 };
+  assert.equal((await f.send({ type: 'SIDER_CHATGPT_CATALOG_PUBLISH', catalog }, chatgpt)).ok, true);
+  assert.deepEqual((await f.send({ type: 'SIDER_CHATGPT_CATALOG_GET' })).catalog.versions, catalog.versions);
+  assert.equal(Object.hasOwn(f.values, 'sider.chatgptCatalog.v1'), false);
+  assert.equal((await f.send({ type: 'SIDER_CHATGPT_CATALOG_PUBLISH', catalog }, gemini)).ok, false);
+  assert.equal((await f.send({ type: 'SIDER_CHATGPT_CATALOG_GET' }, chatgpt)).ok, false);
+  assert.equal((await f.send({ type: 'SIDER_CHATGPT_DEFAULTS_GET' }, gemini)).ok, false);
+  assert.equal((await f.send({ type: 'SIDER_CHATGPT_CATALOG_PUBLISH', catalog: { versions: [{ ...catalog.versions[0], id: '../bad' }] } }, chatgpt)).ok, false);
+  assert.equal((await f.send({ type: 'SIDER_CHATGPT_CATALOG_PUBLISH', catalog: null }, chatgpt)).ok, true);
+  assert.equal((await f.send({ type: 'SIDER_CHATGPT_CATALOG_GET' })).catalog, null);
+  assert.deepEqual((await f.send({ type: 'SIDER_CHATGPT_DEFAULTS_GET' }, chatgpt)).settings, { chatgptModel: 'site-default', chatgptPreset: 'site-default' });
+  assert.ok([...f.scripts.values()].some(script => script.js.includes('chatgpt-preference-main.js') && script.world === 'MAIN' && script.runAt === 'document_start'));
+  assert.ok([...f.scripts.values()].some(script => script.js.includes('chatgpt-preference-bridge.js') && script.runAt === 'document_start'));
 });
 
 test('opening Gemini uses the persisted Spark entry URL', async t => {

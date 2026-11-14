@@ -198,7 +198,7 @@ test('custom website validation rejects unsafe addresses, duplicate origins, res
 });
 
 test('builtin selector overrides keep immutable site identity and preserve old settings without migration', () => {
-  assert.deepEqual(normalizeAIWebSettings(), { activeSiteId: 'chatgpt', customSites: [], geminiMode: 'normal', geminiModel: 'flash-lite', geminiThinkingLevel: 'low', hideUnavailableTabs: false });
+  assert.deepEqual(normalizeAIWebSettings(), { activeSiteId: 'chatgpt', customSites: [], geminiMode: 'normal', geminiModel: 'flash-lite', geminiThinkingLevel: 'low', chatgptModel: 'site-default', chatgptPreset: 'site-default', hideUnavailableTabs: false });
   const settings = validateAIWebSettings({ activeSiteId: 'claude', customSites: [custom()], builtinOverrides: { claude: { url: 'https://evil.test', adapter: 'generic', selectors: { send: ' #picked ' } } } });
   const site = selectedAISite(settings);
   assert.equal(site.origin, 'https://claude.ai'); assert.equal(site.adapter, 'claude'); assert.equal(site.selectors.send, '#picked');

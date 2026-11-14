@@ -1,3 +1,6 @@
+import { geminiLevelNumber, geminiModelId } from './gemini-catalog.js';
+import { chatgptModelId, chatgptPresetParts } from './chatgpt-catalog.js';
+
 export const AI_WEB_SETTINGS_KEY = 'sider.aiWebSettings.v1';
 export const GEMINI_NORMAL_URL = 'https://gemini.google.com/app';
 export const GEMINI_SPARK_URL = 'https://gemini.google.com/spark';
@@ -7,17 +10,7 @@ export const GEMINI_MODEL_FLASH_LITE = 'flash-lite';
 export const GEMINI_MODEL_FLASH = 'flash';
 export const GEMINI_MODEL_PRO = 'pro';
 export const GEMINI_MODEL_ARGON = 'argon';
-export const GEMINI_MODEL_OPTIONS = Object.freeze([
-  Object.freeze({ value: GEMINI_MODEL_FLASH_LITE, label: '3.5 Flash-Lite（极速回答）' }),
-  Object.freeze({ value: GEMINI_MODEL_FLASH, label: '3.8 Flash（全方位帮助）' }),
-  Object.freeze({ value: GEMINI_MODEL_PRO, label: '3.1 Pro（高级推理）' }),
-  Object.freeze({ value: GEMINI_MODEL_ARGON, label: '4 Argon（复杂任务）' }),
-]);
-export const GEMINI_THINKING_OPTIONS = Object.freeze([
-  Object.freeze({ value: 'low', label: '低点（快速高效）' }),
-  Object.freeze({ value: 'medium', label: '中等（深度适中）' }),
-  Object.freeze({ value: 'high', label: '高点（超级详尽）' }),
-]);
+const LEGACY_GEMINI_MODELS = Object.freeze([GEMINI_MODEL_FLASH_LITE, GEMINI_MODEL_FLASH, GEMINI_MODEL_PRO, GEMINI_MODEL_ARGON]);
 export const BUILTIN_AI_SITES = Object.freeze([
   { id: 'chatgpt', name: 'ChatGPT', url: 'https://chatgpt.com/', adapter: 'chatgpt' },
   { id: 'gemini', name: 'Gemini', url: GEMINI_NORMAL_URL, adapter: 'gemini' },
@@ -32,7 +25,7 @@ function normalizeGeminiMode(value, strict = false) {
 }
 
 function normalizeGeminiModel(value, strict = false) {
-  if (value == null || GEMINI_MODEL_OPTIONS.some(option => option.value === value)) return value || GEMINI_MODEL_FLASH_LITE;
+  if (value == null || LEGACY_GEMINI_MODELS.includes(value) || geminiModelId(value)) return value || GEMINI_MODEL_FLASH_LITE;
   if (strict) throw new Error('Gemini 默认模型设置无效。');
   return GEMINI_MODEL_FLASH_LITE;
 }
@@ -41,7 +34,7 @@ function normalizeGeminiThinking(raw, strict = false) {
   // Presence matters: an invalid new value must not silently revive a legacy flag.
   const key = raw && Object.hasOwn(raw, 'thinkingLevel') ? 'thinkingLevel' : 'geminiThinkingLevel';
   if (raw && Object.hasOwn(raw, key)) {
-    if (GEMINI_THINKING_OPTIONS.some(option => option.value === raw[key])) return raw[key];
+    if (raw[key] === 'site-default' || geminiLevelNumber(raw[key]) !== null) return raw[key];
     if (strict) throw new Error('Gemini 思考等级设置无效。');
     return 'low';
   }
@@ -56,6 +49,20 @@ export function normalizeGeminiDefaults(raw, strict = false) {
     model: normalizeGeminiModel(raw?.model ?? raw?.geminiModel, strict),
     thinkingLevel: normalizeGeminiThinking(raw, strict),
   };
+}
+
+export function normalizeChatGPTDefaults(raw, strict = false) {
+  const model = raw?.model ?? raw?.chatgptModel ?? 'site-default';
+  const preset = raw?.preset ?? raw?.chatgptPreset ?? 'site-default';
+  if (model !== 'site-default' && !chatgptModelId(model)) {
+    if (strict) throw new Error('ChatGPT 默认模型设置无效。');
+    return { model: 'site-default', preset: 'site-default' };
+  }
+  if (preset !== 'site-default' && !chatgptPresetParts(preset)) {
+    if (strict) throw new Error('ChatGPT 推理档位设置无效。');
+    return { model, preset: 'site-default' };
+  }
+  return { model, preset };
 }
 
 export function aiSiteURL(site, settings) {
@@ -111,6 +118,7 @@ export function validateAIWebSettings(raw) {
   if (!raw || !Array.isArray(raw.customSites)) throw new Error('AI 网站设置格式无效。');
   if (raw.hideUnavailableTabs !== undefined && typeof raw.hideUnavailableTabs !== 'boolean') throw new Error('隐藏不可用引用标签页设置无效。');
   const geminiDefaults = normalizeGeminiDefaults(raw, true);
+  const chatgptDefaults = normalizeChatGPTDefaults(raw, true);
   const customSites = raw.customSites.map(normalizeCustomAISite);
   const ids = new Set(); const origins = new Set();
   for (const site of customSites) {
@@ -118,11 +126,12 @@ export function validateAIWebSettings(raw) {
     ids.add(site.id); origins.add(site.origin);
   }
   if (![...BUILTIN_AI_SITES, ...customSites].some(site => site.id === raw.activeSiteId)) throw new Error('请选择一个有效的 AI 网站。');
-  return withOverrides({ activeSiteId: raw.activeSiteId, customSites, geminiMode: normalizeGeminiMode(raw.geminiMode, true), geminiModel: geminiDefaults.model, geminiThinkingLevel: geminiDefaults.thinkingLevel, hideUnavailableTabs: raw.hideUnavailableTabs === true }, builtinOverrides(raw.builtinOverrides, true));
+  return withOverrides({ activeSiteId: raw.activeSiteId, customSites, geminiMode: normalizeGeminiMode(raw.geminiMode, true), geminiModel: geminiDefaults.model, geminiThinkingLevel: geminiDefaults.thinkingLevel, chatgptModel: chatgptDefaults.model, chatgptPreset: chatgptDefaults.preset, hideUnavailableTabs: raw.hideUnavailableTabs === true }, builtinOverrides(raw.builtinOverrides, true));
 }
 
 export function normalizeAIWebSettings(raw) {
   const geminiDefaults = normalizeGeminiDefaults(raw);
+  const chatgptDefaults = normalizeChatGPTDefaults(raw);
   const customSites = []; const origins = new Set(); const ids = new Set();
   for (const candidate of Array.isArray(raw?.customSites) ? raw.customSites : []) {
     try {
@@ -131,7 +140,7 @@ export function normalizeAIWebSettings(raw) {
     } catch { /* Invalid persisted entries cannot expand extension privileges. */ }
   }
   const activeSiteId = [...BUILTIN_AI_SITES, ...customSites].some(site => site.id === raw?.activeSiteId) ? raw.activeSiteId : 'chatgpt';
-  return withOverrides({ activeSiteId, customSites, geminiMode: normalizeGeminiMode(raw?.geminiMode), geminiModel: geminiDefaults.model, geminiThinkingLevel: geminiDefaults.thinkingLevel, hideUnavailableTabs: raw?.hideUnavailableTabs === true }, builtinOverrides(raw?.builtinOverrides));
+  return withOverrides({ activeSiteId, customSites, geminiMode: normalizeGeminiMode(raw?.geminiMode), geminiModel: geminiDefaults.model, geminiThinkingLevel: geminiDefaults.thinkingLevel, chatgptModel: chatgptDefaults.model, chatgptPreset: chatgptDefaults.preset, hideUnavailableTabs: raw?.hideUnavailableTabs === true }, builtinOverrides(raw?.builtinOverrides));
 }
 
 export function listAISites(settings) {

@@ -6,6 +6,13 @@ import { installAIWebSettings } from '../src/ai-web-settings.js';
 import { normalizeAIWebSettings, selectedAISite } from '../src/ai-web.js';
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
+const testCatalog = { models: ['flash-lite', 'flash', 'pro', 'argon'].map(id => ({ id, label: id, available: true,
+  levels: [{ id: 1, label: '低' }, { id: 4, label: '中' }, { id: 2, label: '高' }] })) };
+const chatgptCatalog = { versions: [{ id: 'latest', label: 'GPT New', available: true, presets: [
+  { slug: 'new-instant', effort: null, label: 'Instant', available: true },
+  { slug: 'new-thinking', effort: 'standard', label: 'Medium', available: true },
+  { slug: 'new-thinking', effort: 'extended', label: 'High', available: false },
+] }] };
 async function fixture(t, settings = normalizeAIWebSettings(), pickSendButton = async () => ({ ok: true, selector: 'button[data-action="deliver"]' })) {
   const html = await readFile(new URL('../src/panel.html', import.meta.url), 'utf8');
   const { window } = new JSDOM(html);
@@ -13,15 +20,40 @@ async function fixture(t, settings = normalizeAIWebSettings(), pickSendButton = 
   const document = window.document;
   const dialog = document.querySelector('#ai-settings-dialog');
   dialog.showModal = () => { dialog.open = true; }; dialog.close = () => { dialog.open = false; };
-  const messages = [], picked = [];
+  const messages = [], picked = [], catalogListeners = [];
   const chrome = {
-    runtime: { id: 'settings-test', async sendMessage(message) { messages.push(message); if (message.type === 'SIDER_AI_WEB_SETTINGS_SAVE') settings = message.settings; return { ok: true, settings }; } },
+    runtime: { id: 'settings-test', async sendMessage(message) { messages.push(message); if (message.type === 'SIDER_GEMINI_CATALOG_GET') return { ok: true, catalog: testCatalog }; if (message.type === 'SIDER_CHATGPT_CATALOG_GET') return { ok: true, catalog: chatgptCatalog }; if (message.type === 'SIDER_AI_WEB_SETTINGS_SAVE') settings = message.settings; return { ok: true, settings }; } },
+    storage: { onChanged: { addListener(listener) { catalogListeners.push(listener); } } },
     permissions: { async request() { return true; } },
   };
   installAIWebSettings({ document, chrome, pickSendButton: async site => { picked.push(site); return pickSendButton(site); } });
   document.querySelector('#ai-settings-toggle').click(); await settle();
-  return { window, document, dialog, messages, picked, $: selector => document.querySelector(selector) };
+  return { window, document, dialog, messages, picked, publishCatalog: catalog => catalogListeners.forEach(listener => listener({ 'sider.geminiCatalog.v1': { newValue: catalog } }, 'session')), publishChatGPTCatalog: catalog => catalogListeners.forEach(listener => listener({ 'sider.chatgptCatalog.v1': { newValue: catalog } }, 'session')), $: selector => document.querySelector(selector) };
 }
+
+test('ChatGPT choices follow the live catalog, preserve edits and can return to the website default', async t => {
+  const f = await fixture(t);
+  assert.equal(f.$('#ai-chatgpt-model').value, 'site-default');
+  assert.equal(f.$('#ai-chatgpt-preset').disabled, true);
+  assert.equal(f.$('#ai-chatgpt-preset option[value="preset:new-thinking:extended"]'), null);
+  f.$('#ai-chatgpt-model').value = 'version:latest'; f.$('#ai-chatgpt-model').dispatchEvent(new f.window.Event('change'));
+  assert.equal(f.$('#ai-chatgpt-preset option[value="preset:new-thinking:extended"]').disabled, true);
+  f.$('#ai-chatgpt-preset').value = 'preset:new-thinking:standard'; f.$('#ai-chatgpt-preset').dispatchEvent(new f.window.Event('change'));
+  const updated = structuredClone(chatgptCatalog); updated.versions[0].label = 'Renamed'; updated.versions[0].presets[1].label = 'Balanced';
+  f.publishChatGPTCatalog(updated);
+  assert.equal(f.$('#ai-chatgpt-model').value, 'version:latest');
+  assert.equal(f.$('#ai-chatgpt-preset').value, 'preset:new-thinking:standard');
+  assert.equal(f.$('#ai-chatgpt-preset option[value="preset:new-thinking:standard"]').textContent, 'Balanced');
+  f.$('#ai-save-settings').click(); await settle();
+  assert.equal(f.messages.at(-1).settings.chatgptModel, 'version:latest');
+  assert.equal(f.messages.at(-1).settings.chatgptPreset, 'preset:new-thinking:standard');
+  f.$('#ai-settings-toggle').click(); await settle(); f.publishChatGPTCatalog(null);
+  assert.equal(f.$('#ai-chatgpt-model').value, '__missing__');
+  f.$('#ai-chatgpt-model').value = 'site-default'; f.$('#ai-chatgpt-model').dispatchEvent(new f.window.Event('change'));
+  f.$('#ai-save-settings').click(); await settle();
+  assert.equal(f.messages.at(-1).settings.chatgptModel, 'site-default');
+  assert.equal(f.messages.at(-1).settings.chatgptPreset, 'site-default');
+});
 
 test('reference visibility defaults to showing unavailable tabs, cancels unsaved edits and persists after saving', async t => {
   const f = await fixture(t);
@@ -44,30 +76,56 @@ test('Gemini Spark switch is persisted and defaults to the normal interface', as
   const f = await fixture(t);
   const toggle = f.$('#ai-gemini-spark');
   assert.equal(toggle.checked, false);
-  assert.equal(f.$('#ai-gemini-model').value, 'flash-lite');
-  assert.equal(f.$('#ai-gemini-thinking').value, 'low');
-  assert.deepEqual([...f.$('#ai-gemini-model').options].map(option => option.value), ['flash-lite', 'flash', 'pro', 'argon']);
+  assert.equal(f.$('#ai-gemini-model').value, 'id:flash-lite');
+  assert.equal(f.$('#ai-gemini-thinking').value, 'level:1');
+  assert.deepEqual([...f.$('#ai-gemini-model').options].map(option => option.value), ['id:flash-lite', 'id:flash', 'id:pro', 'id:argon']);
   toggle.click();
-  f.$('#ai-gemini-model').value = 'pro'; f.$('#ai-gemini-model').dispatchEvent(new f.window.Event('change'));
-  f.$('#ai-gemini-thinking').value = 'medium'; f.$('#ai-gemini-thinking').dispatchEvent(new f.window.Event('change'));
+  f.$('#ai-gemini-model').value = 'id:pro'; f.$('#ai-gemini-model').dispatchEvent(new f.window.Event('change'));
+  f.$('#ai-gemini-thinking').value = 'level:4'; f.$('#ai-gemini-thinking').dispatchEvent(new f.window.Event('change'));
   f.$('#ai-save-settings').click(); await settle();
   assert.equal(f.messages.at(-1).settings.geminiMode, 'spark');
-  assert.equal(f.messages.at(-1).settings.geminiModel, 'pro');
-  assert.equal(f.messages.at(-1).settings.geminiThinkingLevel, 'medium');
+  assert.equal(f.messages.at(-1).settings.geminiModel, 'id:pro');
+  assert.equal(f.messages.at(-1).settings.geminiThinkingLevel, 'level:4');
   assert.equal(Object.hasOwn(f.messages.at(-1).settings, 'geminiExtendedThinking'), false);
   assert.equal(toggle.checked, true);
   f.$('#ai-settings-toggle').click(); await settle();
-  assert.equal(f.$('#ai-gemini-thinking').value, 'medium');
+  assert.equal(f.$('#ai-gemini-thinking').value, 'level:4');
 });
 
 test('legacy extended thinking is shown as High and Argon persists with the new field', async t => {
   const f = await fixture(t, { activeSiteId: 'gemini', customSites: [], geminiExtendedThinking: true });
-  assert.equal(f.$('#ai-gemini-thinking').value, 'high');
-  f.$('#ai-gemini-model').value = 'argon'; f.$('#ai-gemini-model').dispatchEvent(new f.window.Event('change'));
+  assert.equal(f.$('#ai-gemini-thinking').value, 'level:2');
+  f.$('#ai-gemini-model').value = 'id:argon'; f.$('#ai-gemini-model').dispatchEvent(new f.window.Event('change'));
   f.$('#ai-save-settings').click(); await settle();
   f.$('#ai-settings-toggle').click(); await settle();
-  assert.equal(f.$('#ai-gemini-model').value, 'argon');
-  assert.equal(f.$('#ai-gemini-thinking').value, 'high');
+  assert.equal(f.$('#ai-gemini-model').value, 'id:argon');
+  assert.equal(f.$('#ai-gemini-thinking').value, 'level:2');
+});
+
+test('live catalog updates model-specific levels without silently replacing a saved model', async t => {
+  const f = await fixture(t);
+  f.publishCatalog({ models: [
+    { id: 'new-model', label: '新模型', available: true, levels: [{ id: 7, label: '新等级' }] },
+    { id: 'locked', label: '升级模型', available: false, levels: [{ id: 1, label: '标准' }] },
+  ] });
+  assert.equal(f.$('#ai-gemini-model').value, '__missing__');
+  assert.equal(f.$('#ai-gemini-model option[value="id:locked"]').disabled, true);
+  f.$('#ai-gemini-model').value = 'id:new-model'; f.$('#ai-gemini-model').dispatchEvent(new f.window.Event('change'));
+  assert.equal(f.$('#ai-gemini-thinking').value, '__missing__');
+  f.$('#ai-gemini-thinking').value = 'level:7'; f.$('#ai-gemini-thinking').dispatchEvent(new f.window.Event('change'));
+  f.$('#ai-save-settings').click(); await settle();
+  assert.equal(f.messages.at(-1).settings.geminiModel, 'id:new-model');
+  assert.equal(f.messages.at(-1).settings.geminiThinkingLevel, 'level:7');
+});
+
+test('missing catalog disables choices but retains unrelated saved settings', async t => {
+  const f = await fixture(t);
+  f.publishCatalog(null);
+  assert.equal(f.$('#ai-gemini-model').disabled, true);
+  assert.match(f.$('#ai-gemini-catalog-status').textContent, /打开或刷新/);
+  f.$('#ai-gemini-spark').click(); f.$('#ai-save-settings').click(); await settle();
+  assert.equal(f.messages.at(-1).settings.geminiModel, 'flash-lite');
+  assert.equal(f.messages.at(-1).settings.geminiThinkingLevel, 'low');
 });
 
 test('per-site settings collapse independently and configuring another site preserves the active website', async t => {
@@ -79,7 +137,7 @@ test('per-site settings collapse independently and configuring another site pres
   assert.equal(gemini.open, false);
   assert.ok(gemini.contains(f.$('#ai-gemini-spark')));
   menu.open = true; gemini.open = true; claude.open = true;
-  f.$('#ai-gemini-model').value = 'pro'; f.$('#ai-gemini-model').dispatchEvent(new f.window.Event('change'));
+  f.$('#ai-gemini-model').value = 'id:pro'; f.$('#ai-gemini-model').dispatchEvent(new f.window.Event('change'));
   gemini.open = false;
   claude.querySelector('button').click();
   assert.ok(claude.contains(f.$('#ai-custom-fields')));
@@ -96,7 +154,7 @@ test('per-site settings collapse independently and configuring another site pres
   const saved = f.messages.at(-1).settings;
   assert.equal(saved.activeSiteId, 'chatgpt');
   assert.equal(saved.builtinOverrides.claude.selectors.send, '#claude-send');
-  assert.equal(saved.geminiModel, 'pro');
+  assert.equal(saved.geminiModel, 'id:pro');
 });
 
 test('builtin send-button calibration saves selectors while site identity and the existing custom sites remain intact', async t => {

@@ -53,6 +53,9 @@ test('configuration roundtrip replaces every supported key and excludes cached p
 });
 
 test('Gemini backup roundtrips levels and migrates legacy booleans without exporting them', () => {
+  const dynamic = exportConfiguration({ [AI_WEB_SETTINGS_KEY]: { activeSiteId: 'gemini', customSites: [], geminiModel: 'id:new-model', geminiThinkingLevel: 'level:7' } });
+  const dynamicRestored = configurationStorage(validateConfiguration(JSON.parse(JSON.stringify(dynamic))))[AI_WEB_SETTINGS_KEY];
+  assert.equal(dynamicRestored.geminiModel, 'id:new-model'); assert.equal(dynamicRestored.geminiThinkingLevel, 'level:7');
   for (const level of ['low', 'medium', 'high']) {
     const backup = exportConfiguration({ [AI_WEB_SETTINGS_KEY]: { activeSiteId: 'gemini', customSites: [], geminiModel: 'argon', geminiThinkingLevel: level } });
     const restored = configurationStorage(validateConfiguration(JSON.parse(JSON.stringify(backup))))[AI_WEB_SETTINGS_KEY];
@@ -67,6 +70,12 @@ test('Gemini backup roundtrips levels and migrates legacy booleans without expor
     backup.configuration.aiWeb.geminiThinkingLevel = 'invalid';
     assert.throws(() => validateConfiguration(backup), /思考等级设置无效/);
   }
+});
+
+test('ChatGPT dynamic model and preset survive configuration export and import', () => {
+  const backup = exportConfiguration({ [AI_WEB_SETTINGS_KEY]: { activeSiteId: 'chatgpt', customSites: [], chatgptModel: 'version:new', chatgptPreset: 'preset:new-thinking:extended' } });
+  const restored = configurationStorage(validateConfiguration(JSON.parse(JSON.stringify(backup))))[AI_WEB_SETTINGS_KEY];
+  assert.equal(restored.chatgptModel, 'version:new'); assert.equal(restored.chatgptPreset, 'preset:new-thinking:extended');
 });
 
 test('malformed and incomplete configuration cannot normalize into an implicit merge', () => {
