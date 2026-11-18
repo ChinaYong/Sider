@@ -228,7 +228,7 @@ function chromeMock({ dnrGranted = true } = {}) {
     },
     windows: { onRemoved: event(), async getLastFocused() { return { id: 9 }; }, async update() {} },
     action: { onClicked: event() },
-    sidePanel: { async setOptions(options) { panelOptions.push(options); }, async setPanelBehavior(options) { behaviors.push(options); }, open(properties) { opened.push(properties); return Promise.resolve(); } },
+    sidePanel: { onOpened: event(), onClosed: event(), async setOptions(options) { panelOptions.push(options); }, async setPanelBehavior(options) { behaviors.push(options); }, open(properties) { opened.push(properties); return Promise.resolve(); } },
     contextMenus: { onClicked: event(), async removeAll() {}, create() {} },
     commands: { onCommand: event() },
     scripting: { async executeScript(options) { injections.push(options); if (control.injectError) throw new Error(control.injectError); return []; }, async getRegisteredContentScripts() { return [...scripts.values()].map(script => structuredClone(script)); }, async registerContentScripts(entries) { if (control.scriptError) throw new Error('Script registration failed'); for (const entry of entries) scripts.set(entry.id, structuredClone(entry)); }, async unregisterContentScripts({ ids }) { for (const id of ids) scripts.delete(id); } },
@@ -352,6 +352,7 @@ test('opening Gemini uses the persisted Spark entry URL', async t => {
 
 test('different AI sites keep distinct compatibility rules and cannot use another site bridge', async t => {
   const f = await aiWorker(t);
+  f.api.sidePanel.onOpened.emit({ tabId: 1, windowId: 9 });
   const chatBridge = 'ai-chat-owner-abcdef0123456789'; const geminiBridge = 'ai-gemini-owner-abcdef0123456789';
   await f.send({ type: 'SIDER_EMBED_REGISTER', bridgeId: chatBridge, siteId: 'chatgpt', tabId: 1, windowId: 9 });
   await f.send({ type: 'SIDER_AI_WEB_SETTINGS_SAVE', settings: { activeSiteId: 'gemini', customSites: [] } });
@@ -448,7 +449,7 @@ test('background isolates page content scripts from state mutation and ChatGPT f
   mock.selections.set(1, raw);
   const added = await send({ type: 'SIDER_SELECTION_CHANGED', source: { url: mock.source.url }, reference: raw }, webpage);
   assert.equal(added.ok, true);
-  assert.equal(added.context.selection.content, '引用内容');
+  assert.equal(added.ignored, true, 'A closed sidebar does not accept passive capture');
   await send({ type: 'SIDER_OPEN_SOURCE_PANEL' }, webpage);
   assert.deepEqual(mock.opened, [{ tabId: 1 }]);
   await send({ type: 'SIDER_TAB_CONTEXT_GET', tabId: 1 }, extension);
@@ -808,6 +809,7 @@ test('worker restart restores live registrations and rules instead of deleting t
 test('embedded enhancement commands are limited and source context is bound to the owning tab', async () => {
   const mock=chromeMock();globalThis.chrome=mock.api;
   await import(`../src/background.js?enhancement-boundary=${Date.now()}`);
+  mock.api.sidePanel.onOpened.emit({ tabId: 1, windowId: 9 });
   const listener=[...mock.api.runtime.onMessage.listeners][0];
   const extension={id:'sider-test',url:mock.api.runtime.getURL('panel.html')};
   const send=(message,sender=extension)=>new Promise(resolve=>listener(message,sender,resolve));

@@ -152,7 +152,9 @@ import { pickSendButton } from './send-picker.js';
     }
   }
 
-  connectBridge();
+  // Standalone AI tabs only need the on-demand draft receiver above. Model
+  // defaults run in separate scripts; reserve persistent bridges for the panel.
+  if (isEmbedded()) connectBridge();
   window.addEventListener('pagehide', () => {
     clearTimeout(reconnect);
     closeHandshake();

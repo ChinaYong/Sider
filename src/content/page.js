@@ -17,6 +17,10 @@ if (isSupportedDocument(document) && !globalThis[INSTALL_KEY]) {
   let toast;
   let toastTimer;
   let fontSettings;
+  let active = false;
+  let activityRevision = 0;
+  let events;
+  let navigationTimer;
 
   function ensureOverlay() {
     if (host?.isConnected) return;
@@ -56,6 +60,7 @@ if (isSupportedDocument(document) && !globalThis[INSTALL_KEY]) {
   }
 
   function publishSelection(force = false) {
+    if (!active) return Promise.resolve();
     const message = { type: 'SIDER_SELECTION_CHANGED', source: source(), reference: cachedSelection };
     // capturedAt is a snapshot timestamp, not a change to the user's selection.
     const signature = JSON.stringify({ ...message, reference: cachedSelection && { ...cachedSelection, capturedAt: undefined } });
@@ -73,7 +78,7 @@ if (isSupportedDocument(document) && !globalThis[INSTALL_KEY]) {
     pendingSelection = null;
     // An SPA can keep the same DOM range after navigating to another page.
     // It must not become a selection of that new page.
-    window.getSelection()?.removeAllRanges();
+    if (active) window.getSelection()?.removeAllRanges();
     return true;
   }
 
@@ -93,7 +98,7 @@ if (isSupportedDocument(document) && !globalThis[INSTALL_KEY]) {
     clearTimeout(captureTimer);
     const { selection, reference } = refreshSelection();
     publishSelection(force);
-    if (!enabled || !reference) {
+    if (!active || !enabled || !reference) {
       if (button) button.style.display = 'none';
       return;
     }
@@ -141,20 +146,41 @@ if (isSupportedDocument(document) && !globalThis[INSTALL_KEY]) {
     }
   }
 
-  document.addEventListener('selectionchange', scheduleCapture);
-  document.addEventListener('mouseup', scheduleCapture, true);
-  document.addEventListener('focusin', scheduleCapture);
-  window.addEventListener('focus', scheduleCapture);
-  window.addEventListener('popstate', scheduleCapture);
-  window.addEventListener('hashchange', scheduleCapture);
-  setInterval(() => { if (sourceURL !== location.href) updateSelection(); }, 250);
-  window.addEventListener('scroll', () => { if (button) button.style.display = 'none'; }, true);
-  window.addEventListener('resize', () => { if (button) button.style.display = 'none'; });
+  function setActive(value) {
+    if (active === value) return;
+    // A selection made while capture was asleep belongs to the current route.
+    // We have no stale cached range to clear when resuming after navigation.
+    if (value) sourceURL = location.href;
+    active = value;
+    if (!active) {
+      events?.abort(); events = null;
+      clearInterval(navigationTimer); clearTimeout(captureTimer); clearTimeout(toastTimer);
+      cachedSelection = null; pendingSelection = null; lastPublished = undefined;
+      fontSettings?.dispose(); fontSettings = null;
+      host?.remove(); host = null; button = null; toast = null;
+      return;
+    }
+    events = new AbortController();
+    const options = { signal: events.signal };
+    document.addEventListener('selectionchange', scheduleCapture, options);
+    document.addEventListener('mouseup', scheduleCapture, { ...options, capture: true });
+    document.addEventListener('focusin', scheduleCapture, options);
+    for (const type of ['focus', 'popstate', 'hashchange']) window.addEventListener(type, scheduleCapture, options);
+    navigationTimer = setInterval(() => { if (sourceURL !== location.href) updateSelection(); }, 250);
+    const hideButton = () => { if (button) button.style.display = 'none'; };
+    window.addEventListener('scroll', hideButton, { ...options, capture: true });
+    window.addEventListener('resize', hideButton, options);
+    updateSelection(true);
+  }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message || typeof message !== 'object') return false;
     try {
-      if (message.type === 'SIDER_PAGE_CAPTURE') {
+      if (message.type === 'SIDER_SOURCE_ACTIVITY_CHANGED') {
+        activityRevision++;
+        setActive(message.active === true);
+        sendResponse({ ok: true, active });
+      } else if (message.type === 'SIDER_PAGE_CAPTURE') {
         updateSelection();
         sendResponse({ ok: true, reference: captureReference(document, message.kind, cachedSelection) });
       } else if (message.type === 'SIDER_PAGE_SELECTION_GET') {
@@ -170,7 +196,7 @@ if (isSupportedDocument(document) && !globalThis[INSTALL_KEY]) {
       } else if (message.type === 'SIDER_ENABLE_SELECTION') {
         explicitlyConfigured = true;
         enabled = message.enabled !== false;
-        updateSelection();
+        if (active) updateSelection();
         sendResponse({ ok: true, enabled });
       } else if (message.type === 'SIDER_HIGHLIGHT') {
         sendResponse({ ok: true, found: highlightReference(document, message.locator) });
@@ -183,12 +209,15 @@ if (isSupportedDocument(document) && !globalThis[INSTALL_KEY]) {
     return false;
   });
 
-  updateSelection(true);
+  const initialActivityRevision = activityRevision;
+  chrome.runtime.sendMessage({ type: 'SIDER_SOURCE_ACTIVITY_GET' }).then(result => {
+    if (result?.ok && initialActivityRevision === activityRevision) setActive(result.active === true);
+  }).catch(() => {});
 
   chrome.storage.local.get('siderEnabledOrigins').then(settings => {
     if (!explicitlyConfigured && Array.isArray(settings.siderEnabledOrigins) && settings.siderEnabledOrigins.includes(location.origin)) {
       enabled = true;
-      updateSelection();
+      if (active) updateSelection();
     }
   }).catch(() => {});
 }

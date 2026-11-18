@@ -3,6 +3,7 @@ const STORAGE_KEY = 'sider.openPanels.v1';
 // Session storage survives service-worker suspension, but not a browser restart.
 export function installSidePanelState(chrome) {
   const states = new Map(), revisions = new Map();
+  const listeners = new Set();
   let writes = Promise.resolve();
   const ready = (chrome.storage.session?.get(STORAGE_KEY) || Promise.resolve({})).then(stored => {
     const saved = stored[STORAGE_KEY];
@@ -25,6 +26,7 @@ export function installSidePanelState(chrome) {
     revisions.set(tabId, revision(tabId) + 1); states.set(tabId, opened);
     persist();
     void chrome.tabs.sendMessage(tabId, { type: 'SIDER_PANEL_STATE_CHANGED', opened }, { frameId: 0 }).catch(() => {});
+    for (const listener of listeners) listener(tabId, opened);
   }
   function commit(tabId, expected, opened) {
     // Native events take priority over a late open/close API result.
@@ -35,6 +37,10 @@ export function installSidePanelState(chrome) {
   chrome.sidePanel.onClosed?.addListener(info => set(info.tabId, false));
   chrome.tabs.onRemoved.addListener(tabId => {
     revisions.set(tabId, revision(tabId) + 1); states.delete(tabId); persist();
+    for (const listener of listeners) listener(tabId, false);
   });
-  return { ready, isOpen, revision, commit };
+  return { ready, isOpen, revision, commit,
+    openTabIds: () => [...states].filter(([, opened]) => opened).map(([tabId]) => tabId),
+    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+  };
 }

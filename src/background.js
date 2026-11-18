@@ -7,13 +7,22 @@ import { GEMINI_CATALOG_KEY, validateGeminiCatalog } from './gemini-catalog.js';
 import { CHATGPT_CATALOG_KEY, validateChatGPTCatalog } from './chatgpt-catalog.js';
 import { UNIFIED_TEMPLATES_KEY, PRESET_IDS, getTemplates, validateTemplates, alwaysIncludeSelection } from './prompt-templates.js';
 import { needsPageVariables, needsTemplateSelection } from './variables.js';
-import { CONFIGURATION_KEYS, ENABLED_ORIGINS_KEY, exportConfiguration, validateConfiguration, configurationStorage } from './configuration.js';
+import { CONFIGURATION_KEYS, exportConfiguration, validateConfiguration, configurationStorage } from './configuration.js';
 import { installLauncherBackground } from './launcher-background.js';
 import { installSidePanelState } from './side-panel-state.js';
+import { installSourceActivity } from './source-activity.js';
 
 const launchers = installLauncherBackground(chrome);
 const panelState = installSidePanelState(chrome);
 const referenceSessions = createReferenceSessions(chrome);
+const sourceActivity = installSourceActivity({ chrome, panels: panelState, references: referenceSessions, activate: tabId => withTab(tabId, async () => {
+  const tab = await chrome.tabs.get(tabId);
+  if (isWebURL(tab.url) && sourceActivity.has(tabId)) {
+    if (liveSources.get(tabId) !== tab.url) await injectPage(tabId);
+    else await chrome.tabs.sendMessage(tabId, { type: 'SIDER_SOURCE_ACTIVITY_CHANGED', active: true }, { frameId: 0 }).catch(() => {});
+    liveSources.set(tabId, tab.url);
+  }
+}) });
 
 const extensionRoot = chrome.runtime.getURL('/');
 const recentSources = new Map();
@@ -23,9 +32,10 @@ const embedRegistrations = new Map();
 const panelPorts = new Map();
 const EMBED_STORAGE_KEY = 'siderEmbedRegistrations';
 const ENHANCEMENT_MESSAGES = new Set(['SIDER_TAB_CONTEXT_GET', 'SIDER_TAB_ATTACHMENT_SET', 'SIDER_TAB_TEMPLATE_SET', 'SIDER_SELECTION_MODE_SET', 'SIDER_TAB_TEMPLATES_CLEAR', 'SIDER_TAB_SELECTION_CLEAR', 'SIDER_CONTEXT_SETTINGS_PATCH', 'SIDER_SOURCE_INFO', 'SIDER_SOURCE_TABS_LIST', 'SIDER_REFERENCE_SOURCE_SET', 'SIDER_TEMPLATE_CONTEXT_GET', 'SIDER_PROMPT_TEMPLATES_GET', 'SIDER_PROMPT_TEMPLATES_SAVE']);
-const CONTENT_MESSAGES = new Set(['SIDER_SELECTION_CHANGED', 'SIDER_OPEN_SOURCE_PANEL']);
+const CONTENT_MESSAGES = new Set(['SIDER_SELECTION_CHANGED', 'SIDER_OPEN_SOURCE_PANEL', 'SIDER_SOURCE_ACTIVITY_GET']);
 const tabOperations = new Map();
 const liveSources = new Map();
+const pageInjections = new Map();
 const sourceVersions = new Map();
 const SITE_KEY = 'siderEnabledOrigins';
 const EMBED_RULE_ID = 731001;
@@ -230,7 +240,11 @@ function openPanelNow(tab) {
   // unrelated tab/storage work that would consume the click's user gesture.
   void configureTabPanel(tab).catch(() => {});
   const revision = panelState.revision(tab.id);
-  return chrome.sidePanel.open({ tabId: tab.id }).then(() => ({ ok: true, opened: panelState.commit(tab.id, revision, true) })).catch(error => {
+  return chrome.sidePanel.open({ tabId: tab.id }).then(() => {
+    const opened = panelState.commit(tab.id, revision, true);
+    if (opened && isWebURL(tab.url)) void sourceActivity.sync().then(() => withTab(tab.id, () => sourceActivity.has(tab.id) ? syncSourceContext(tab.id) : undefined)).catch(() => {});
+    return { ok: true, opened };
+  }).catch(error => {
     chrome.storage.local.set({ siderLastEvent: { ok: false, error: error.message, at: Date.now() } }).catch(() => {});
     return { ok: false, error: error.message || '打开侧栏失败，请重试。' };
   });
@@ -252,10 +266,9 @@ function configureTabPanel(tab) {
 function prepareSource(tab) {
   rememberSource(tab);
   void launchers.inject(tab).catch(() => {});
-  if (Number.isInteger(tab?.id) && isWebURL(tab.url)) {
-    // Install while the source page still has its selection, before sidebar focus.
-    // Explicit open gestures also support AI tabs; passive navigation skips them.
-    void withTab(tab.id, () => syncSourceContext(tab.id)).catch(() => {});
+  if (Number.isInteger(tab?.id) && isWebURL(tab.url) && sourceActivity.has(tab.id)) {
+    // Refresh only a source still needed when this queued task actually runs.
+    void withTab(tab.id, () => sourceActivity.has(tab.id) ? syncSourceContext(tab.id) : undefined).catch(() => {});
   }
 }
 
@@ -294,9 +307,18 @@ async function sourceTab(message = {}, sender = {}, { allowUnexposedURL = false 
   return tab;
 }
 
-async function injectPage(tabId, frameId = 0) {
+function injectPage(tabId, frameId = 0) {
+  const key = `${tabId}:${frameId}`;
+  if (pageInjections.has(key)) return pageInjections.get(key);
+  const pending = performPageInjection(tabId, frameId).finally(() => { pageInjections.delete(key); });
+  pageInjections.set(key, pending);
+  return pending;
+}
+
+async function performPageInjection(tabId, frameId) {
   try {
     await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, files: ['page-content.js'] });
+    await chrome.tabs.sendMessage(tabId, { type: 'SIDER_SOURCE_ACTIVITY_CHANGED', active: sourceActivity.has(tabId) }, { frameId }).catch(() => {});
   } catch (error) {
     if (/cannot access|missing host permission|must request permission|not allowed|权限/i.test(error?.message || '')) throw sourceAccessError();
     throw new Error(`网页采集脚本加载失败：${error?.message || '网页没有响应'}。请刷新来源网页后重试。`);
@@ -526,6 +548,7 @@ async function setReferenceSource(ownerTabId, targetTabId) {
   const previous = await referenceSessions.get(ownerTabId);
   const initial = previous?.context || (await contextResponse(ownerTabId)).context;
   await referenceSessions.switch(ownerTabId, target, initial, templates);
+  await sourceActivity.sync();
   try { return await referenceResponse(ownerTabId); }
   catch (error) {
     if (error.code !== 'REFERENCE_CHANGED') throw error;
@@ -655,6 +678,7 @@ function receiveSelection(message, sender) {
       validateReference(message.reference, sender);
       if (message.reference.kind !== 'selection' || message.reference.url !== tab.url) throw new Error('划词来源与当前网页不符。');
     }
+    if (!await sourceActivity.isActive(sender.tab.id)) return { ok: true, ignored: true };
     const context = await updateTabSelection(tab.id, { url: tab.url, title: tab.title || message.source.title }, message.reference || null);
     return { ok: true, context };
   });
@@ -973,11 +997,13 @@ chrome.runtime.onConnect.addListener((port) => {
 
 async function enhancementRequest(message, sender) {
   await embedInitialization;
+  await panelState.ready;
   const registration = embedRegistration(sender, message.bridgeId);
   const inner = message.request;
   if (!registration || !message.embedded || !ENHANCEMENT_MESSAGES.has(inner?.type)) throw new Error('未登记的内嵌增强请求。');
   const tabId = registration.tabId;
   if (!Number.isInteger(tabId)) throw new Error('侧栏尚未绑定来源标签页，请关闭旧侧栏并在来源网页上重新打开。');
+  if (!panelState.isOpen(tabId)) throw new Error('侧栏已关闭，请重新打开后引用网页。');
   if (inner.type === 'SIDER_SOURCE_TABS_LIST') return sourceTabsList(tabId);
   if (inner.type === 'SIDER_REFERENCE_SOURCE_SET') return setReferenceSource(tabId, inner.tabId);
   if (inner.type === 'SIDER_SOURCE_INFO') return sourceInfo({ tabId, bridgeId: message.bridgeId });
@@ -1054,6 +1080,9 @@ chrome.storage.onChanged.addListener(async (changes, area) => {
   const settingsChanged = area === 'local' && changes[UNIFIED_TEMPLATES_KEY]?.oldValue !== undefined;
   const tabIds = area === 'session' ? new Set(Object.keys(changes).filter(key => key.startsWith(TAB_CONTEXT_PREFIX)).map(key => Number(key.slice(TAB_CONTEXT_PREFIX.length)))) : new Set();
   const referenceChange = area === 'session' && changes[REFERENCE_SESSIONS_KEY];
+  if (!settingsChanged && !tabIds.size && !referenceChange) return;
+  if (referenceChange) void sourceActivity.sync().catch(() => {});
+  if (!chatPorts.size && !panelPorts.size) return;
   const references = referenceChange?.newValue || await referenceSessions.all();
   for (const entry of chatPorts) {
     const owner = embedRegistrations.get(entry.bridgeId);
@@ -1196,20 +1225,14 @@ function changeSite(message, sender, enabled) {
     const stored = await chrome.storage.local.get(SITE_KEY);
     const origins = new Set(Array.isArray(stored[SITE_KEY]) ? stored[SITE_KEY] : []);
     const registered = await chrome.scripting.getRegisteredContentScripts({ ids: [id] });
-    if (enabled) {
-      if (!registered.length) {
-        await chrome.scripting.registerContentScripts([{ id, matches: [pattern], js: ['page-content.js'], runAt: 'document_idle', persistAcrossSessions: true }]);
-      }
-      origins.add(origin);
-    } else {
-      if (registered.length) await chrome.scripting.unregisterContentScripts({ ids: [id] });
-      origins.delete(origin);
-    }
+    if (registered.length) await chrome.scripting.unregisterContentScripts({ ids: [id] });
+    if (enabled) origins.add(origin);
+    else origins.delete(origin);
     await chrome.storage.local.set({ [SITE_KEY]: [...origins] });
     // Apply the choice to tabs already open on this origin, without waiting for navigation.
     const matching = await chrome.tabs.query({ url: pattern });
     await Promise.allSettled(matching.map(async (candidate) => {
-      if (enabled) await injectPage(candidate.id);
+      if (enabled && sourceActivity.has(candidate.id)) await injectPage(candidate.id);
       await chrome.tabs.sendMessage(candidate.id, { type: 'SIDER_ENABLE_SELECTION', enabled }, { frameId: 0 });
     }));
     return { ok: true, enabled, origin };
@@ -1218,15 +1241,12 @@ function changeSite(message, sender, enabled) {
   return operation;
 }
 
-async function syncSourceScripts(origins) {
+async function syncSourceScripts() {
   if (!chrome.scripting.getRegisteredContentScripts) return;
-  const desired = [];
-  for (const origin of origins) if (await chrome.permissions.contains({ origins: [`${origin}/*`] })) desired.push({ id: siteScriptId(origin), matches: [`${origin}/*`], js: ['page-content.js'], runAt: 'document_idle', persistAcrossSessions: true });
+  // Remove legacy automatic injection. Active sources are injected on panel
+  // open/navigation, so unrelated authorized tabs do not load capture code.
   const old = (await chrome.scripting.getRegisteredContentScripts()).filter(script => script.id.startsWith('sider-selection-'));
-  const removed = old.filter(script => !desired.some(next => next.id === script.id));
-  if (removed.length) await chrome.scripting.unregisterContentScripts({ ids: removed.map(script => script.id) });
-  const added = desired.filter(script => !old.some(previous => previous.id === script.id));
-  if (added.length) await chrome.scripting.registerContentScripts(added);
+  if (old.length) await chrome.scripting.unregisterContentScripts({ ids: old.map(script => script.id) });
 }
 
 function importConfiguration(message) {
@@ -1239,11 +1259,11 @@ function importConfiguration(message) {
     const site = selectedAISite(settings);
     if (!await chrome.permissions.contains({ origins: [aiSitePattern(site)] })) throw new Error(`尚未获得 ${site.name} 的网站权限，已有配置保持原样。`);
     try {
-      await syncAIScripts(settings); await syncSourceScripts(backup.configuration.enabledOrigins);
+      await syncAIScripts(settings); await syncSourceScripts();
       // One storage commit replaces every supported setting together.
       await chrome.storage.local.set(configurationStorage(backup)); aiWebSettings = settings;
     } catch (error) {
-      const restored = await Promise.allSettled([syncAIScripts(previous.configuration.aiWeb), syncSourceScripts(previous.configuration.enabledOrigins)]);
+      const restored = await Promise.allSettled([syncAIScripts(previous.configuration.aiWeb), syncSourceScripts()]);
       if (restored.some(result => result.status === 'rejected')) throw new Error(`${error.message}\n已有配置未改动，但网站脚本恢复失败，请在扩展管理页面重新加载 Sider 后重试。`);
       throw error;
     }
@@ -1284,6 +1304,7 @@ async function handleMessage(message, sender) {
     }
     case 'SIDER_ENHANCEMENT_REQUEST': return enhancementRequest(message, sender);
     case 'SIDER_SELECTION_CHANGED': return receiveSelection(message, sender);
+    case 'SIDER_SOURCE_ACTIVITY_GET': return { ok: true, active: await sourceActivity.isActive(sender.tab.id) };
     case 'SIDER_OPEN_SOURCE_PANEL': return changeTabAttachment(sender.tab.id, 'selection', true);
     case 'SIDER_TAB_CONTEXT_GET': return withTab(message.tabId, () => contextResponse(message.tabId, true, { refreshPage: message.refreshPage === true, knownContext: message.knownContext }));
     case 'SIDER_TAB_ATTACHMENT_SET': return changeTabAttachment(message.tabId, message.kind, message.enabled);
@@ -1406,6 +1427,7 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 });
 chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
   if (tab.active && (change.url || change.status === 'complete')) rememberSource(tab);
+  if (!sourceActivity.has(tabId) && !panelState.isOpen(tabId)) return;
   if (change.status === 'loading' || change.url) {
     sourceVersions.set(tabId, (sourceVersions.get(tabId) || 0) + 1);
     liveSources.delete(tabId);
@@ -1465,7 +1487,7 @@ chrome.permissions.onRemoved?.addListener((removed) => {
 
 chrome.permissions.onAdded?.addListener(() => {
   void aiSettingsInitialization.then(syncAIScripts).catch(() => {});
-  void chrome.storage.local.get(ENABLED_ORIGINS_KEY).then(stored => syncSourceScripts(stored[ENABLED_ORIGINS_KEY] || [])).catch(() => {});
+  void syncSourceScripts().catch(() => {});
 });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !changes[AI_WEB_SETTINGS_KEY]) return;
@@ -1485,3 +1507,4 @@ async function configureExistingPanels() {
   await Promise.allSettled(tabs.map(tab => { rememberSource(tab); return configureTabPanel(tab); }));
 }
 void configureExistingPanels().catch(() => {});
+void syncSourceScripts().catch(() => {});

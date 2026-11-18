@@ -154,7 +154,7 @@ test('a top-level ChatGPT tab with an extension referrer neither requests a pare
   assert.equal(f.channels.length, 0);
   assert.equal(f.parentMessages.length, 0);
   assert.equal(f.window.document.querySelector('#sider-enhancement'), null);
-  assert.equal(f.runtimePorts[0].messages.find(message => message.type === 'SIDER_CHAT_READY').embedded, false);
+  assert.equal(f.runtimePorts.length, 0, 'Standalone tabs do not keep a background bridge alive');
 });
 
 test('a nested ChatGPT iframe never targets the extension origin through its ChatGPT parent', async t => {
@@ -162,7 +162,7 @@ test('a nested ChatGPT iframe never targets the extension origin through its Cha
   assert.equal(f.channels.length, 0);
   assert.equal(f.parentMessages.length, 0);
   assert.equal(f.window.document.querySelector('#sider-enhancement'), null);
-  assert.equal(f.runtimePorts[0].messages.find(message => message.type === 'SIDER_CHAT_READY').embedded, false);
+  assert.equal(f.runtimePorts.length, 0, 'Nested frames do not keep a background bridge alive');
 });
 
 test('handshake timeout closes the owned port and ignores a late response', async t => {

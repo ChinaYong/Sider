@@ -49,6 +49,18 @@ try {
   assert.equal(await ungranted.locator('#sider-floating-launcher').count(), 0);
   pass('authorized pages get one launcher; ungranted pages and child frames get none');
   const tab = await worker.evaluate(async url => (await chrome.tabs.query({})).find(tab => tab.url === url), sourceURL);
+  const metrics = () => worker.evaluate(async tabId => (await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, func: () => ({
+    timers: globalThis.captureProbe.timers.size, selections: globalThis.captureProbe.selections, bodies: globalThis.captureProbe.bodies,
+  }) }))[0].result, tab.id);
+  await worker.evaluate(async tabId => chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, func: () => {
+    globalThis.captureProbe = { timers: new Set(), selections: 0, bodies: 0 };
+    const start = setInterval, stop = clearInterval, send = chrome.runtime.sendMessage.bind(chrome.runtime), clone = document.cloneNode.bind(document);
+    globalThis.setInterval = (...args) => { const timer = start(...args); captureProbe.timers.add(timer); return timer; };
+    globalThis.clearInterval = timer => { captureProbe.timers.delete(timer); return stop(timer); };
+    chrome.runtime.sendMessage = (...args) => { if (args[0]?.type === 'SIDER_SELECTION_CHANGED') captureProbe.selections++; return send(...args); };
+    document.cloneNode = (...args) => { captureProbe.bodies++; return clone(...args); };
+  } }), tab.id);
+  assert.deepEqual(await metrics(), { timers: 0, selections: 0, bodies: 0 });
   const panel = await context.newPage(); await panel.goto(`chrome-extension://${id}/panel.html?sourceTab=${tab.id}`);
   const request = data => panel.evaluate(data => chrome.runtime.sendMessage(data), data);
   assert.equal((await request({ type: 'SIDER_TAB_ATTACHMENT_SET', tabId: tab.id, kind: 'selection', enabled: false })).ok, true);
@@ -59,8 +71,29 @@ try {
   assert.equal(snapshot.context.selectionIncluded, false); assert.equal(snapshot.context.attachments.page, null);
   assert.equal(await source.getByRole('textbox', { name: '网页输入框' }).inputValue(), '保留原输入');
   pass('a real mouse click opens the tab-specific native side panel without enabling references or editing page input');
+  await eventually(async () => assert.equal((await metrics()).timers, 1));
+  const beforeBody = (await metrics()).bodies;
+  assert.equal((await request({ type: 'SIDER_TAB_ATTACHMENT_SET', tabId: tab.id, kind: 'page', enabled: true })).ok, true);
+  const afterBody = (await metrics()).bodies;
+  assert.equal(afterBody, beforeBody + 1);
+  for (let index = 0; index < 5; index++) await request({ type: 'SIDER_TAB_CONTEXT_GET', tabId: tab.id });
+  assert.equal((await metrics()).bodies, afterBody);
+  assert.equal((await request({ type: 'SIDER_TAB_CONTEXT_GET', tabId: tab.id, refreshPage: true })).ok, true);
+  assert.equal((await metrics()).bodies, afterBody + 1);
+  await request({ type: 'SIDER_TAB_ATTACHMENT_SET', tabId: tab.id, kind: 'page', enabled: false });
+  pass('body extraction runs once on demand, stays cached across idle reads, and refreshes once when explicitly requested');
   await launcher.click();
   await eventually(async () => assert.equal(await worker.evaluate(() => launcherClosed.at(-1)?.tabId), tab.id));
+  await eventually(async () => assert.equal((await metrics()).timers, 0));
+  const sleeping = await metrics();
+  await source.evaluate(() => {
+    const range = document.createRange(); range.selectNodeContents(document.querySelector('#quote'));
+    getSelection().removeAllRanges(); getSelection().addRange(range);
+    for (let index = 0; index < 20; index++) for (const type of ['selectionchange', 'mouseup', 'focusin']) document.dispatchEvent(new Event(type));
+  });
+  await new Promise(resolve => setTimeout(resolve, 400));
+  assert.deepEqual(await metrics(), sleeping);
+  pass('native closing removes source polling and selection work, with no background body extraction');
   const reopenCount = await worker.evaluate(() => launcherOpened.length);
   await launcher.click();
   await eventually(async () => assert.ok(await worker.evaluate(() => launcherOpened.length) > reopenCount));

@@ -9,7 +9,7 @@ const bundle = await build({
 });
 const script = bundle.outputFiles[0].text;
 
-function environment(t, storedOrigins = [], deferredStorage = false) {
+function environment(t, storedOrigins = [], deferredStorage = false, initiallyActive = true) {
   const dom = new JSDOM('<!doctype html><title>选区页面</title><p>正文前缀，目标文字，正文后缀。</p><input type="password" value="secret">', {
     url: 'https://example.com/page', pretendToBeVisual: true, runScripts: 'outside-only',
   });
@@ -24,7 +24,10 @@ function environment(t, storedOrigins = [], deferredStorage = false) {
   window.chrome = {
     runtime: {
       onMessage: { addListener(listener) { listeners.push(listener); } },
-      async sendMessage(message) { sent.push(message); return { ok: true }; },
+      async sendMessage(message) {
+        if (message.type === 'SIDER_SOURCE_ACTIVITY_GET') return { ok: true, active: initiallyActive };
+        sent.push(message); return { ok: true };
+      },
     },
     storage: { local: { get() { return storage; } } },
   };
@@ -53,7 +56,10 @@ function environment(t, storedOrigins = [], deferredStorage = false) {
   return {
     window, listeners, sent, selectTarget: () => selectText(), selectText, request,
     setFocused: value => { focused = value; },
-    inject: () => window.eval(script),
+    inject: () => {
+      window.eval(script);
+      if (initiallyActive) request({ type: 'SIDER_SOURCE_ACTIVITY_CHANGED', active: true });
+    },
     resolveStorage: () => resolveStorage?.({ siderEnabledOrigins: storedOrigins }),
     button: () => window.document.querySelector('#sider-selection-tools')?.testShadow.querySelector('button'),
   };
@@ -273,4 +279,68 @@ test('same-document navigation clears the old selection and publishes the new pa
   await new Promise(resolve => setTimeout(resolve, 110));
   assert.equal(env.sent.at(-1).reference.url, 'https://example.com/another-page');
   assert.equal(env.sent.at(-1).reference.content, '正文后缀');
+});
+
+test('a closed sidebar leaves an authorized page without passive capture or address polling', async t => {
+  const env = environment(t, ['https://example.com'], false, false);
+  let intervals = 0, styleReads = 0;
+  const setInterval = env.window.setInterval.bind(env.window);
+  env.window.setInterval = (...args) => { intervals++; return setInterval(...args); };
+  const getStyle = env.window.getComputedStyle.bind(env.window);
+  env.window.getComputedStyle = element => { styleReads++; return getStyle(element); };
+  env.inject();
+  await new Promise(resolve => setImmediate(resolve));
+  env.selectTarget();
+  for (const type of ['selectionchange', 'mouseup', 'focusin']) env.window.document.dispatchEvent(new env.window.Event(type));
+  env.window.history.pushState({}, '', '/idle');
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(styleReads, 0);
+  assert.equal(intervals, 0);
+  assert.equal(env.sent.length, 0);
+  assert.equal(env.button(), undefined);
+  // Explicit snapshots remain available without starting passive work.
+  assert.equal(env.request({ type: 'SIDER_PAGE_SELECTION_GET' }).response.ok, true);
+  assert.equal(intervals, 0);
+  assert.equal(env.sent.length, 0);
+});
+
+test('closing cancels pending capture and polling; reopening captures the current selection once', async t => {
+  const env = environment(t, ['https://example.com']);
+  const timers = new Set();
+  const start = env.window.setInterval.bind(env.window), stop = env.window.clearInterval.bind(env.window);
+  env.window.setInterval = (...args) => { const id = start(...args); timers.add(id); return id; };
+  env.window.clearInterval = id => { timers.delete(id); stop(id); };
+  env.inject();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(timers.size, 1);
+  env.selectTarget();
+  env.window.document.dispatchEvent(new env.window.Event('selectionchange'));
+  env.request({ type: 'SIDER_SOURCE_ACTIVITY_CHANGED', active: false });
+  const count = env.sent.length;
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(timers.size, 0);
+  assert.equal(env.sent.length, count);
+  assert.equal(env.button(), undefined);
+  env.selectText('正文后缀');
+  env.window.history.pushState({}, '', '/selected-while-closed');
+  env.request({ type: 'SIDER_SOURCE_ACTIVITY_CHANGED', active: true });
+  assert.equal(timers.size, 1);
+  assert.equal(env.sent.length, count + 1);
+  assert.equal(env.sent.at(-1).reference.content, '正文后缀');
+  assert.equal(env.sent.at(-1).reference.url, 'https://example.com/selected-while-closed');
+  env.request({ type: 'SIDER_SOURCE_ACTIVITY_CHANGED', active: true });
+  assert.equal(timers.size, 1);
+  assert.equal(env.sent.length, count + 1);
+});
+
+test('a late initial activity response cannot restart capture after a close', async t => {
+  const env = environment(t);
+  env.inject();
+  env.request({ type: 'SIDER_SOURCE_ACTIVITY_CHANGED', active: false });
+  const count = env.sent.length;
+  await new Promise(resolve => setImmediate(resolve));
+  env.selectTarget();
+  env.window.document.dispatchEvent(new env.window.Event('selectionchange'));
+  await new Promise(resolve => setTimeout(resolve, 110));
+  assert.equal(env.sent.length, count);
 });

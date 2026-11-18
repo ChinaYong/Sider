@@ -726,7 +726,10 @@ async function fixture() {
   const bridge = tabId => `tab-owner-${tabId}-abcdef0123456789`;
   const frame = tabId => ({ id: model.api.runtime.id, url: `https://chatgpt.com/?sider_bridge=${bridge(tabId)}`, documentId: `frame-${tabId}`, frameId: 1 });
   const wrapped = (tabId, request) => send({ type: 'SIDER_ENHANCEMENT_REQUEST', bridgeId: bridge(tabId), embedded: true, request }, frame(tabId));
-  async function register(tabId) { assert.equal((await send({ type: 'SIDER_EMBED_REGISTER', bridgeId: bridge(tabId), tabId, windowId: 9 })).ok, true); }
+  async function register(tabId) {
+    await model.api.sidePanel.onOpened.emit({ tabId, windowId: 9 });
+    assert.equal((await send({ type: 'SIDER_EMBED_REGISTER', bridgeId: bridge(tabId), tabId, windowId: 9 })).ok, true);
+  }
   async function select(tabId, content) {
     const tab = model.tabs.get(tabId);
     const reference = content === null ? null : { kind: 'selection', title: tab.title, url: tab.url, content, context: `附近段落：${content}` };
@@ -929,7 +932,7 @@ test('withheld source metadata clears previous material and returns needsAccess 
   assert.equal(f.sent.length, sentBefore);
   const repeated = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
   assert.equal(repeated.context.revision, result.context.revision);
-  assert.equal(f.session[`${TAB_CONTEXT_PREFIX}3`].selection.content, '另一个网页的词');
+  assert.equal(f.session[`${TAB_CONTEXT_PREFIX}3`], undefined, 'A tab without an open sidebar does not store passive selections');
 });
 
 test('browser-internal source pages keep plain questions usable while refusing webpage attachments', async () => {
@@ -1177,12 +1180,14 @@ test('default body capture failure persists across reads and supports retry and 
 
 test('default body waits for authorization and preserves cancellation through repeated reads and granting access', async () => {
   const f = await fixture(); await f.register(1); f.local[CONTEXT_SETTINGS_KEY] = { defaultPage: true };
+  await new Promise(resolve => setImmediate(resolve));
+  const sentBefore = f.sent.length;
   const source = structuredClone(f.tabs.get(1)); delete f.tabs.get(1).url; delete f.tabs.get(1).title;
   const first = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
   assert.equal(first.needsAccess, true); assert.equal(first.context.pageRequested, true); assert.match(first.context.pageError, /访问权限/);
   assert.ok(composeContextPrompt('问题', first.context, first.settings).errors.length);
   const repeated = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
-  assert.equal(repeated.context.revision, first.context.revision); assert.equal(f.sent.length, 0);
+  assert.equal(repeated.context.revision, first.context.revision); assert.equal(f.sent.length, sentBefore);
   await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: false });
   const cancelled = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
   assert.deepEqual(composeContextPrompt('普通问题', cancelled.context).errors, []);
@@ -1292,12 +1297,43 @@ test('selection shortcut and webpage button always attach even when the preset c
 test('unsupported pages ignore automatic defaults and keep ordinary questions usable', async () => {
   for (const url of ['chrome://settings/']) {
     const f = await fixture(); await f.register(1);
+    await new Promise(resolve => setImmediate(resolve));
+    const sentBefore = f.sent.length;
     f.local[CONTEXT_SETTINGS_KEY] = { defaultSelection: true, defaultUrl: true, defaultPage: true };
     f.tabs.get(1).url = url;
     const result = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
     assert.equal(result.ok, true); assert.equal(result.context.pageRequested, false);
     assert.equal(composeContextPrompt('普通问题', result.context, result.settings).text, '普通问题');
     assert.deepEqual(composeContextPrompt('普通问题', result.context, result.settings).errors, []);
-    assert.equal(f.sent.length, 0);
+    assert.equal(f.sent.length, sentBefore);
   }
+});
+
+test('closed sidebars ignore passive navigation and selection without starting capture', async () => {
+  const f = await fixture();
+  const tab = f.tabs.get(1);
+  await f.api.tabs.onUpdated.emit(1, { status: 'loading', url: tab.url }, structuredClone(tab));
+  await f.api.tabs.onUpdated.emit(1, { status: 'complete' }, structuredClone(tab));
+  const result = await f.select(1, '不应后台采集的词');
+  assert.equal(result.ignored, true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.injections.some(item => item.files.includes('page-content.js')), false);
+  assert.equal(f.session[TAB_CONTEXT_PREFIX + 1], undefined);
+  assert.equal(f.sent.some(item => ['SIDER_PAGE_CAPTURE', 'SIDER_PAGE_SELECTION_GET'].includes(item.message.type)), false);
+});
+
+test('closing the sidebar stops source activity and rejects late body refresh requests', async () => {
+  const f = await fixture(); await f.register(1);
+  await f.wrapped(1, { type: 'SIDER_TAB_ATTACHMENT_SET', kind: 'page', enabled: true });
+  const captures = () => f.sent.filter(item => item.message.type === 'SIDER_PAGE_CAPTURE').length;
+  const before = captures();
+  for (let index = 0; index < 5; index++) await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET' });
+  assert.equal(captures(), before, 'Ordinary sidebar refreshes reuse the body snapshot');
+  await f.api.sidePanel.onClosed.emit({ tabId: 1, windowId: 9 });
+  assert.equal((await f.select(1, '关闭后的选区')).ignored, true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(f.sent.some(item => item.tabId === 1 && item.message.type === 'SIDER_SOURCE_ACTIVITY_CHANGED' && item.message.active === false));
+  const late = await f.wrapped(1, { type: 'SIDER_TAB_CONTEXT_GET', refreshPage: true });
+  assert.equal(late.ok, false); assert.match(late.error, /侧栏已关闭/);
+  assert.equal(captures(), before);
 });
